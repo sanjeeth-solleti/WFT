@@ -21,6 +21,10 @@ else:
     BUNDLE_DIR: Path = Path(__file__).resolve().parent.parent
     BASE_DIR: Path = Path(__file__).resolve().parent.parent
 
+# Store app metadata in %LOCALAPPDATA%\WFT so WFT's own directory stays 100% clean
+APP_DATA_DIR: Path = Path(os.environ.get("LOCALAPPDATA", str(BASE_DIR))) / "WFT"
+APP_DATA_DIR.mkdir(parents=True, exist_ok=True)
+
 def get_runtime_log_dir() -> Path:
     """Standardized enterprise log directory where WFT.exe presents (BASE_DIR / logs)."""
     logs_dir = BASE_DIR / "logs"
@@ -64,19 +68,22 @@ def load_root_env() -> None:
 load_root_env()
 
 # Tool Paths Configuration Storage File
-TOOL_PATHS_FILE: Path = (BASE_DIR / "cases" / "tool_paths.json").resolve()
+TOOL_PATHS_FILE: Path = (APP_DATA_DIR / "tool_paths.json").resolve()
+LEGACY_TOOL_PATHS_FILE: Path = (BASE_DIR / "cases" / "tool_paths.json").resolve()
 _CUSTOM_TOOL_PATHS: Dict[str, str] = {}
 
 
 def _load_persisted_tool_paths() -> None:
     global _CUSTOM_TOOL_PATHS
-    if TOOL_PATHS_FILE.exists():
-        try:
-            with open(TOOL_PATHS_FILE, "r", encoding="utf-8") as f:
-                _CUSTOM_TOOL_PATHS = json.load(f)
-        except Exception as ex:
-            print(f"[config] Warning loading tool_paths.json: {ex}")
-            _CUSTOM_TOOL_PATHS = {}
+    for fp in [TOOL_PATHS_FILE, LEGACY_TOOL_PATHS_FILE]:
+        if fp.exists():
+            try:
+                with open(fp, "r", encoding="utf-8") as f:
+                    _CUSTOM_TOOL_PATHS = json.load(f)
+                    return
+            except Exception as ex:
+                print(f"[config] Warning loading tool_paths.json from {fp}: {ex}")
+                _CUSTOM_TOOL_PATHS = {}
 
 
 _load_persisted_tool_paths()
@@ -112,7 +119,8 @@ RULES_DIR: Path = (BUNDLE_DIR / "rules").resolve() if (BUNDLE_DIR / "rules").exi
 DEFAULT_YARA_FILE: Path = (RULES_DIR / "default_malware.yar").resolve()
 
 # Custom case locations storage file (persisted in BASE_DIR so CASES_DIR is never forcibly created)
-CUSTOM_LOCATIONS_FILE: Path = (BASE_DIR / "custom_locations.json").resolve()
+CUSTOM_LOCATIONS_FILE: Path = (APP_DATA_DIR / "custom_locations.json").resolve()
+LEGACY_LOCATIONS_FILE: Path = (BASE_DIR / "custom_locations.json").resolve()
 _CUSTOM_CASE_DIRS: Dict[str, str] = {}
 
 
@@ -177,14 +185,15 @@ def register_case_dir(case_id: str, custom_dir: Union[str, Path]) -> Path:
     Ensures that if the user selects a custom folder, no redundant phantom case folder
     is created in the WFT cases directory.
     """
+    global _CUSTOM_CASE_DIRS
     import shutil
+    clean_cid = (case_id or "").strip()
+
     _load_custom_case_dirs()
     resolved_p = Path(custom_dir).resolve()
     resolved_p.mkdir(parents=True, exist_ok=True)
 
-    clean_cid = (case_id or "").strip()
     _CUSTOM_CASE_DIRS[clean_cid] = str(resolved_p)
-
     folder_name = resolved_p.name
     if folder_name.lower() != clean_cid.lower():
         _CUSTOM_CASE_DIRS[folder_name] = str(resolved_p)
@@ -195,6 +204,12 @@ def register_case_dir(case_id: str, custom_dir: Union[str, Path]) -> Path:
             json.dump(_CUSTOM_CASE_DIRS, f, indent=2)
     except Exception as ex:
         print(f"[config] Warning saving custom_locations.json: {ex}")
+
+    try:
+        from backend.db.engine import DuckDBManager
+        DuckDBManager.close_connection(clean_cid)
+    except Exception:
+        pass
 
     # Remove any redundant empty phantom folder in CASES_DIR for this case
     try:
@@ -807,7 +822,7 @@ def reload_config_in_memory() -> None:
     CASES_DIR = _get_path_setting("WFT_CASES_DIR", "cases")
     RULES_DIR = _get_path_setting("WFT_RULES_DIR", "rules")
     DEFAULT_YARA_FILE = (RULES_DIR / "default_malware.yar").resolve()
-    CUSTOM_LOCATIONS_FILE = (BASE_DIR / "custom_locations.json").resolve()
+    CUSTOM_LOCATIONS_FILE = (APP_DATA_DIR / "custom_locations.json").resolve()
     API_HOST = os.getenv("WFT_HOST", "127.0.0.1")
     API_PORT = int(os.getenv("WFT_PORT", "8765"))
 

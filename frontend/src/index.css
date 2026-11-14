@@ -319,3 +319,95 @@ body {
   background-color: #334155;
   border-color: #475569;
 }
+
+
+/* === WFT CLASSIC ENTERPRISE GRID & RESIZABLE PANES === */
+.ag-theme-alpine,
+.ag-theme-alpine-dark,
+.ag-theme-quartz,
+.ag-theme-quartz-dark {
+  --ag-cell-horizontal-border: 1px solid #cbd5e1 !important;
+  --ag-row-border-style: solid !important;
+  --ag-row-border-width: 1px !important;
+  --ag-row-border-color: #cbd5e1 !important;
+  --ag-borders: solid 1px !important;
+  --ag-border-color: #cbd5e1 !important;
+  font-family: 'JetBrains Mono', 'Consolas', monospace !important;
+  font-size: 12px !important;
+}
+
+.dark .ag-theme-alpine,
+.dark .ag-theme-alpine-dark,
+.dark .ag-theme-quartz,
+.dark .ag-theme-quartz-dark,
+[data-theme="dark"] .ag-root-wrapper {
+  --ag-background-color: #0f172a !important;
+  --ag-odd-row-background-color: #131c31 !important;
+  --ag-header-background-color: #1e293b !important;
+  --ag-foreground-color: #f8fafc !important;
+  --ag-header-foreground-color: #38bdf8 !important;
+  --ag-cell-horizontal-border: 1px solid #334155 !important;
+  --ag-row-border-color: #334155 !important;
+  --ag-border-color: #334155 !important;
+  --ag-row-hover-color: rgba(56, 189, 248, 0.12) !important;
+  --ag-selected-row-background-color: rgba(2, 132, 199, 0.28) !important;
+}
+
+.light .ag-root-wrapper,
+:root:not(.dark) .ag-root-wrapper {
+  --ag-background-color: #ffffff !important;
+  --ag-odd-row-background-color: #f8fafc !important;
+  --ag-header-background-color: #f1f5f9 !important;
+  --ag-foreground-color: #0f172a !important;
+  --ag-header-foreground-color: #0369a1 !important;
+  --ag-cell-horizontal-border: 1px solid #cbd5e1 !important;
+  --ag-row-border-color: #cbd5e1 !important;
+  --ag-border-color: #cbd5e1 !important;
+  --ag-row-hover-color: #e0f2fe !important;
+  --ag-selected-row-background-color: #bae6fd !important;
+}
+
+/* Force visible vertical & horizontal borders on ALL cells and headers */
+.ag-cell {
+  border-right: 1px solid var(--ag-row-border-color, #334155) !important;
+  border-bottom: 1px solid var(--ag-row-border-color, #334155) !important;
+  white-space: pre-wrap !important;
+  word-break: break-all !important;
+  overflow-wrap: anywhere !important;
+  text-overflow: clip !important;
+  line-height: 1.45 !important;
+  padding-top: 6px !important;
+  padding-bottom: 6px !important;
+  user-select: text !important;
+}
+
+.ag-header-cell {
+  border-right: 1px solid var(--ag-row-border-color, #334155) !important;
+  border-bottom: 2px solid var(--ag-row-border-color, #334155) !important;
+  font-weight: 700 !important;
+}
+
+/* Standard HTML tables inside EventLogs / Malware / Timeline */
+table th, table td {
+  border: 1px solid #334155;
+  white-space: pre-wrap !important;
+  word-break: break-word !important;
+  text-overflow: clip !important;
+  overflow: visible !important;
+}
+:root:not(.dark) table th, :root:not(.dark) table td {
+  border-color: #cbd5e1;
+}
+
+/* Resizable Pane Drag Handle */
+.wft-splitter-v {
+  width: 5px;
+  cursor: col-resize;
+  background: transparent;
+  transition: background 0.15s ease;
+  z-index: 30;
+  flex-shrink: 0;
+}
+.wft-splitter-v:hover, .wft-splitter-v:active {
+  background: #0284c7 !important;
+}

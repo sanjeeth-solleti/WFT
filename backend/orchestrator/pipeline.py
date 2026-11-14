@@ -138,6 +138,9 @@ class ProcessingPipeline:
 
     def __init__(self, case_id: str, target_dir: Optional[Union[str, Path]] = None) -> None:
         self.case_id = case_id
+        if target_dir and str(target_dir).strip():
+            from backend.config import register_case_dir
+            register_case_dir(case_id, str(target_dir).strip())
         if target_dir:
             register_case_dir(case_id, target_dir)
         self.case_dir = get_case_dir(case_id)
