@@ -529,7 +529,6 @@ export const App: React.FC = () => {
               currentCaseId={currentCaseId}
               onCaseCreated={(newCid) => {
                 handleCaseCreated(newCid);
-                setIsNewCaseModalOpen(false);
               }}
               isOpenAsModal={true}
               onCloseModal={() => setIsNewCaseModalOpen(false)}

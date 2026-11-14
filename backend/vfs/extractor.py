@@ -213,7 +213,7 @@ class EvidenceExtractor:
             p_str = str(p_obj)
             if not p_obj.exists():
                 return
-            os.chmod(p_str, stat.S_IWRITE | stat.S_IREAD)
+            os.chmod(p_str, 0o700 if p_obj.is_dir() else 0o600)
             if sys.platform == "win32":
                 try:
                     # 0x80 = FILE_ATTRIBUTE_NORMAL

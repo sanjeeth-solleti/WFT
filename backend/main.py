@@ -404,7 +404,7 @@ def delete_case(case_id: str) -> Dict[str, Any]:
     # Onerror callback for shutil.rmtree that clears read-only/system attributes before retrying
     def _handle_remove_readonly(func, path, exc_info):
         try:
-            os.chmod(path, stat.S_IWRITE | stat.S_IREAD)
+            os.chmod(path, 0o700 if Path(path).is_dir() else 0o600)
             if sys.platform == "win32":
                 try:
                     ctypes.windll.kernel32.SetFileAttributesW(str(path), 0x80)
@@ -427,7 +427,7 @@ def delete_case(case_id: str) -> Dict[str, Any]:
                     for d in dirs:
                         try:
                             d_p = os.path.join(root, d)
-                            os.chmod(d_p, stat.S_IWRITE | stat.S_IREAD)
+                            os.chmod(d_p, 0o700)
                             if sys.platform == "win32":
                                 ctypes.windll.kernel32.SetFileAttributesW(d_p, 0x80)
                         except Exception:
@@ -435,12 +435,12 @@ def delete_case(case_id: str) -> Dict[str, Any]:
                     for f in files:
                         try:
                             f_p = os.path.join(root, f)
-                            os.chmod(f_p, stat.S_IWRITE | stat.S_IREAD)
+                            os.chmod(f_p, 0o600)
                             if sys.platform == "win32":
                                 ctypes.windll.kernel32.SetFileAttributesW(f_p, 0x80)
                         except Exception:
                             pass
-                os.chmod(c_dir, stat.S_IWRITE | stat.S_IREAD)
+                os.chmod(c_dir, 0o700)
                 if sys.platform == "win32":
                     ctypes.windll.kernel32.SetFileAttributesW(str(c_dir), 0x80)
             except Exception:
@@ -494,6 +494,7 @@ def safe_background_pipeline(
     The ProcessingPipeline already logs errors to processing_logs and the case audit trail.
     """
     try:
+        init_case_db(case_id)
         run_pipeline(
             case_id=case_id,
             source_type=source_type,
@@ -589,12 +590,27 @@ def process_case(
             }
         _running_cases.add(case_id)
 
-    init_case_db(case_id)
+    # Moved init_case_db into background worker to avoid ~9s POST block
 
     # Clean source_path: strip quotes and whitespace
     clean_source = request.source_path.strip().strip('"').strip("'").strip() if request.source_path else None
 
     if request.run_async:
+        # Pre-seed running job state so polling returns RUNNING immediately
+        try:
+            from backend.orchestrator.pipeline import PIPELINE_JOBS
+            PIPELINE_JOBS[case_id] = {
+                "case_id": case_id,
+                "status": "RUNNING",
+                "progress": 5,
+                "current_step": "Initializing case environment...",
+                "error": None,
+                "start_time": time.time(),
+                "end_time": None,
+            }
+        except Exception:
+            pass
+
         # Launch in FastAPI background task
         background_tasks.add_task(
             safe_background_pipeline,
@@ -615,6 +631,7 @@ def process_case(
     else:
         try:
             # Synchronous execution mode (Milestone 2 testing)
+            init_case_db(case_id)
             pipeline_result = run_pipeline(
                 case_id=case_id,
                 source_type=request.source_type,

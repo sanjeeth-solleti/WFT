@@ -323,6 +323,7 @@ export const ProcessWizard: React.FC<ProcessWizardProps> = ({
   // Status Polling for Step 4
   useEffect(() => {
     if (!activeCaseId) return;
+    setStatusData((prev) => (prev && prev.case_id !== activeCaseId ? null : prev));
 
     let isMounted = true;
     const fetchStatus = async () => {
@@ -437,6 +438,7 @@ export const ProcessWizard: React.FC<ProcessWizardProps> = ({
       };
 
       const res = await apiClient.processCase(req);
+      setStatusData(null);
       setActiveCaseId(res.case_id);
       setCurrentStep(4);
       onCaseCreated(res.case_id);
@@ -1153,7 +1155,7 @@ export const ProcessWizard: React.FC<ProcessWizardProps> = ({
                   <div className="flex items-center gap-2">
                     <button
                       type="button"
-                      id="wft-auto-start-process-btn" onClick={handleStartProcessing}
+                      id="wft-step4-process-btn" onClick={handleStartProcessing}
                       disabled={isSubmitting || statusData?.status === 'RUNNING'}
                       className="px-3.5 py-1.5 bg-[#0284c7] hover:bg-[#0369a1] disabled:opacity-50 text-white rounded text-xs font-semibold flex items-center gap-1.5 border border-[#0369a1] shadow-2xs transition-colors cursor-pointer"
                     >
