@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>⚡</text></svg>" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Windows Forensic Toolkit (WFT) | Process & Examine</title>
+  </head>
+  <body class="bg-[#f1f5f9] dark:bg-[#0f172a] text-[#0f172a] dark:text-[#f8fafc] antialiased overflow-hidden select-none">
+    <div id="root" class="h-screen w-screen flex flex-col"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  <script>
+// Global Interactive Column Resizer for all HTML <table> and CSS Grid headers in WFT
+(function enableUniversalColumnResizing() {
+  const initResizableTables = () => {
+    document.querySelectorAll('table').forEach((table) => {
+      if (table.dataset.resizableAttached === 'true') return;
+      table.dataset.resizableAttached = 'true';
+      table.style.tableLayout = 'fixed';
+
+      const headers = table.querySelectorAll('th');
+      headers.forEach((th) => {
+        th.style.position = 'relative';
+        th.style.overflow = 'hidden';
+        th.style.textOverflow = 'ellipsis';
+        th.style.whiteSpace = 'nowrap';
+
+        const resizer = document.createElement('div');
+        resizer.style.position = 'absolute';
+        resizer.style.top = '0';
+        resizer.style.right = '0';
+        resizer.style.width = '6px';
+        resizer.style.height = '100%';
+        resizer.style.cursor = 'col-resize';
+        resizer.style.userSelect = 'none';
+        resizer.style.zIndex = '20';
+        resizer.title = 'Drag to resize column (Double-click to auto-fit)';
+
+        resizer.addEventListener('mouseenter', () => {
+          resizer.style.backgroundColor = 'rgba(2, 132, 199, 0.5)';
+        });
+        resizer.addEventListener('mouseleave', () => {
+          resizer.style.backgroundColor = 'transparent';
+        });
+
+        let startX = 0;
+        let startWidth = 0;
+
+        const onMouseMove = (e) => {
+          const newWidth = Math.max(55, startWidth + (e.pageX - startX));
+          th.style.width = newWidth + 'px';
+          th.style.minWidth = newWidth + 'px';
+          th.style.maxWidth = newWidth + 'px';
+        };
+
+        const onMouseUp = () => {
+          document.removeEventListener('mousemove', onMouseMove);
+          document.removeEventListener('mouseup', onMouseUp);
+          document.body.style.cursor = '';
+        };
+
+        resizer.addEventListener('mousedown', (e) => {
+          e.stopPropagation();
+          e.preventDefault();
+          startX = e.pageX;
+          startWidth = th.offsetWidth;
+          document.body.style.cursor = 'col-resize';
+          document.addEventListener('mousemove', onMouseMove);
+          document.addEventListener('mouseup', onMouseUp);
+        });
+
+        resizer.addEventListener('dblclick', (e) => {
+          e.stopPropagation();
+          th.style.width = 'auto';
+          th.style.minWidth = '120px';
+          th.style.maxWidth = 'none';
+        });
+
+        th.appendChild(resizer);
+      });
+    });
+  };
+
+  setInterval(initResizableTables, 600);
+  window.addEventListener('DOMContentLoaded', initResizableTables);
+})();
+</script>
+</body>
+</html>

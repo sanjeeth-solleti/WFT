@@ -1,0 +1,216 @@
+[
+  {
+    "id": "auth_logons",
+    "name": "Authentication & Logons",
+    "description": "Successful logons (4624), failed logons (4625), explicit credentials (4648), special privileges (4672) & logoffs (4634, 4647)",
+    "badge_color": "emerald",
+    "event_ids": [4624, 4625, 4634, 4647, 4648, 4672],
+    "channels": ["Security"],
+    "keywords": ["Logon", "Special Logon", "Explicit Credentials"],
+    "sql": "EventId IN (4624, 4625, 4634, 4647, 4648, 4672)"
+  },
+  {
+    "id": "brute_force_spray",
+    "name": "Brute Force & Password Spraying",
+    "description": "Failed logons (4625), account lockouts (4740), Kerberos pre-auth failures (4771), and NTLM validation failures (4776)",
+    "badge_color": "red",
+    "event_ids": [4625, 4740, 4771, 4776],
+    "channels": ["Security"],
+    "keywords": ["Failed", "Lockout", "0xC000006A", "0xC0000234", "0x18"],
+    "sql": "EventId IN (4625, 4740, 4771) OR (EventId = 4776 AND COALESCE(PayloadData1, '') NOT ILIKE '%0x0%')"
+  },
+  {
+    "id": "kerberos_pth_attacks",
+    "name": "Kerberoasting, AS-REP & Pass-the-Hash",
+    "description": "Kerberos TGT/TGS ticket requests (4768, 4769), RC4 downgrade (0x17), and Pass-the-Hash NTLM Type 3/9 logons (4624)",
+    "badge_color": "amber",
+    "event_ids": [4768, 4769, 4770, 4771, 4624],
+    "channels": ["Security"],
+    "keywords": ["0x17", "RC4", "NtLmSsp", "LogonType 9", "NewCredentials"],
+    "sql": "EventId IN (4768, 4769, 4770, 4771) OR (EventId = 4624 AND (COALESCE(PayloadData1, '') ILIKE '%NtLmSsp%' OR COALESCE(PayloadData1, '') ILIKE '%LogonType%9%'))"
+  },
+  {
+    "id": "rdp_remote_access",
+    "name": "RDP & Remote Desktop Sessions",
+    "description": "RDP auth (1149), LocalSessionManager session logon/reconnect/disconnect (21-25), RDP client (1024, 1102), and Type 10 logons (4624, 4778, 4779)",
+    "badge_color": "indigo",
+    "event_ids": [1149, 21, 22, 23, 24, 25, 39, 40, 4778, 4779, 1024],
+    "channels": [
+      "Microsoft-Windows-TerminalServices-RemoteConnectionManager/Operational",
+      "Microsoft-Windows-TerminalServices-LocalSessionManager/Operational",
+      "Microsoft-Windows-TerminalServices-RDPClient/Operational",
+      "Security"
+    ],
+    "keywords": ["TerminalServices", "RemoteConnectionManager", "LogonType 10", "RDP"],
+    "sql": "EventId IN (1149, 21, 22, 23, 24, 25, 39, 40, 4778, 4779, 1024) OR Channel ILIKE '%TerminalServices%' OR (EventId = 4624 AND COALESCE(PayloadData1, '') ILIKE '%10%')"
+  },
+  {
+    "id": "smb_winrm_lateral",
+    "name": "SMB, Admin Shares & WinRM Lateral Movement",
+    "description": "Network share access (5140, 5145), outbound explicit creds (4648), SMBClient connectivity (30803), and WinRM WSMan shells (6, 91, 168)",
+    "badge_color": "purple",
+    "event_ids": [5140, 5145, 5142, 4648, 30803, 6, 91, 168],
+    "channels": [
+      "Security",
+      "Microsoft-Windows-SMBClient/Connectivity",
+      "Microsoft-Windows-SMBServer/Security",
+      "Microsoft-Windows-WinRM/Operational"
+    ],
+    "keywords": ["ADMIN$", "C$", "IPC$", "WinRM", "SMB"],
+    "sql": "EventId IN (5140, 5145, 5142, 30803) OR Channel ILIKE '%WinRM%' OR Channel ILIKE '%SMB%'"
+  },
+  {
+    "id": "powershell_script",
+    "name": "PowerShell & Script Host Execution",
+    "description": "ScriptBlock logging (4104), module/pipeline execution (4103), engine start/stop (400, 403), and command execution (800)",
+    "badge_color": "amber",
+    "event_ids": [4103, 4104, 4100, 400, 403, 600, 800],
+    "channels": [
+      "Microsoft-Windows-PowerShell/Operational",
+      "Windows PowerShell"
+    ],
+    "keywords": ["ScriptBlock", "HostApplication", "EncodedCommand", "DownloadString"],
+    "sql": "EventId IN (4103, 4104, 4100, 400, 403, 600, 800) OR Channel ILIKE '%PowerShell%'"
+  },
+  {
+    "id": "process_execution_sysmon",
+    "name": "Process Creation & Sysmon Telemetry",
+    "description": "Security process creation (4688), process exit (4689), and Sysmon process/network/DLL/injection events (1, 3, 7, 8, 10, 11, 22)",
+    "badge_color": "rose",
+    "event_ids": [4688, 4689, 1, 3, 7, 8, 10, 11, 12, 13, 22],
+    "channels": [
+      "Security",
+      "Microsoft-Windows-Sysmon/Operational"
+    ],
+    "keywords": ["Process Create", "CommandLine", "CreateRemoteThread", "DnsQuery"],
+    "sql": "EventId IN (4688, 4689) OR Channel ILIKE '%Sysmon%'"
+  },
+  {
+    "id": "persistence_services_tasks",
+    "name": "Services & Scheduled Task Persistence",
+    "description": "New service installed (7045, 4697), service state/type change (7036, 7040), and Scheduled Task creation/update (4698-4702, 106, 140, 200)",
+    "badge_color": "purple",
+    "event_ids": [7045, 7036, 7040, 7034, 4697, 4698, 4699, 4700, 4701, 4702, 106, 140, 141, 200, 201],
+    "channels": [
+      "System",
+      "Security",
+      "Microsoft-Windows-TaskScheduler/Operational"
+    ],
+    "keywords": ["Service Installed", "TaskRegistered", "ActionStarted", "PSEXESVC"],
+    "sql": "EventId IN (7045, 7036, 7040, 7034, 4697, 4698, 4699, 4700, 4701, 4702, 106, 140, 141, 200, 201)"
+  },
+  {
+    "id": "wmi_persistence",
+    "name": "WMI Persistence & Remote WMI Activity",
+    "description": "WMI EventFilter, EventConsumer, and FilterToConsumerBinding creation (19, 20, 21, 5861) and WMI execution fail/activity (5857, 5858, 5860)",
+    "badge_color": "rose",
+    "event_ids": [19, 20, 21, 5857, 5858, 5859, 5860, 5861],
+    "channels": [
+      "Microsoft-Windows-WMI-Activity/Operational"
+    ],
+    "keywords": ["FilterToConsumerBinding", "CommandLineEventConsumer", "ActiveScriptEventConsumer", "WMI"],
+    "sql": "EventId IN (19, 20, 21, 5857, 5858, 5859, 5860, 5861) OR Channel ILIKE '%WMI-Activity%'"
+  },
+  {
+    "id": "bits_staging_downloads",
+    "name": "BITS Jobs & Background Payload Transfers",
+    "description": "Background Intelligent Transfer Service job creation (3), transfer completion (4), and remote URL downloads (59, 60, 61)",
+    "badge_color": "cyan",
+    "event_ids": [3, 4, 59, 60, 61, 16403],
+    "channels": [
+      "Microsoft-Windows-Bits-Client/Operational"
+    ],
+    "keywords": ["Bits-Client", "transfer", "http"],
+    "sql": "Channel ILIKE '%Bits-Client%' OR (EventId IN (3, 4, 59, 60, 61, 16403) AND Provider ILIKE '%Bits%')"
+  },
+  {
+    "id": "account_management",
+    "name": "Account Management & Privilege Escalation",
+    "description": "User created/enabled/deleted (4720, 4722, 4726), password reset (4724), and admin group modifications (4728, 4732, 4756, 4738)",
+    "badge_color": "teal",
+    "event_ids": [4720, 4722, 4723, 4724, 4725, 4726, 4728, 4732, 4733, 4738, 4756],
+    "channels": ["Security"],
+    "keywords": ["User Account", "Administrators", "Group Membership", "Password"],
+    "sql": "EventId IN (4720, 4722, 4723, 4724, 4725, 4726, 4728, 4732, 4733, 4738, 4756)"
+  },
+  {
+    "id": "antivirus_defender",
+    "name": "Windows Defender & Endpoint Detections",
+    "description": "Malware detected (1006, 1116), remediation action (1007, 1117), failure (1118, 1119), real-time protection disabled (5001), exclusions added (5007)",
+    "badge_color": "blue",
+    "event_ids": [1006, 1007, 1008, 1116, 1117, 1118, 1119, 2000, 5001, 5004, 5007, 5013],
+    "channels": [
+      "Microsoft-Windows-Windows Defender/Operational"
+    ],
+    "keywords": ["Defender", "Malware", "Exclusion", "DisableRealtimeMonitoring"],
+    "sql": "EventId IN (1006, 1007, 1008, 1116, 1117, 1118, 1119, 2000, 5001, 5004, 5007, 5013) OR Channel ILIKE '%Defender%'"
+  },
+  {
+    "id": "log_clearing_antiforensics",
+    "name": "Log Clearing, Clock Tampering & Anti-Forensics",
+    "description": "Security audit log cleared (1102), System log cleared (104), audit policy modified (4719), and system time changed (4616)",
+    "badge_color": "red",
+    "event_ids": [1102, 104, 4719, 4616, 1100],
+    "channels": ["Security", "System"],
+    "keywords": ["Log Cleared", "Audit Policy", "System Time"],
+    "sql": "EventId IN (1102, 104, 4719, 4616, 1100)"
+  },
+  {
+    "id": "ransomware_vss_backup",
+    "name": "Shadow Copy (VSS) & Ransomware Indicators",
+    "description": "Volume Shadow Copy service stop/errors (7036, 8222) and VSS backup deletion events",
+    "badge_color": "red",
+    "event_ids": [8222, 8193, 8194, 7036, 524],
+    "channels": ["Application", "System", "Microsoft-Windows-Backup"],
+    "keywords": ["VSS", "Shadow Copy", "vssadmin"],
+    "sql": "EventId IN (8222, 8193, 8194, 524) OR COALESCE(Provider, '') ILIKE '%VSS%' OR COALESCE(PayloadData1, '') ILIKE '%Shadow Copy%'"
+  },
+  {
+    "id": "firewall_network_tamper",
+    "name": "Windows Firewall Rules & Port Openings",
+    "description": "Firewall rule added/modified/deleted (2004, 2005, 2006, 2033, 4946, 4947, 4948) and firewall profile disabled (2003)",
+    "badge_color": "amber",
+    "event_ids": [2003, 2004, 2005, 2006, 2033, 4946, 4947, 4948],
+    "channels": [
+      "Microsoft-Windows-Windows Firewall With Advanced Security/Firewall",
+      "Security"
+    ],
+    "keywords": ["Firewall", "Rule Added", "Inbound"],
+    "sql": "Channel ILIKE '%Firewall%' OR EventId IN (4946, 4947, 4948)"
+  },
+  {
+    "id": "usb_external_storage",
+    "name": "USB & External Storage Mounts",
+    "description": "Partition table/volume mount events (1006), PnP device installation (400, 410), and DriverFrameworks USB insertion (2003-2102)",
+    "badge_color": "cyan",
+    "event_ids": [1006, 400, 410, 2003, 2004, 2005, 2010, 2100, 2102, 6416],
+    "channels": [
+      "Microsoft-Windows-Partition/Diagnostic",
+      "Microsoft-Windows-Kernel-PnP/Configuration",
+      "Microsoft-Windows-DriverFrameworks-UserMode/Operational",
+      "Security"
+    ],
+    "keywords": ["USBSTOR", "Partition", "DriverFrameworks", "Removable"],
+    "sql": "EventId IN (1006, 2003, 2004, 2005, 2010, 2100, 2102, 6416) OR Channel ILIKE '%Partition%' OR Channel ILIKE '%DriverFrameworks%' OR Channel ILIKE '%Kernel-PnP%'"
+  },
+  {
+    "id": "app_crashes_exploits",
+    "name": "Application Crashes, WER & MSI Installations",
+    "description": "Application crashes/faults (1000), Windows Error Reporting (1001), and MsiInstaller package installations (1033, 1040, 11707, 11724)",
+    "badge_color": "blue",
+    "event_ids": [1000, 1001, 1033, 1034, 1040, 11707, 11724],
+    "channels": ["Application"],
+    "keywords": ["Application Error", "MsiInstaller", "Faulting application"],
+    "sql": "EventId IN (1000, 1001, 1033, 1034, 1040, 11707, 11724) AND Channel = 'Application'"
+  },
+  {
+    "id": "system_boot_shutdown",
+    "name": "System Boot, Shutdown & Unexpected Reboots",
+    "description": "Kernel boot (12), clean shutdown (13), dirty shutdown (41), user-initiated restart/shutdown (1074), and EventLog service start/stop (6005, 6006, 6008)",
+    "badge_color": "teal",
+    "event_ids": [12, 13, 41, 1074, 6005, 6006, 6008, 6009],
+    "channels": ["System"],
+    "keywords": ["Kernel-General", "Kernel-Power", "EventLog", "USER32"],
+    "sql": "EventId IN (12, 13, 41, 1074, 6005, 6006, 6008, 6009) AND Channel = 'System'"
+  }
+]

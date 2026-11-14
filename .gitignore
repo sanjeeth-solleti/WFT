@@ -1,0 +1,84 @@
+# Windows Forensic Toolkit (WFT / WFT) - Git Ignore Configuration
+
+# Environment and sensitive keys
+.env
+.env.local
+.wft_setup_done
+
+# Databases and Case Stores
+cases/
+*.duckdb
+*.duckdb.wal
+custom_locations.json
+
+# Logs and Audit Trails
+*.log
+logs/
+wft_launcher.log
+processing.log
+
+# Batch Scripts (Excluded per project specification - standalone executable provided)
+*.bat
+start_wft.bat
+
+# Tests
+/tests/
+!backend/tests/
+
+# Large External Third-Party Binary Tool Suites (Installed via Setup-WFTTools.ps1)
+EZTools/
+RegRipper*/
+tools/
+!tools/wft_picker.exe
+stinger32.exe
+stinger64.exe
+SQLite.Interop.dll
+hindsight-main/
+hindsight-temp/
+
+# Build and Distribution Artifacts
+build/
+dist/
+!frontend/dist/
+!frontend/dist/**
+*.spec
+*.exe
+!WFT.exe
+!tools/wft_picker.exe
+
+# Node Modules
+node_modules/
+frontend/node_modules/
+
+# Python Cache & Testing Artifacts
+__pycache__/
+backend/**/__pycache__/
+tests/**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Scratch & Temporary Verification Files (Root Level)
+Gemini.md
+populate_master_demo.py
+scratch/
+scratch_accuracy.md
+Errors/
+/test_*.txt
+test_*.txt
+/test_*.png
+/test_*.py
+/verify_*.py
+/apply_*.py
+/find_*.py
+/capture_*.py
+/patch_*.py
+!backend/tests/*.py
+
+# OS-Specific Files
+Thumbs.db
+Desktop.ini
+.DS_Store

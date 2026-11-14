@@ -1,0 +1,321 @@
+@import 'ag-grid-community/styles/ag-grid.css';
+@import 'ag-grid-community/styles/ag-theme-quartz.css';
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ==========================================================================
+   Root Theme Variables & Base Application Defaults
+   ========================================================================== */
+:root {
+  --wft-bg: #f1f5f9;
+  --wft-panel: #ffffff;
+  --wft-border: #cbd5e1;
+  --wft-text: #0f172a;
+  --wft-muted: #475569;
+  --wft-blue: #0284c7;
+  --wft-blue-hover: #0369a1;
+  --wft-row-selected: #bae6fd;
+}
+
+.dark {
+  --wft-bg: #0f172a;
+  --wft-panel: #1e293b;
+  --wft-border: #334155;
+  --wft-text: #f8fafc;
+  --wft-muted: #94a3b8;
+  --wft-blue: #38bdf8;
+  --wft-blue-hover: #0284c7;
+  --wft-row-selected: #0c4a6e;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  font-family: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  background-color: var(--wft-bg);
+  color: var(--wft-text);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Custom scrollbars for clean forensic enterprise UI */
+::-webkit-scrollbar {
+  width: 7px;
+  height: 7px;
+}
+
+::-webkit-scrollbar-track {
+  background: #f1f5f9;
+}
+
+.dark ::-webkit-scrollbar-track {
+  background: #0f172a;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 2px;
+}
+
+.dark ::-webkit-scrollbar-thumb {
+  background: #334155;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
+.dark ::-webkit-scrollbar-thumb:hover {
+  background: #475569;
+}
+
+/* ==========================================================================
+   Enterprise WFT AG Grid Theme
+   Light / Default: 40px Row Height, 44px Header Height, #bae6fd row highlight
+   Dark: #0f172a background, #1e293b panels, #334155 borders, #0c4a6e selected
+   ========================================================================== */
+
+.ag-theme-quartz {
+  --ag-background-color: #ffffff;
+  --ag-header-background-color: #f1f5f9;
+  --ag-odd-row-background-color: #ffffff;
+  --ag-row-hover-color: #f8fafc;
+  --ag-selected-row-background-color: #bae6fd;
+  --ag-border-color: #cbd5e1;
+  --ag-header-foreground-color: #0f172a;
+  --ag-foreground-color: #0f172a;
+  --ag-font-size: 12.5px;
+  --ag-grid-size: 5px;
+  --ag-row-height: 38px;
+  --ag-header-height: 40px;
+  --ag-cell-horizontal-padding: 14px;
+  --ag-checkbox-checked-color: #0284c7;
+  --ag-range-selection-border-color: #0284c7;
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+}
+
+.ag-theme-quartz .ag-header-cell-label {
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-size: 11px;
+  color: #334155;
+}
+
+.ag-theme-quartz .ag-row {
+  border-bottom: 1px solid #cbd5e1;
+}
+
+.ag-theme-quartz .ag-row-selected {
+  background-color: #bae6fd !important;
+  border-left: 3px solid #0284c7 !important;
+  color: #0f172a !important;
+}
+
+.ag-theme-quartz .ag-cell {
+  line-height: 38px;
+  display: flex;
+  align-items: center;
+  overflow: hidden !important;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ag-theme-quartz .ag-react-container,
+.ag-react-container {
+  width: 100% !important;
+  max-width: 100% !important;
+  min-width: 0 !important;
+  height: 100%;
+  overflow: hidden !important;
+  display: flex;
+  align-items: center;
+}
+
+.ag-theme-quartz .ag-cell-value {
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  white-space: nowrap !important;
+  min-width: 0 !important;
+}
+
+/* Dark Mode AG Grid Variant */
+.dark .ag-theme-quartz,
+.ag-theme-quartz-dark {
+  --ag-background-color: #1e293b;
+  --ag-header-background-color: #0f172a;
+  --ag-odd-row-background-color: #1e293b;
+  --ag-row-hover-color: #334155;
+  --ag-selected-row-background-color: #0c4a6e;
+  --ag-border-color: #334155;
+  --ag-header-foreground-color: #f8fafc;
+  --ag-foreground-color: #f8fafc;
+  --ag-font-size: 12.5px;
+  --ag-grid-size: 5px;
+  --ag-row-height: 38px;
+  --ag-header-height: 40px;
+  --ag-cell-horizontal-padding: 14px;
+  --ag-checkbox-checked-color: #38bdf8;
+  --ag-range-selection-border-color: #38bdf8;
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+}
+
+.dark .ag-theme-quartz .ag-header-cell-label,
+.ag-theme-quartz-dark .ag-header-cell-label {
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-size: 11px;
+  color: #cbd5e1;
+}
+
+.dark .ag-theme-quartz .ag-row,
+.ag-theme-quartz-dark .ag-row {
+  border-bottom: 1px solid #334155;
+}
+
+.dark .ag-theme-quartz .ag-row-selected,
+.ag-theme-quartz-dark .ag-row-selected {
+  background-color: #0c4a6e !important;
+  border-left: 3px solid #38bdf8 !important;
+  color: #f8fafc !important;
+}
+
+.dark .ag-theme-quartz .ag-cell,
+.ag-theme-quartz-dark .ag-cell {
+  line-height: 38px;
+  display: flex;
+  align-items: center;
+  overflow: hidden !important;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dark .ag-theme-quartz .ag-react-container,
+.ag-theme-quartz-dark .ag-react-container {
+  width: 100% !important;
+  max-width: 100% !important;
+  min-width: 0 !important;
+  height: 100%;
+  overflow: hidden !important;
+  display: flex;
+  align-items: center;
+}
+
+.dark .ag-theme-quartz .ag-cell-value,
+.ag-theme-quartz-dark .ag-cell-value {
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  white-space: nowrap !important;
+  min-width: 0 !important;
+}
+
+/* ==========================================================================
+   Enterprise Status Badges: Dense, Flat, High-Contrast
+   SUCCESS (#166534), ERROR (#991b1b), RUNNING (#1e40af)
+   ========================================================================== */
+.badge-status-success {
+  background-color: #dcfce7;
+  color: #166534;
+  border: 1px solid #86efac;
+  font-weight: 700;
+  text-transform: uppercase;
+  font-family: monospace;
+}
+
+.dark .badge-status-success {
+  background-color: #14532d;
+  color: #4ade80;
+  border: 1px solid #166534;
+}
+
+.badge-status-error {
+  background-color: #fee2e2;
+  color: #991b1b;
+  border: 1px solid #fca5a5;
+  font-weight: 700;
+  text-transform: uppercase;
+  font-family: monospace;
+}
+
+.dark .badge-status-error {
+  background-color: #7f1d1d;
+  color: #f87171;
+  border: 1px solid #991b1b;
+}
+
+.badge-status-running {
+  background-color: #dbeafe;
+  color: #1e40af;
+  border: 1px solid #93c5fd;
+  font-weight: 700;
+  text-transform: uppercase;
+  font-family: monospace;
+}
+
+.dark .badge-status-running {
+  background-color: #1e3a8a;
+  color: #60a5fa;
+  border: 1px solid #1e40af;
+}
+
+.badge-status-neutral {
+  background-color: #f1f5f9;
+  color: #475569;
+  border: 1px solid #cbd5e1;
+  font-weight: 700;
+  text-transform: uppercase;
+  font-family: monospace;
+}
+
+.dark .badge-status-neutral {
+  background-color: #1e293b;
+  color: #94a3b8;
+  border: 1px solid #334155;
+}
+
+/* ==========================================================================
+   Enterprise Toolbar Buttons & Inputs
+   ========================================================================== */
+.wft-btn-primary {
+  background-color: #0284c7;
+  color: #ffffff;
+  border: 1px solid #0369a1;
+  font-weight: 600;
+  transition: all 0.15s ease-in-out;
+}
+.wft-btn-primary:hover {
+  background-color: #0369a1;
+}
+
+.dark .wft-btn-primary {
+  background-color: #0284c7;
+  border-color: #38bdf8;
+}
+.dark .wft-btn-primary:hover {
+  background-color: #0369a1;
+}
+
+.wft-btn-secondary {
+  background-color: #ffffff;
+  color: #0f172a;
+  border: 1px solid #cbd5e1;
+  font-weight: 500;
+  transition: all 0.15s ease-in-out;
+}
+.wft-btn-secondary:hover {
+  background-color: #f8fafc;
+  border-color: #94a3b8;
+}
+
+.dark .wft-btn-secondary {
+  background-color: #1e293b;
+  color: #f8fafc;
+  border-color: #334155;
+}
+.dark .wft-btn-secondary:hover {
+  background-color: #334155;
+  border-color: #475569;
+}
