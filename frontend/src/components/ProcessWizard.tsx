@@ -1138,7 +1138,7 @@ export const ProcessWizard: React.FC<ProcessWizardProps> = ({
                   <div className="flex items-center gap-2">
                     <button
                       type="button"
-                      onClick={handleStartProcessing}
+                      id="wft-auto-start-process-btn" onClick={handleStartProcessing}
                       disabled={isSubmitting || statusData?.status === 'RUNNING'}
                       className="px-3.5 py-1.5 bg-[#0284c7] hover:bg-[#0369a1] disabled:opacity-50 text-white rounded text-xs font-semibold flex items-center gap-1.5 border border-[#0369a1] shadow-2xs transition-colors cursor-pointer"
                     >
@@ -1344,7 +1344,7 @@ export const ProcessWizard: React.FC<ProcessWizardProps> = ({
               {currentStep === 3 && (
                 <button
                   type="button"
-                  onClick={handleStartProcessing}
+                  id="wft-auto-start-process-btn" onClick={handleStartProcessing}
                   disabled={isSubmitting || statusData?.status === 'RUNNING'}
                   className="px-5 py-2 rounded bg-[#0284c7] hover:bg-[#0369a1] disabled:opacity-50 text-white text-xs font-bold flex items-center gap-2 border border-[#0369a1] shadow-2xs transition-colors cursor-pointer"
                 >

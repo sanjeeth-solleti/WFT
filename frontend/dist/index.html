@@ -87,5 +87,66 @@
   window.addEventListener('DOMContentLoaded', initResizableTables);
 })();
 </script>
+
+<script>
+// 1. One-Click "Process Evidence": When user clicks "Process Evidence" / "Step 4" in Process Wizard, auto-trigger the start button immediately!
+(function enableOneClickProcessAndCleanUI() {
+  document.addEventListener('click', function(e) {
+    const btn = e.target.closest('button');
+    if (!btn) return;
+    const txt = (btn.innerText || '').trim();
+    if (txt.includes('Next: Process Evidence') || txt === 'Process Evidence' || (txt.includes('Step 4') && txt.includes('Process'))) {
+      setTimeout(function() {
+        const allBtns = Array.from(document.querySelectorAll('button'));
+        const startBtn = allBtns.find(b => {
+          const t = (b.innerText || '').trim();
+          return (t.includes('Start Processing') || t.includes('Start Forensic Processing') || t.includes('Launch Processing') || t.includes('Begin Processing')) && !b.disabled;
+        });
+        if (startBtn) {
+          startBtn.click();
+        }
+      }, 80);
+    }
+  }, true);
+
+  // 2. Hide any lingering "Console / Logs" button in dropdowns & attach universal column drag-resizing
+  setInterval(function() {
+    document.querySelectorAll('button, a, div[role="menuitem"]').forEach(function(el) {
+      if ((el.innerText || '').trim() === 'Console / Logs') {
+        el.style.display = 'none';
+      }
+    });
+
+    // Attach live image thumbnails if any card in Thumbnail view has a placeholder icon
+    document.querySelectorAll('table').forEach(function(table) {
+      if (table.dataset.resizableAttached === 'true') return;
+      table.dataset.resizableAttached = 'true';
+      table.style.tableLayout = 'fixed';
+      table.querySelectorAll('th').forEach(function(th) {
+        th.style.position = 'relative';
+        const resizer = document.createElement('div');
+        resizer.style.cssText = 'position:absolute;top:0;right:0;width:6px;height:100%;cursor:col-resize;user-select:none;z-index:20;';
+        let startX = 0, startW = 0;
+        const onMove = (ev) => {
+          const w = Math.max(55, startW + (ev.pageX - startX));
+          th.style.width = w + 'px'; th.style.minWidth = w + 'px'; th.style.maxWidth = w + 'px';
+        };
+        const onUp = () => {
+          document.removeEventListener('mousemove', onMove);
+          document.removeEventListener('mouseup', onUp);
+        };
+        resizer.addEventListener('mousedown', (ev) => {
+          ev.stopPropagation(); ev.preventDefault();
+          startX = ev.pageX; startW = th.offsetWidth;
+          document.addEventListener('mousemove', onMove);
+          document.addEventListener('mouseup', onUp);
+        });
+        th.appendChild(resizer);
+      });
+    });
+  }, 400);
+})();
+</script>
+
 </body>
 </html>

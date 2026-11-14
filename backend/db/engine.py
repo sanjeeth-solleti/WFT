@@ -403,29 +403,62 @@ def get_distinct_column_values(
         return [{"value": r[0], "count": r[1]} for r in rows]
 
 
-def scan_keywords_for_case(case_id: str, conn: Optional[duckdb.DuckDBPyConnection] = None) -> None:
+def scan_keywords_for_case(case_id: str, conn: Optional[duckdb.DuckDBPyConnection] = None) -> int:
     """
-    Scan all populated base forensic tables in case.duckdb against case_keywords,
-    computing exact hit_count per keyword and updating case_keywords and artifact_registry.
+    Scans all populated forensic tables in case.duckdb against case_keywords,
+    populating both `parsed_keyword_hits` (with exact matching evidence rows and snippets)
+    and updating `case_keywords.hit_count` and `view_keyword_hits`.
     """
     with DuckDBManager.get_lock(case_id):
         if conn is None:
             conn = DuckDBManager.get_connection(case_id, read_only=False)
         cursor = conn.cursor()
 
-        tables = [
+        tables = {
             r[0] for r in cursor.execute(
                 "SELECT table_name FROM information_schema.tables WHERE table_schema = 'main';"
             ).fetchall()
-        ]
+        }
         if "case_keywords" not in tables:
-            return
+            return 0
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS parsed_keyword_hits (
+                _row_id BIGINT,
+                keyword_id VARCHAR,
+                keyword VARCHAR,
+                is_regex BOOLEAN,
+                artifact_name VARCHAR,
+                source_table VARCHAR,
+                source_row_id BIGINT,
+                matched_snippet VARCHAR,
+                source_file VARCHAR,
+                detected_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+        cursor.execute("DELETE FROM parsed_keyword_hits;")
+
+        cursor.execute("""
+            CREATE OR REPLACE VIEW view_keyword_hits AS
+            SELECT
+                _row_id,
+                keyword,
+                artifact_name,
+                source_table,
+                source_row_id,
+                matched_snippet,
+                source_file,
+                detected_at
+            FROM parsed_keyword_hits
+            ORDER BY _row_id ASC;
+        """)
 
         keywords_rows = cursor.execute(
             "SELECT keyword_id, keyword, is_regex FROM case_keywords;"
         ).fetchall()
         if not keywords_rows:
-            return
+            cursor.execute("UPDATE artifact_registry SET row_count = 0 WHERE artifact_id = 'refined_keyword_hits';")
+            return 0
 
         all_base_tables = [
             r[0] for r in cursor.execute(
@@ -433,16 +466,24 @@ def scan_keywords_for_case(case_id: str, conn: Optional[duckdb.DuckDBPyConnectio
             ).fetchall()
         ]
         excluded = {
-            "case_keywords", "bookmarks", "processing_logs", "artifact_registry",
-            "file_enrichment", "master_timeline", "entity_connections"
+            "case_keywords", "parsed_keyword_hits", "bookmarks", "processing_logs",
+            "artifact_registry", "file_enrichment", "master_timeline", "entity_connections"
         }
         candidate_tables = [t for t in all_base_tables if t not in excluded and not t.startswith("view_")]
 
+        # Map table_name -> friendly display_name
+        disp_map = {}
+        if "artifact_registry" in tables:
+            for t_n, d_n in cursor.execute("SELECT table_name, display_name FROM artifact_registry;").fetchall():
+                disp_map[t_n] = d_n
+
+        hit_row_id = 1
         for kw_id, kw_text, is_regex in keywords_rows:
-            kw_str = str(kw_text).strip()
+            kw_str = str(kw_text or "").strip()
             if not kw_str:
                 continue
-            total_hits = 0
+            total_kw_hits = 0
+
             for tbl in candidate_tables:
                 try:
                     row_cnt = cursor.execute(f'SELECT COUNT(*) FROM "{tbl}";').fetchone()[0]
@@ -451,32 +492,78 @@ def scan_keywords_for_case(case_id: str, conn: Optional[duckdb.DuckDBPyConnectio
                     col_names = [r[0] for r in cursor.execute(f'DESCRIBE "{tbl}";').fetchall()]
                     if not col_names:
                         continue
-                    col_concat = "CONCAT_WS(' ', " + ", ".join([f'CAST("{c}" AS VARCHAR)' for c in col_names]) + ")"
+
+                    id_col = "_row_id" if "_row_id" in col_names else col_names[0]
+                    src_col = next((c for c in col_names if c.lower() in ("source_file", "sourcefile", "sourcefilename", "file_path")), None)
+                    src_expr = f'CAST("{src_col}" AS VARCHAR)' if src_col else "''"
+                    text_cols = [c for c in col_names if c != "_row_id"]
+                    if not text_cols:
+                        continue
+                    col_concat = "CONCAT_WS(' | ', " + ", ".join([f'COALESCE(CAST("{c}" AS VARCHAR), '')' for c in text_cols[:12]]) + ")"
+
                     if is_regex:
-                        hit_cnt = cursor.execute(
-                            f'SELECT COUNT(*) FROM "{tbl}" WHERE regexp_matches({col_concat}, ?);',
-                            [kw_str],
-                        ).fetchone()[0]
+                        where_sql = f"regexp_matches({col_concat}, ?)"
+                        param = kw_str
                     else:
-                        hit_cnt = cursor.execute(
-                            f'SELECT COUNT(*) FROM "{tbl}" WHERE {col_concat} ILIKE ?;',
-                            [f"%{kw_str}%"],
-                        ).fetchone()[0]
-                    total_hits += hit_cnt
+                        where_sql = f"{col_concat} ILIKE ?"
+                        param = f"%{kw_str}%"
+
+                    cnt_this_tbl = cursor.execute(
+                        f'SELECT COUNT(*) FROM "{tbl}" WHERE {where_sql};',
+                        [param],
+                    ).fetchone()[0]
+                    total_kw_hits += int(cnt_this_tbl or 0)
+
+                    if cnt_this_tbl > 0:
+                        matched_samples = cursor.execute(
+                            f'SELECT TRY_CAST("{id_col}" AS BIGINT), SUBSTR({col_concat}, 1, 300), {src_expr} '
+                            f'FROM "{tbl}" WHERE {where_sql} LIMIT 250;',
+                            [param],
+                        ).fetchall()
+                        art_label = disp_map.get(tbl, tbl.replace("parsed_", "").replace("raw_", "").replace("_", " ").title())
+                        batch = []
+                        for s_rid, snippet, s_file in matched_samples:
+                            batch.append([
+                                hit_row_id,
+                                str(kw_id),
+                                kw_str,
+                                bool(is_regex),
+                                art_label,
+                                tbl,
+                                int(s_rid or 0),
+                                str(snippet or ""),
+                                str(s_file or ""),
+                            ])
+                            hit_row_id += 1
+                        cursor.executemany(
+                            """
+                            INSERT INTO parsed_keyword_hits (
+                                _row_id, keyword_id, keyword, is_regex, artifact_name,
+                                source_table, source_row_id, matched_snippet, source_file
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+                            """,
+                            batch,
+                        )
                 except Exception as scan_err:
                     print(f"[KeywordScanner] Notice scanning {tbl} for '{kw_str}': {scan_err}")
 
             cursor.execute(
                 "UPDATE case_keywords SET hit_count = ? WHERE keyword_id = ?;",
-                [total_hits, kw_id],
+                [total_kw_hits, kw_id],
             )
 
+        total_hit_rows = cursor.execute("SELECT COUNT(*) FROM parsed_keyword_hits;").fetchone()[0]
         if "artifact_registry" in tables:
-            try:
-                kw_hit_cnt = cursor.execute("SELECT COUNT(*) FROM case_keywords WHERE hit_count > 0;").fetchone()[0]
-                cursor.execute(
-                    "UPDATE artifact_registry SET row_count = ? WHERE artifact_id = 'refined_keyword_hits';",
-                    [kw_hit_cnt],
-                )
-            except Exception as reg_err:
-                print(f"[KeywordScanner] Notice updating registry: {reg_err}")
+            cursor.execute(
+                """
+                INSERT INTO artifact_registry (
+                    artifact_id, category, display_name, table_name, source_tool, row_count, last_updated
+                ) VALUES ('refined_keyword_hits', 'REFINED RESULTS', 'Keyword Hits', 'view_keyword_hits', 'KeywordScanner', ?, CURRENT_TIMESTAMP)
+                ON CONFLICT (artifact_id) DO UPDATE SET
+                    row_count = EXCLUDED.row_count,
+                    table_name = 'view_keyword_hits',
+                    last_updated = CURRENT_TIMESTAMP;
+                """,
+                [total_hit_rows],
+            )
+        return int(total_hit_rows)

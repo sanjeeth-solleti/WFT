@@ -710,8 +710,20 @@ class MediaParser(BaseParser):
 
         self._log(f"Found {len(candidate_media)} media files and {len(candidate_thumbcache)} thumbcache databases.")
 
-        # 1. Parse Image & Video metadata
+        # 1. Parse Image & Video metadata (Deduplicated by SHA-256, preferring UserFiles over Enrichment copies)
+        candidate_media = sorted(candidate_media, key=lambda p: (1 if "enrichment" in str(p).lower() else 0, str(p)))
+        seen_media_hashes = set()
         for mf in candidate_media:
+            try:
+                if "carved_thumbnails" in str(mf).lower():
+                    continue
+                mf_hash = compute_sha256(mf)
+                dedup_key = (mf.name.lower(), mf_hash)
+                if dedup_key in seen_media_hashes:
+                    continue
+                seen_media_hashes.add(dedup_key)
+            except Exception:
+                continue
             try:
                 if mf.suffix.lower() in self.IMAGE_EXTS:
                     rec = self._parse_image_exif(mf)

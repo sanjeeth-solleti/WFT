@@ -469,7 +469,7 @@ def safe_background_pipeline(
     case_id: str,
     source_type: str,
     source_path: Optional[str] = None,
-    enable_yara: bool = False,
+    enable_yara: bool = True,
     enable_ocr: bool = False,
     keywords: Optional[List[str]] = None,
     target_dir: Optional[str] = None,
