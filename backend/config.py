@@ -183,12 +183,14 @@ def _load_custom_case_dirs() -> None:
     _CUSTOM_CASE_DIRS = pruned_cases
 
     # 4. Auto-discover cases in common sibling/external directories (e.g., Desktop/cases)
+    # Never override an existing registered case
     desktop_cases = Path.home() / "Desktop" / "cases"
     if desktop_cases.is_dir():
         for candidate in desktop_cases.iterdir():
             if candidate.is_dir() and (candidate / "case.duckdb").exists():
                 cid = candidate.name
-                if cid not in _CUSTOM_CASE_DIRS:
+                cid_l = cid.lower()
+                if not any(k.strip().lower() in (cid_l, cid_l.replace("_", " ")) for k in _CUSTOM_CASE_DIRS):
                     _CUSTOM_CASE_DIRS[cid] = str(candidate.resolve())
                     changed = True
 
@@ -352,10 +354,9 @@ def get_case_dir(case_id: str, create_if_missing: bool = False) -> Path:
                 custom_dir.mkdir(parents=True, exist_ok=True)
             return custom_dir
 
-    # 4. Check external desktop cases
+    # 4. Check external desktop cases (read-only fallback, never overwrites registered custom locations)
     desktop_case = Path.home() / "Desktop" / "cases" / cid_clean
     if (desktop_case / "case.duckdb").exists():
-        register_case_dir(cid_clean, desktop_case)
         return desktop_case.resolve()
 
     # 5. Default fallback to CASES_DIR / case_id (external directory, never BASE_DIR / "cases")

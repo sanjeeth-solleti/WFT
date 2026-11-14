@@ -230,7 +230,14 @@ def list_cases() -> Dict[str, Any]:
     seen_cids = set()
     entries_to_check: List[tuple] = []
 
-    # Check both CASES_DIR and any legacy tool-folder cases
+    # 1. Registered custom cases take precedence as authoritative single source of truth
+    for cid, cpath_str in get_registered_custom_cases().items():
+        cp = Path(cpath_str)
+        if cp.is_dir() and (cp / "case.duckdb").exists():
+            entries_to_check.append((cid, cp))
+            seen_cids.add(cid.lower())
+
+    # 2. Check CASES_DIR and any legacy tool-folder cases ONLY for unregistered cases
     check_dirs = [CASES_DIR]
     tool_cases = (BASE_DIR / "cases").resolve()
     if tool_cases.exists() and tool_cases != CASES_DIR:
@@ -241,25 +248,8 @@ def list_cases() -> Dict[str, Any]:
             for case_entry in sorted(c_dir.iterdir()):
                 if case_entry.is_dir():
                     cid = case_entry.name
-                    custom_cases = get_registered_custom_cases()
-
-                    # If this case has a registered custom location outside c_dir:
-                    custom_match = None
-                    for reg_id, reg_path in custom_cases.items():
-                        if reg_id.strip().lower() == cid.strip().lower():
-                            custom_match = Path(reg_path).resolve()
-                            break
-
-                    if custom_match and custom_match != case_entry.resolve():
-                        # The folder is an unneeded phantom duplicate
-                        if not (case_entry / "case.duckdb").exists():
-                            try:
-                                import shutil
-                                shutil.rmtree(case_entry, ignore_errors=True)
-                            except Exception:
-                                pass
+                    if cid.lower() in seen_cids:
                         continue
-
                     if (case_entry / "case.duckdb").exists():
                         entries_to_check.append((cid, case_entry))
                         seen_cids.add(cid.lower())
@@ -271,13 +261,6 @@ def list_cases() -> Dict[str, Any]:
                         tool_cases.rmdir()
                 except Exception:
                     pass
-
-    for cid, cpath_str in get_registered_custom_cases().items():
-        if cid.lower() not in seen_cids:
-            cp = Path(cpath_str)
-            if cp.is_dir() and (cp / "case.duckdb").exists():
-                entries_to_check.append((cid, cp))
-                seen_cids.add(cid.lower())
 
     for cid, case_entry in entries_to_check:
         db_path = case_entry / "case.duckdb"
@@ -494,6 +477,8 @@ def safe_background_pipeline(
     The ProcessingPipeline already logs errors to processing_logs and the case audit trail.
     """
     try:
+        if target_dir and str(target_dir).strip():
+            register_case_dir(case_id, str(target_dir).strip())
         init_case_db(case_id)
         run_pipeline(
             case_id=case_id,

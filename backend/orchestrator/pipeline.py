@@ -140,11 +140,14 @@ class ProcessingPipeline:
         self.case_id = case_id
         if target_dir and str(target_dir).strip():
             from backend.config import register_case_dir
-            register_case_dir(case_id, str(target_dir).strip())
-        self.case_dir = get_case_dir(case_id)
-        self.staging_dir = get_case_staging_dir(case_id)
-        self.csv_out_dir = get_case_csv_out_dir(case_id)
-        self.log_file = get_case_log_file(case_id)
+            self.case_dir = register_case_dir(case_id, str(target_dir).strip())
+        else:
+            self.case_dir = get_case_dir(case_id)
+        self.staging_dir = (self.case_dir / "staging").resolve()
+        self.staging_dir.mkdir(parents=True, exist_ok=True)
+        self.csv_out_dir = (self.case_dir / "csv_out").resolve()
+        self.csv_out_dir.mkdir(parents=True, exist_ok=True)
+        self.log_file = (self.case_dir / "processing.log").resolve()
 
         # Initialize core components
         self.extractor = EvidenceExtractor(
