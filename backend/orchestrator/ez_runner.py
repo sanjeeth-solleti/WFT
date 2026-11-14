@@ -59,6 +59,18 @@ class EZToolRunner:
         # Initialize DuckDB case schema
         init_case_db(self.case_id)
 
+    def _log(self, message: str, level: str = "INFO") -> None:
+        """Helper to append timestamped logs to the case processing log file and console."""
+        from datetime import datetime, timezone
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        print(f"[{ts}] [{level}] [EZToolRunner] {message}")
+        try:
+            if getattr(self, "log_file", None):
+                with open(self.log_file, "a", encoding="utf-8") as f:
+                    f.write(f"[{ts}] [{level}] [EZToolRunner] {message}\n")
+        except Exception:
+            pass
+
     def _execute_subprocess(
         self, module_name: str, cmd_list: List[str], timeout: Optional[int] = 45
     ) -> subprocess.CompletedProcess:
