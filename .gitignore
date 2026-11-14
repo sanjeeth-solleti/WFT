@@ -64,6 +64,9 @@ htmlcov/
 # Scratch & Temporary Verification Files (Root Level)
 Gemini.md
 populate_master_demo.py
+fix.py
+/fix.py
+/fix_*.py
 scratch/
 scratch_accuracy.md
 Errors/
