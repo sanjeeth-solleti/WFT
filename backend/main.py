@@ -16,6 +16,7 @@ import stat
 import subprocess
 import tempfile
 import threading
+import time
 import uuid
 import zipfile
 from datetime import date, datetime, timezone
@@ -1742,14 +1743,17 @@ def resolve_evidence_data(
     case_dir = get_case_dir(case_id)
     raw_path = Path(raw_path_str)
 
-    # Strip Windows drive prefix for relative staging checks
-    rel_p = raw_path_str.replace("/", "\\")
-    if len(rel_p) >= 2 and rel_p[1] == ":":
-        rel_p = rel_p[2:].lstrip("\\")
+    # Normalize forward/back slashes and strip Windows drive prefix for relative staging checks
+    norm_p = raw_path_str.replace("\\", "/").strip()
+    if len(norm_p) >= 2 and norm_p[1] == ":":
+        norm_p = norm_p[2:].lstrip("/")
+    norm_p = norm_p.lstrip("/")
+    rel_p = Path(norm_p)
+    file_stem_name = rel_p.name
 
     # 1. Local filesystem & case staging checks
-    if raw_path.is_dir():
-        return None, 0, raw_path.name, f"[DIRECTORY] {raw_path_str}"
+    if raw_path.is_dir() or (rel_p.is_dir() if norm_p else False):
+        return None, 0, (raw_path if raw_path.is_dir() else rel_p).name, f"[DIRECTORY] {raw_path_str}"
     if (staging_dir / rel_p).is_dir():
         return None, 0, (staging_dir / rel_p).name, f"[DIRECTORY] {raw_path_str}"
     if (case_dir / rel_p).is_dir():
@@ -1758,21 +1762,23 @@ def resolve_evidence_data(
     target_file: Optional[Path] = None
     if raw_path.is_file():
         target_file = raw_path
+    elif rel_p.is_file():
+        target_file = rel_p
     elif (staging_dir / rel_p).is_file():
         target_file = staging_dir / rel_p
     elif (case_dir / rel_p).is_file():
         target_file = case_dir / rel_p
-    elif (staging_dir / "Documents" / raw_path.name).is_file():
-        target_file = staging_dir / "Documents" / raw_path.name
-    elif (staging_dir / "Carved_Thumbnails" / raw_path.name).is_file():
-        target_file = staging_dir / "Carved_Thumbnails" / raw_path.name
-    elif (staging_dir / "Notifications" / raw_path.name).is_file():
-        target_file = staging_dir / "Notifications" / raw_path.name
-    elif (staging_dir / "ActivitiesCache" / raw_path.name).is_file():
-        target_file = staging_dir / "ActivitiesCache" / raw_path.name
+    elif file_stem_name and (staging_dir / "Documents" / file_stem_name).is_file():
+        target_file = staging_dir / "Documents" / file_stem_name
+    elif file_stem_name and (staging_dir / "Carved_Thumbnails" / file_stem_name).is_file():
+        target_file = staging_dir / "Carved_Thumbnails" / file_stem_name
+    elif file_stem_name and (staging_dir / "Notifications" / file_stem_name).is_file():
+        target_file = staging_dir / "Notifications" / file_stem_name
+    elif file_stem_name and (staging_dir / "ActivitiesCache" / file_stem_name).is_file():
+        target_file = staging_dir / "ActivitiesCache" / file_stem_name
     else:
         # Fuzzy search inside staging by exact filename
-        candidate_name = raw_path.name.lower()
+        candidate_name = file_stem_name.lower()
         if candidate_name:
             for cand in staging_dir.rglob("*"):
                 if cand.is_file() and cand.name.lower() == candidate_name:
@@ -2190,13 +2196,14 @@ def export_folder_zip(
         staging_dir = get_case_staging_dir(case_id)
         case_dir = get_case_dir(case_id, create_if_missing=False)
 
-        clean_p = folder_path.strip().replace("/", "\\")
-        if clean_p.startswith(".\\"):
-            clean_p = clean_p[2:]
-        if len(clean_p) >= 2 and clean_p[1] == ":":
-            clean_p = clean_p[2:].lstrip("\\")
+        norm_f = folder_path.strip().replace("\\", "/").strip("/")
+        if norm_f.startswith("./"):
+            norm_f = norm_f[2:]
+        if len(norm_f) >= 2 and norm_f[1] == ":":
+            norm_f = norm_f[2:].lstrip("/")
+        clean_p = Path(norm_f) if norm_f else None
 
-        safe_folder_name = Path(clean_p).name if clean_p else "root"
+        safe_folder_name = clean_p.name if clean_p else "root"
         if not safe_folder_name or safe_folder_name in (".", "..", "\\", "/"):
             safe_folder_name = "evidence_folder"
 
@@ -2207,7 +2214,7 @@ def export_folder_zip(
         files_written = 0
 
         cand_dir = staging_dir / clean_p if clean_p else staging_dir
-        if not cand_dir.is_dir() and (case_dir / clean_p).is_dir():
+        if not cand_dir.is_dir() and clean_p and (case_dir / clean_p).is_dir():
             cand_dir = case_dir / clean_p
 
         with zipfile.ZipFile(temp_zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
@@ -2215,9 +2222,9 @@ def export_folder_zip(
                 for root, _, files in os.walk(cand_dir):
                     for file in files:
                         fp = Path(root) / file
-                        arcname = fp.relative_to(cand_dir)
+                        arcname = str(fp.relative_to(cand_dir)).replace("\\", "/")
                         try:
-                            zf.write(fp, arcname=str(arcname))
+                            zf.write(fp, arcname=arcname)
                             files_written += 1
                         except Exception:
                             pass
@@ -2318,19 +2325,20 @@ def save_to_folder(
 
     # Case 1: Folder Export
     if payload.is_folder and payload.file_path:
-        clean_p = payload.file_path.strip().replace("/", "\\")
-        if clean_p.startswith(".\\"):
-            clean_p = clean_p[2:]
-        if len(clean_p) >= 2 and clean_p[1] == ":":
-            clean_p = clean_p[2:].lstrip("\\")
-        safe_folder_name = Path(clean_p).name or "folder_export"
+        norm_p = payload.file_path.strip().replace("\\", "/").strip("/")
+        if norm_p.startswith("./"):
+            norm_p = norm_p[2:]
+        if len(norm_p) >= 2 and norm_p[1] == ":":
+            norm_p = norm_p[2:].lstrip("/")
+        clean_p = Path(norm_p) if norm_p else None
+        safe_folder_name = clean_p.name if clean_p else "folder_export"
         target_dir = dest_dir / safe_folder_name
         target_dir.mkdir(parents=True, exist_ok=True)
 
         staging_dir = get_case_staging_dir(case_id)
         case_dir = get_case_dir(case_id, create_if_missing=False)
         src_dir = staging_dir / clean_p if clean_p else staging_dir
-        if not src_dir.is_dir() and (case_dir / clean_p).is_dir():
+        if not src_dir.is_dir() and clean_p and (case_dir / clean_p).is_dir():
             src_dir = case_dir / clean_p
 
         copied_count = 0
@@ -2370,7 +2378,7 @@ def save_to_folder(
                                         elif entry.is_file():
                                             try:
                                                 data = entry.open("rb").read()
-                                                out_p = target_dir / entry_rel.replace("/", "\\")
+                                                out_p = target_dir / Path(entry_rel)
                                                 out_p.parent.mkdir(parents=True, exist_ok=True)
                                                 out_p.write_bytes(data)
                                                 copied_count += 1
@@ -2653,7 +2661,7 @@ def get_case_filesystem_tree(
             target_dir = staging_dir
         else:
             rel_sub = norm_parent[2:] if norm_parent.startswith(".\\") else norm_parent
-            target_dir = (staging_dir / rel_sub).resolve()
+            target_dir = (staging_dir / Path(rel_sub.replace("\\", "/"))).resolve()
             if not str(target_dir).startswith(str(staging_dir.resolve())):
                 target_dir = staging_dir
 
@@ -2809,7 +2817,7 @@ def get_case_filesystem_files(
                                 fpath_clean = fpath_clean[2:]
 
                             staged_cand1 = staging_dir / fname
-                            staged_cand2 = staging_dir / fpath_clean
+                            staged_cand2 = staging_dir / Path(fpath_clean.replace("\\", "/"))
                             if staged_cand2.is_file():
                                 item["staged_file_path"] = str(staged_cand2.resolve())
                             elif staged_cand1.is_file():
@@ -2838,7 +2846,7 @@ def get_case_filesystem_files(
             target_dir = staging_dir
         else:
             rel_sub = norm_folder[2:] if norm_folder.startswith(".\\") else norm_folder
-            target_dir = (staging_dir / rel_sub).resolve()
+            target_dir = (staging_dir / Path(rel_sub.replace("\\", "/"))).resolve()
             if not str(target_dir).startswith(str(staging_dir.resolve())):
                 target_dir = staging_dir
 
