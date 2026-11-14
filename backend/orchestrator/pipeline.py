@@ -141,8 +141,6 @@ class ProcessingPipeline:
         if target_dir and str(target_dir).strip():
             from backend.config import register_case_dir
             register_case_dir(case_id, str(target_dir).strip())
-        if target_dir:
-            register_case_dir(case_id, target_dir)
         self.case_dir = get_case_dir(case_id)
         self.staging_dir = get_case_staging_dir(case_id)
         self.csv_out_dir = get_case_csv_out_dir(case_id)

@@ -224,6 +224,12 @@ export const ProcessWizard: React.FC<ProcessWizardProps> = ({
       const isImg = ['.e01', '.ex01', '.vhdx', '.vhd', '.vmdk', '.raw', '.dd', '.img', '.iso', '.001'].some(ext => lower.endsWith(ext));
       setSourceType(isImg ? 'image' : 'folder');
       validateInputPath(clean);
+      if (!targetStorageDir.trim()) {
+        const parentDir = clean.replace(/[\\/][^\\/]+$/, '');
+        if (parentDir && parentDir !== clean) {
+          setTargetStorageDir(isImg ? parentDir : clean);
+        }
+      }
     } else {
       setTargetStorageDir(clean);
       const folderName = clean.replace(/[\\/]+$/, '').split(/[\\/]/).pop();
@@ -697,7 +703,7 @@ export const ProcessWizard: React.FC<ProcessWizardProps> = ({
                     type="text"
                     value={targetStorageDir}
                     onChange={(e) => setTargetStorageDir(e.target.value.replace(/^["']|["']$/g, ''))}
-                    placeholder="Default: cases/<case_name> (click 'Select Folder' to customize)"
+                    placeholder="e.g. C:\Forensics\Cases or D:\Cases\Case01"
                     className="w-full bg-white dark:bg-[#1e293b] border border-[#cbd5e1] dark:border-[#334155] rounded px-3 py-2 text-xs text-[#0f172a] dark:text-[#f8fafc] font-mono focus:border-[#0284c7] focus:outline-none"
                   />
                   <div className="p-2 rounded bg-white dark:bg-[#1e293b] border border-[#cbd5e1] dark:border-[#334155] text-[10.5px] font-mono text-slate-500 dark:text-slate-400 flex items-center justify-between">
@@ -707,7 +713,7 @@ export const ProcessWizard: React.FC<ProcessWizardProps> = ({
                           ? (['cases', 'wft_cases'].includes(targetStorageDir.replace(/[\\/]+$/, '').split(/[\\/]/).pop()?.toLowerCase() || '')
                             ? `${targetStorageDir.replace(/[\\/]+$/, '')}\\${caseName || 'case'}\\case.duckdb`
                             : `${targetStorageDir.replace(/[\\/]+$/, '')}\\case.duckdb`)
-                          : `cases/${caseName || 'case'}/case.duckdb`}
+                          : `${caseName || 'case'}\\case.duckdb (Select Target Folder)`}
                       </span>
                     </span>
                   </div>
@@ -829,6 +835,15 @@ export const ProcessWizard: React.FC<ProcessWizardProps> = ({
                       onChange={(e) => {
                         const val = e.target.value.replace(/^["']|["']$/g, '');
                         setSourcePath(val);
+                        if (!targetStorageDir.trim() && val.trim()) {
+                          const cleanVal = val.trim();
+                          const lower = cleanVal.toLowerCase();
+                          const isImg = ['.e01', '.ex01', '.vhdx', '.vhd', '.vmdk', '.raw', '.dd', '.img', '.iso', '.001'].some(ext => lower.endsWith(ext));
+                          const parentDir = cleanVal.replace(/[\\/][^\\/]+$/, '');
+                          if (parentDir && parentDir !== cleanVal) {
+                            setTargetStorageDir(isImg ? parentDir : cleanVal);
+                          }
+                        }
                       }}
                       placeholder="e.g. C:\Evidence\TriageFolder or D:\Forensics\evidence_disk.E01"
                       className="w-full bg-[#f8fafc] dark:bg-[#0f172a] border border-[#cbd5e1] dark:border-[#334155] rounded px-3 py-2 text-xs text-[#0f172a] dark:text-[#f8fafc] font-mono focus:border-[#0284c7] focus:outline-none"

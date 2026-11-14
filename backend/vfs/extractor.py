@@ -106,7 +106,7 @@ class EvidenceExtractor:
         elif case_id:
             self.staging_dir = get_case_staging_dir(case_id).resolve()
         else:
-            self.staging_dir = Path("cases/default/staging").resolve()
+            self.staging_dir = get_case_staging_dir(case_id or "default").resolve()
 
         self.staging_dir.mkdir(parents=True, exist_ok=True)
 

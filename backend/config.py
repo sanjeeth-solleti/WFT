@@ -113,8 +113,30 @@ def _get_path_setting(env_var: str, fallback_relative: str) -> Path:
     return (BASE_DIR / fallback_relative).resolve()
 
 
+def _get_default_cases_dir() -> Path:
+    """
+    Resolve default cases storage directory.
+    Priority:
+      1. UI-persisted tool_paths.json (WFT_CASES_DIR)
+      2. Environment variable WFT_CASES_DIR
+      3. User's Desktop/cases or APP_DATA_DIR/cases
+    Never defaults to BASE_DIR / "cases" to prevent polluting the tool directory.
+    """
+    _load_persisted_tool_paths()
+    if "WFT_CASES_DIR" in _CUSTOM_TOOL_PATHS and _CUSTOM_TOOL_PATHS["WFT_CASES_DIR"]:
+        val = _CUSTOM_TOOL_PATHS["WFT_CASES_DIR"]
+        p = Path(str(val).strip())
+        return p.resolve()
+    env_val = os.getenv("WFT_CASES_DIR")
+    if env_val and env_val.strip():
+        return Path(env_val.strip()).resolve()
+    desktop_cases = Path.home() / "Desktop" / "cases"
+    return desktop_cases.resolve()
+
+
 # Core filesystem locations
-CASES_DIR: Path = _get_path_setting("WFT_CASES_DIR", "cases")
+CASES_DIR: Path = _get_default_cases_dir()
+TOOL_CASES_DIR: Path = (BASE_DIR / "cases").resolve()
 RULES_DIR: Path = (BUNDLE_DIR / "rules").resolve() if (BUNDLE_DIR / "rules").exists() else _get_path_setting("WFT_RULES_DIR", "rules")
 DEFAULT_YARA_FILE: Path = (RULES_DIR / "default_malware.yar").resolve()
 
@@ -130,7 +152,7 @@ def _load_custom_case_dirs() -> None:
 
     raw_cases: Dict[str, str] = {}
 
-    # 1. Primary storage: BASE_DIR / custom_locations.json
+    # 1. Primary storage: APP_DATA_DIR / custom_locations.json
     if CUSTOM_LOCATIONS_FILE.exists():
         try:
             with open(CUSTOM_LOCATIONS_FILE, "r", encoding="utf-8") as f:
@@ -138,17 +160,17 @@ def _load_custom_case_dirs() -> None:
         except Exception:
             raw_cases = {}
 
-    # 2. Legacy fallback check: CASES_DIR / custom_locations.json (preserve existing entries)
-    legacy_loc_file = (CASES_DIR / "custom_locations.json").resolve()
-    if legacy_loc_file != CUSTOM_LOCATIONS_FILE and legacy_loc_file.exists():
-        try:
-            with open(legacy_loc_file, "r", encoding="utf-8") as f:
-                legacy_dict = json.load(f)
-            for k, v in legacy_dict.items():
-                if k not in raw_cases:
-                    raw_cases[k] = v
-        except Exception:
-            pass
+    # 2. Legacy fallback check: LEGACY_LOCATIONS_FILE and any existing custom_locations.json
+    for legacy_f in [LEGACY_LOCATIONS_FILE, (TOOL_CASES_DIR / "custom_locations.json").resolve(), (CASES_DIR / "custom_locations.json").resolve()]:
+        if legacy_f != CUSTOM_LOCATIONS_FILE and legacy_f.exists():
+            try:
+                with open(legacy_f, "r", encoding="utf-8") as f:
+                    legacy_dict = json.load(f)
+                for k, v in legacy_dict.items():
+                    if k not in raw_cases:
+                        raw_cases[k] = v
+            except Exception:
+                pass
 
     # 3. Filter out any entries whose directories no longer exist on disk
     pruned_cases: Dict[str, str] = {}
@@ -183,20 +205,22 @@ def register_case_dir(case_id: str, custom_dir: Union[str, Path]) -> Path:
     """
     Register and persist custom storage folder for a case.
     Ensures that if the user selects a custom folder, no redundant phantom case folder
-    is created in the WFT cases directory.
+    is created in the WFT tool directory.
     """
     global _CUSTOM_CASE_DIRS
     import shutil
     clean_cid = (case_id or "").strip()
 
-    _load_custom_case_dirs()
     resolved_p = Path(custom_dir).resolve()
     resolved_p.mkdir(parents=True, exist_ok=True)
 
+    _load_custom_case_dirs()
+
     _CUSTOM_CASE_DIRS[clean_cid] = str(resolved_p)
+    _CUSTOM_CASE_DIRS[clean_cid.lower()] = str(resolved_p)
     folder_name = resolved_p.name
-    if folder_name.lower() != clean_cid.lower():
-        _CUSTOM_CASE_DIRS[folder_name] = str(resolved_p)
+    _CUSTOM_CASE_DIRS[folder_name] = str(resolved_p)
+    _CUSTOM_CASE_DIRS[folder_name.lower()] = str(resolved_p)
 
     try:
         CUSTOM_LOCATIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -211,16 +235,29 @@ def register_case_dir(case_id: str, custom_dir: Union[str, Path]) -> Path:
     except Exception:
         pass
 
-    # Remove any redundant empty phantom folder in CASES_DIR for this case
+    # Remove any redundant empty phantom folder in tool cases directory
     try:
-        phantom_p = (CASES_DIR / clean_cid).resolve()
-        if phantom_p != resolved_p and phantom_p.exists() and phantom_p.is_dir():
-            if not (phantom_p / "case.duckdb").exists():
-                shutil.rmtree(phantom_p, ignore_errors=True)
-        phantom_folder = (CASES_DIR / folder_name).resolve()
-        if phantom_folder != resolved_p and phantom_folder.exists() and phantom_folder.is_dir():
-            if not (phantom_folder / "case.duckdb").exists():
-                shutil.rmtree(phantom_folder, ignore_errors=True)
+        tool_cases_dir = (BASE_DIR / "cases").resolve()
+        if tool_cases_dir.exists() and tool_cases_dir.is_dir():
+            phantom_p = (tool_cases_dir / clean_cid).resolve()
+            if phantom_p != resolved_p and phantom_p.exists() and phantom_p.is_dir():
+                if not (phantom_p / "case.duckdb").exists():
+                    shutil.rmtree(phantom_p, ignore_errors=True)
+            phantom_folder = (tool_cases_dir / folder_name).resolve()
+            if phantom_folder != resolved_p and phantom_folder.exists() and phantom_folder.is_dir():
+                if not (phantom_folder / "case.duckdb").exists():
+                    shutil.rmtree(phantom_folder, ignore_errors=True)
+            for sub in list(tool_cases_dir.iterdir()):
+                if sub.is_dir() and not any(sub.iterdir()):
+                    try:
+                        sub.rmdir()
+                    except Exception:
+                        pass
+            if not any(tool_cases_dir.iterdir()):
+                try:
+                    tool_cases_dir.rmdir()
+                except Exception:
+                    pass
     except Exception:
         pass
 
@@ -285,28 +322,35 @@ def get_case_dir(case_id: str, create_if_missing: bool = False) -> Path:
     # 1. Exact match in registered custom locations
     if cid_clean in _CUSTOM_CASE_DIRS:
         custom_dir = Path(_CUSTOM_CASE_DIRS[cid_clean]).resolve()
-        if custom_dir.is_dir() or create_if_missing:
-            if create_if_missing:
-                custom_dir.mkdir(parents=True, exist_ok=True)
-            return custom_dir
+        if create_if_missing:
+            custom_dir.mkdir(parents=True, exist_ok=True)
+        return custom_dir
 
     # 2. Case-insensitive match in registered custom locations
     for k, v in _CUSTOM_CASE_DIRS.items():
         if k.strip().lower() == cid_lower:
             custom_dir = Path(v).resolve()
-            if custom_dir.is_dir() or create_if_missing:
-                if create_if_missing:
-                    custom_dir.mkdir(parents=True, exist_ok=True)
-                return custom_dir
+            if create_if_missing:
+                custom_dir.mkdir(parents=True, exist_ok=True)
+            return custom_dir
 
     # 3. Match by folder name
     for k, v in _CUSTOM_CASE_DIRS.items():
         p = Path(v).resolve()
         if p.name.lower() == cid_lower:
-            if p.is_dir() or create_if_missing:
-                if create_if_missing:
-                    p.mkdir(parents=True, exist_ok=True)
-                return p
+            if create_if_missing:
+                p.mkdir(parents=True, exist_ok=True)
+            return p
+
+    # 3b. Match with normalized spaces/underscores/hyphens
+    cid_norm = cid_lower.replace("_", " ").replace("-", " ")
+    for k, v in _CUSTOM_CASE_DIRS.items():
+        k_norm = k.strip().lower().replace("_", " ").replace("-", " ")
+        if k_norm == cid_norm:
+            custom_dir = Path(v).resolve()
+            if create_if_missing:
+                custom_dir.mkdir(parents=True, exist_ok=True)
+            return custom_dir
 
     # 4. Check external desktop cases
     desktop_case = Path.home() / "Desktop" / "cases" / cid_clean
@@ -314,7 +358,7 @@ def get_case_dir(case_id: str, create_if_missing: bool = False) -> Path:
         register_case_dir(cid_clean, desktop_case)
         return desktop_case.resolve()
 
-    # 5. Default fallback to CASES_DIR / case_id
+    # 5. Default fallback to CASES_DIR / case_id (external directory, never BASE_DIR / "cases")
     case_dir = (CASES_DIR / cid_clean).resolve()
     if create_if_missing:
         case_dir.mkdir(parents=True, exist_ok=True)
@@ -819,7 +863,7 @@ def reload_config_in_memory() -> None:
     global CASES_DIR, RULES_DIR, DEFAULT_YARA_FILE, CUSTOM_LOCATIONS_FILE, API_HOST, API_PORT
     load_root_env()
     _load_persisted_tool_paths()
-    CASES_DIR = _get_path_setting("WFT_CASES_DIR", "cases")
+    CASES_DIR = _get_default_cases_dir()
     RULES_DIR = _get_path_setting("WFT_RULES_DIR", "rules")
     DEFAULT_YARA_FILE = (RULES_DIR / "default_malware.yar").resolve()
     CUSTOM_LOCATIONS_FILE = (APP_DATA_DIR / "custom_locations.json").resolve()

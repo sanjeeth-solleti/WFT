@@ -202,3 +202,53 @@ def test_pruning_missing_custom_locations():
     _load_custom_case_dirs()
     active_cases = get_registered_custom_cases()
     assert fake_case_id not in active_cases
+
+
+def test_no_tool_cases_created_with_custom_target_dir(client):
+    """
+    Verify that when processing a case with target_dir, or querying its endpoints,
+    no 'cases' folder is ever created inside the tool directory (BASE_DIR).
+    """
+    temp_target = tempfile.mkdtemp()
+    temp_path = Path(temp_target).resolve()
+    custom_cid = "test_external_storage_case"
+
+    try:
+        # Trigger process with explicit target_dir
+        res = client.post(
+            "/api/cases/process",
+            json={
+                "case_name": custom_cid,
+                "case_id": custom_cid,
+                "source_type": "directory",
+                "source_path": str(temp_path),
+                "target_dir": str(temp_path),
+                "run_async": False,
+            },
+        )
+        assert res.status_code == 200
+
+        # Verify DuckDB and files were placed in temp_path, NOT in BASE_DIR / "cases"
+        assert (temp_path / "case.duckdb").exists()
+        tool_cases = (BASE_DIR / "cases").resolve()
+        assert not tool_cases.exists(), f"Found unexpected cases folder in tool repo: {tool_cases}"
+
+        # Verify get_case_dir returns custom target
+        resolved_case = get_case_dir(custom_cid)
+        assert resolved_case == temp_path
+
+        # Verify API case status and listing points to external directory
+        list_res = client.get("/api/cases")
+        assert list_res.status_code == 200
+        cases = list_res.json()["cases"]
+        matching = [c for c in cases if c["case_id"] == custom_cid]
+        assert len(matching) == 1
+        assert matching[0]["case_path"] == str(temp_path)
+
+        # Still no tool cases folder
+        assert not tool_cases.exists()
+    finally:
+        DuckDBManager.close_all()
+        shutil.rmtree(temp_path, ignore_errors=True)
+        _load_custom_case_dirs()
+

@@ -230,32 +230,47 @@ def list_cases() -> Dict[str, Any]:
     seen_cids = set()
     entries_to_check: List[tuple] = []
 
-    if CASES_DIR.is_dir():
-        for case_entry in sorted(CASES_DIR.iterdir()):
-            if case_entry.is_dir():
-                cid = case_entry.name
-                custom_cases = get_registered_custom_cases()
+    # Check both CASES_DIR and any legacy tool-folder cases
+    check_dirs = [CASES_DIR]
+    tool_cases = (BASE_DIR / "cases").resolve()
+    if tool_cases.exists() and tool_cases != CASES_DIR:
+        check_dirs.append(tool_cases)
 
-                # If this case has a registered custom location outside CASES_DIR:
-                custom_match = None
-                for reg_id, reg_path in custom_cases.items():
-                    if reg_id.strip().lower() == cid.strip().lower():
-                        custom_match = Path(reg_path).resolve()
-                        break
+    for c_dir in check_dirs:
+        if c_dir.is_dir():
+            for case_entry in sorted(c_dir.iterdir()):
+                if case_entry.is_dir():
+                    cid = case_entry.name
+                    custom_cases = get_registered_custom_cases()
 
-                if custom_match and custom_match != case_entry.resolve():
-                    # The folder in CASES_DIR is an unneeded phantom duplicate
-                    if not (case_entry / "case.duckdb").exists():
-                        try:
-                            import shutil
-                            shutil.rmtree(case_entry, ignore_errors=True)
-                        except Exception:
-                            pass
-                    continue
+                    # If this case has a registered custom location outside c_dir:
+                    custom_match = None
+                    for reg_id, reg_path in custom_cases.items():
+                        if reg_id.strip().lower() == cid.strip().lower():
+                            custom_match = Path(reg_path).resolve()
+                            break
 
-                if (case_entry / "case.duckdb").exists():
-                    entries_to_check.append((cid, case_entry))
-                    seen_cids.add(cid.lower())
+                    if custom_match and custom_match != case_entry.resolve():
+                        # The folder is an unneeded phantom duplicate
+                        if not (case_entry / "case.duckdb").exists():
+                            try:
+                                import shutil
+                                shutil.rmtree(case_entry, ignore_errors=True)
+                            except Exception:
+                                pass
+                        continue
+
+                    if (case_entry / "case.duckdb").exists():
+                        entries_to_check.append((cid, case_entry))
+                        seen_cids.add(cid.lower())
+
+            # If tool_cases is now empty, delete it immediately to prevent repo pollution
+            if c_dir == tool_cases:
+                try:
+                    if not any(tool_cases.iterdir()):
+                        tool_cases.rmdir()
+                except Exception:
+                    pass
 
     for cid, cpath_str in get_registered_custom_cases().items():
         if cid.lower() not in seen_cids:
@@ -511,7 +526,7 @@ def process_case(
 
     # 1. Register custom target storage folder BEFORE init_case_db so all components use the exact same directory
     custom_case_path: Optional[Path] = None
-    if request.target_dir:
+    if request.target_dir and request.target_dir.strip():
         clean_target = request.target_dir.strip().strip('"').strip("'").strip()
         if clean_target:
             t_path = Path(clean_target).resolve()
@@ -525,8 +540,39 @@ def process_case(
             else:
                 custom_case_path = t_path / case_id
 
+            custom_case_path.mkdir(parents=True, exist_ok=True)
             register_case_dir(case_id, custom_case_path)
             print(f"[API] Registered custom storage location for case '{case_id}': {custom_case_path}")
+    elif request.source_path and request.source_path.strip():
+        # Auto-fallback to source evidence folder so no cases folder is ever created in tool repo
+        clean_src = request.source_path.strip().strip('"').strip("'").strip()
+        sp = Path(clean_src).resolve()
+        if sp.exists():
+            custom_case_path = sp if sp.is_dir() else sp.parent
+            custom_case_path.mkdir(parents=True, exist_ok=True)
+            register_case_dir(case_id, custom_case_path)
+            print(f"[API] Defaulted target location to evidence folder for case '{case_id}': {custom_case_path}")
+
+    # Immediately clean up any phantom cases directory inside the tool directory
+    try:
+        tool_cases = (BASE_DIR / "cases").resolve()
+        if tool_cases.exists() and tool_cases.is_dir():
+            phantom = (tool_cases / case_id).resolve()
+            if phantom.exists() and phantom != custom_case_path:
+                shutil.rmtree(phantom, ignore_errors=True)
+            for sub in list(tool_cases.iterdir()):
+                if sub.is_dir() and not any(sub.iterdir()):
+                    try:
+                        sub.rmdir()
+                    except Exception:
+                        pass
+            if not any(tool_cases.iterdir()):
+                try:
+                    tool_cases.rmdir()
+                except Exception:
+                    pass
+    except Exception:
+        pass
 
     # 2. Prevent duplicate parallel pipeline runs for the same case
     with _running_cases_lock:
