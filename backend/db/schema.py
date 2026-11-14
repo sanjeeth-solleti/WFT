@@ -1209,6 +1209,11 @@ MASTER_ARTIFACT_CATALOG: List[Dict[str, Any]] = [
         "table_name": "view_documents",
         "source_tool": "FileSystemNormalizer",
         "ddl": """CREATE OR REPLACE VIEW view_documents AS
+            SELECT row_number() OVER () AS _row_id, file_name, file_path,
+                   LOWER(CASE WHEN file_name LIKE '%.%' THEN '.' || regexp_extract(file_name, '\\.([^.]+)$', 1) ELSE '.' || COALESCE(file_type, '') END) AS extension,
+                   file_size_bytes, created_time, modified_time, 'parsed_documents_metadata' AS source_evidence
+            FROM parsed_documents_metadata
+            UNION ALL
             SELECT row_number() OVER () AS _row_id, file_name, file_path, extension, file_size_bytes, created_time, modified_time, source_evidence
             FROM (
                 SELECT FileName AS file_name, COALESCE(ParentPath, '') || '\\' || COALESCE(FileName, '') AS file_path, LOWER(Extension) AS extension, FileSize AS file_size_bytes, Created0x10 AS created_time, LastModified0x10 AS modified_time, 'raw_mft' AS source_evidence,

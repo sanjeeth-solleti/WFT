@@ -1171,7 +1171,7 @@ class EvidenceExtractor:
         # 19. Cloud Storage Sync (OneDrive, Google Drive)
         if any(cloud in fpath_lower for cloud in ["onedrive", "drivefs", "googledrive"]):
             if (
-                fname_lower in ["syncenginedatabase.db", "metadata_sqlite_db"]
+                fname_lower in ["syncenginedatabase.db", "metadata_sqlite_db", "sync_log.log", "snapshot.db", "sync_log.log", "snapshot.db", "sync_log.log", "snapshot.db"]
                 or fname_lower.endswith(".dat")
                 or resolved_src.suffix.lower() in [".db", ".sqlite"]
             ):

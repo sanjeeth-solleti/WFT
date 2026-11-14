@@ -950,7 +950,7 @@ class EZToolRunner:
             "mft.csv",
         ]
 
-        self._execute_subprocess("MFTECmd_MFT", cmd, timeout=30)
+        self._execute_subprocess("MFTECmd_MFT", cmd, timeout=30000)
         return self.ingest_csv_directory("mft", out_dir)
 
     # =========================================================================
@@ -1017,7 +1017,7 @@ class EZToolRunner:
         if mft_file and mft_file.exists():
             cmd.extend(["-m", str(mft_file.resolve())])
 
-        self._execute_subprocess("MFTECmd_USN", cmd, timeout=30)
+        self._execute_subprocess("MFTECmd_USN", cmd, timeout=30000)
         return self.ingest_csv_directory("usnjrnl", out_dir)
 
     # =========================================================================
@@ -1481,8 +1481,9 @@ class EZToolRunner:
         # 0. Replay dirty transaction logs if any registry hive files exist
         has_registry = False
         reg_candidates = ["system", "software", "sam", "security", "ntuser.dat", "usrclass.dat", "amcache.hve"]
-        staged_files = [f.name.lower() for f in self.staging_dir.rglob("*") if f.is_file()]
-
+        staged_files = []
+        for _root, _dirs, _files in os.walk(self.staging_dir, onerror=lambda _e: None):
+            staged_files.extend([_f.lower() for _f in _files])
         if any(c in staged_files for c in reg_candidates):
             has_registry = True
             staged_reg_dir = (
@@ -1490,7 +1491,10 @@ class EZToolRunner:
                 if (self.staging_dir / "Registry").is_dir()
                 else self.staging_dir
             )
-            self.run_rla(staged_reg_dir)
+            try:
+                self.run_rla(staged_reg_dir)
+            except Exception as rla_err:
+                self._log(f'RLA skipped or unavailable: {rla_err}', 'WARNING')
 
         # 1. MFTECmd ($MFT)
         try:

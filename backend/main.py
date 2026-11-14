@@ -719,7 +719,7 @@ def get_artifact_registry(
         tname = art.get("table_name")
         rc = art.get("row_count", 0)
         disp = str(art.get("display_name", ""))
-        if tname in ("parsed_media_exif", "parsed_documents_metadata") or "(Combined)" in disp:
+        if tname in ("parsed_media_exif", "parsed_documents_metadata", "view_all_malware_detections") or "(Combined)" in disp:
             continue
         if rc > 0 and tname and tname not in seen_tables:
             seen_tables.add(tname)
@@ -814,7 +814,7 @@ def get_case_dashboard(case_id: str) -> Dict[str, Any]:
         seen_tables = set()
 
         for cat, dname, tname, cnt in reg_rows:
-            if tname in seen_tables:
+            if tname in seen_tables or tname in ('view_all_malware_detections', 'parsed_media_exif', 'parsed_documents_metadata'):
                 continue
             seen_tables.add(tname)
             total_artifact_rows += cnt
@@ -4509,3 +4509,11 @@ if __name__ == "__main__":
         uvicorn.run("backend.main:app", host=API_HOST, port=API_PORT, reload=False)
     finally:
         os._exit(0)
+
+
+@app.get("/api/cases/{case_id}/report/html", summary="Generate Portable HTML Forensic Case Report (A1)")
+def export_case_report_html(case_id: str):
+    from fastapi.responses import HTMLResponse
+    from backend.orchestrator.report_generator import generate_case_html_report
+    html_content = generate_case_html_report(case_id)
+    return HTMLResponse(content=html_content, status_code=200)

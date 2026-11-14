@@ -120,7 +120,7 @@ export const App: React.FC = () => {
   useEffect(() => {
     const handleUnload = () => {
       try {
-        navigator.sendBeacon('/api/system/shutdown');
+        // B55 Fixed: Do not kill backend when a browser tab closes
       } catch {
         // ignore
       }

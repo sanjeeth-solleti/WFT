@@ -170,7 +170,7 @@ export const CaseDashboard: React.FC<CaseDashboardProps> = ({
             <Cpu className="w-4 h-4 text-amber-500" />
           </div>
           <div className="mt-2 text-2xl font-bold font-mono text-[#0f172a] dark:text-[#f8fafc] group-hover:text-amber-500">
-            {dashboard.categories.find(c => c.category === 'EVENT LOGS')?.count?.toLocaleString() || '24,994'}
+            {dashboard.categories.find(c => c.category === 'EVENT LOGS')?.count?.toLocaleString() || '0 (Not Parsed)'}
           </div>
           <div className="flex items-center justify-between text-[11px] text-slate-500 dark:text-slate-400 group-hover:text-amber-500 mt-1">
             <span>Forensic Event Logs hunting workbench</span>

@@ -1161,4 +1161,8 @@ export const apiClient = {
     }
     return response.json();
   },
+
+  getMediaStreamUrl(caseId: string, filePath: string): string {
+    return `${API_BASE}/api/cases/${encodeURIComponent(caseId)}/raw-file?path=${encodeURIComponent(filePath)}`;
+  },
 };

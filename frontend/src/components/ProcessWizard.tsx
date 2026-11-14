@@ -192,8 +192,8 @@ export const ProcessWizard: React.FC<ProcessWizardProps> = ({
   // Step 1: Case Details
   const [caseName, setCaseName] = useState(`Incident_${new Date().toISOString().slice(0, 10).replace(/-/g, '')}`);
   const [caseNumber, setCaseNumber] = useState(`DFIR-${new Date().getFullYear()}-${Math.floor(1000 + Math.random() * 9000)}`);
-  const [examinerName, setExaminerName] = useState('Senior DFIR Specialist');
-  const [caseNotes, setCaseNotes] = useState('Standard enterprise forensic acquisition and triage.');
+  const [examinerName, setExaminerName] = useState('');
+  const [caseNotes, setCaseNotes] = useState('');
 
   // Step 2: Evidence Sources (Exclusively Forensic Disk Images)
   const [sourceType, setSourceType] = useState<'folder' | 'live_triage' | 'image' | 'directory'>('image');

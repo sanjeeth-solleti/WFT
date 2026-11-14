@@ -4223,9 +4223,19 @@ class TimelineNormalizer:
                     WHERE LOWER(Extension) IN ('.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx', '.txt', '.csv')
                     UNION ALL
                     SELECT
-                        regexp_extract(CAST(COALESCE(LocalPath, SourceFile, '') AS VARCHAR), '([^\\\\]+)$', 1) AS file_name,
-                        COALESCE(LocalPath, SourceFile, '') AS file_path,
-                        LOWER(regexp_extract(CAST(COALESCE(LocalPath, SourceFile, '') AS VARCHAR), '(\\.[a-zA-Z0-9]+)$', 1)) AS extension,
+                        file_name,
+                        file_path,
+                        '.' || LOWER(COALESCE(file_type, 'doc')) AS extension,
+                        file_size_bytes,
+                        created_time,
+                        modified_time,
+                        'parsed_documents_metadata' AS source_evidence
+                    FROM parsed_documents_metadata
+                    UNION ALL
+                    SELECT
+                        regexp_extract(CAST(COALESCE(LocalPath, SourceFilename, '') AS VARCHAR), '([^\\\\]+)$', 1) AS file_name,
+                        COALESCE(LocalPath, SourceFilename, '') AS file_path,
+                        LOWER(regexp_extract(CAST(COALESCE(LocalPath, SourceFilename, '') AS VARCHAR), '(\\.[a-zA-Z0-9]+)$', 1)) AS extension,
                         CAST(NULL AS BIGINT) AS file_size_bytes,
                         TargetCreated AS created_time,
                         TargetModified AS modified_time,

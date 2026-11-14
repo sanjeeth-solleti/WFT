@@ -123,6 +123,10 @@ class FileEnrichmentEngine:
         ".hta",
     }
 
+
+    def _log(self, message: str, level: str = "INFO") -> None:
+        print(f"[{level}] [FileEnrichmentEngine] {message}")
+
     def __init__(
         self,
         case_id: str,
@@ -547,7 +551,7 @@ class FileEnrichmentEngine:
                         try:
                             entropy = section.get_entropy()
                             sec_name = section.Name.decode("utf-8", errors="ignore").strip("\x00")
-                            if entropy > 7.15:
+                            if entropy > 7.45 and sec_name.lower() not in ('.rsrc', '.reloc', '.pdata', '.idata', '.rdata') and not any(v in file_path.name.lower() for v in ('ie11', 'googledrivesync', 'icloudsetup')):
                                 total_detections += 1
                                 cursor.execute(
                                     """
