@@ -462,7 +462,7 @@ class EvidenceExtractor:
                         with open(vss_mft, "rb") as in_f, open(mft_dst, "wb") as out_f:
                             chunk_size = 1024 * 1024
                             copied_bytes = 0
-                            max_bytes = 16 * 1024 * 1024
+                            max_bytes = 2 * 1024 * 1024 * 1024
                             while copied_bytes < max_bytes:
                                 data = in_f.read(min(chunk_size, max_bytes - copied_bytes))
                                 if not data:
@@ -482,7 +482,7 @@ class EvidenceExtractor:
                             with open(vss_usn, "rb") as in_f, open(usn_dst, "wb") as out_f:
                                 chunk_size = 1024 * 1024
                                 copied_bytes = 0
-                                max_bytes = 8 * 1024 * 1024
+                                max_bytes = 1024 * 1024 * 1024
                                 while copied_bytes < max_bytes:
                                     data = in_f.read(min(chunk_size, max_bytes - copied_bytes))
                                     if not data:

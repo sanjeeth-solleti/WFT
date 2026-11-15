@@ -2726,7 +2726,7 @@ class TimelineNormalizer:
         if not fname_col:
             return (0, 0)
 
-        ts_expr = f'TRY_CAST("{ts_col}" AS TIMESTAMP)' if ts_col else "CURRENT_TIMESTAMP"
+        ts_expr = f'TRY_CAST("{ts_col}" AS TIMESTAMP)' if ts_col else "NULL"
 
         timeline_sql = f"""
         INSERT INTO master_timeline (
@@ -2744,7 +2744,7 @@ class TimelineNormalizer:
         )
         SELECT
             nextval('seq_timeline_id'),
-            COALESCE({ts_expr}, CURRENT_TIMESTAMP),
+            {ts_expr},
             'Recent File Recorded (Win 7)',
             'OPERATING SYSTEM',
             'RecentFileCache (Windows 7)',
@@ -2755,7 +2755,7 @@ class TimelineNormalizer:
             "{row_id_col}",
             'RecentFileCache.bcf'
         FROM "{table_name}"
-        WHERE "{fname_col}" IS NOT NULL AND length(trim(CAST("{fname_col}" AS VARCHAR))) > 0;
+        WHERE "{fname_col}" IS NOT NULL AND length(trim(CAST("{fname_col}" AS VARCHAR))) > 0 AND {ts_expr} IS NOT NULL;
         """
         self.conn.execute(timeline_sql)
 

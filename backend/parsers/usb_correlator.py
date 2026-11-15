@@ -420,14 +420,15 @@ class USBDeviceCorrelator(BaseParser):
                             pass
 
                     # Map drive letters and volume guids from MountedDevices if not directly matched by string
-                    removable_letters = [dl for dl in mounted_drive_letters if dl not in ["C:", "A:", "B:"] and dl not in cdrom_drive_letters]
+                    # Strictly match serials in MountedDevices without arbitrary false drive-letter fallbacks
                     for clean_serial, dev in correlated_map.items():
-                        if not dev.get("drive_letter") and removable_letters:
-                            dev["drive_letter"] = removable_letters[0]
-                            val_hex = mounted_drive_letters.get(dev["drive_letter"])
-                            if val_hex and val_hex in mounted_raw_bytes and not dev.get("volume_guid"):
-                                dev["volume_guid"] = mounted_raw_bytes[val_hex]
-                            dev["source_evidence"] += f" + MountedDevices ({dev['drive_letter']})"
+                        for dl, val_hex in mounted_drive_letters.items():
+                            if val_hex and clean_serial.lower() in str(val_hex).lower():
+                                dev["drive_letter"] = dl
+                                if val_hex in mounted_raw_bytes and not dev.get("volume_guid"):
+                                    dev["volume_guid"] = mounted_raw_bytes[val_hex]
+                                dev["source_evidence"] += f" + MountedDevices ({dl})"
+                                break
                         # Ensure Lexar JumpDrive Firefly alias / 4C53 family is clearly recorded for forensic validation
                         if clean_serial.startswith("4C53"):
                             if "E:" in mounted_drive_letters:

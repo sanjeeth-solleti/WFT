@@ -366,6 +366,45 @@ class CloudParser(BaseParser):
 
         return records
 
+
+    def _parse_dropbox_file(self, file_path: Path) -> List[Dict[str, Any]]:
+        """Parses Dropbox info.json, nucleus.sqlite3, and filecache.dbx (Fixes B61)."""
+        records: List[Dict[str, Any]] = []
+        mtime = datetime.fromtimestamp(file_path.stat().st_mtime, tz=timezone.utc)
+        fname = file_path.name.lower()
+        try:
+            if fname == "info.json":
+                data = json.loads(file_path.read_text(encoding="utf-8", errors="replace"))
+                for acct_type, info in data.items():
+                    if isinstance(info, dict):
+                        records.append({
+                            "cloud_provider": "Dropbox",
+                            "account": str(info.get("email") or info.get("host") or acct_type),
+                            "local_path": str(info.get("path") or ""),
+                            "cloud_path_or_id": f"Dropbox ({acct_type})",
+                            "file_size": 0,
+                            "modified_time": mtime,
+                            "status": "CONFIGURED",
+                            "source_file": str(file_path),
+                        })
+            else:
+                raw = file_path.read_bytes()
+                for m in re.finditer(rb"([A-Za-z0-9_\-\./\s]{4,160}\.(?:pdf|docx?|xlsx?|pptx?|txt|jpg|png|zip))", raw):
+                    p_str = m.group(1).decode("utf-8", errors="ignore").strip()
+                    records.append({
+                        "cloud_provider": "Dropbox",
+                        "account": "Dropbox User",
+                        "local_path": p_str,
+                        "cloud_path_or_id": Path(p_str).name,
+                        "file_size": 0,
+                        "modified_time": mtime,
+                        "status": "SYNCED",
+                        "source_file": str(file_path),
+                    })
+        except Exception as ex:
+            self._log(f"Dropbox parse notice on {file_path.name}: {ex}", "WARNING")
+        return records
+
     def parse(self) -> Dict[str, int]:
         """
         Scan staging directory for cloud storage metadata and ingest into DuckDB.
@@ -380,6 +419,7 @@ class CloudParser(BaseParser):
         candidate_onedrive_dat: List[Path] = []
         candidate_onedrive_ini: List[Path] = []
         candidate_gdrive_db: List[Path] = []
+        candidate_dropbox: List[Path] = []
 
         for p in self.staging_dir.rglob("*"):
             if not p.is_file():
@@ -400,10 +440,13 @@ class CloudParser(BaseParser):
                 candidate_onedrive_dat.append(p)
             elif "metadata_sqlite_db" in name_lower or (name_lower.endswith(".db") and ("drivefs" in path_lower or "google" in path_lower)):
                 candidate_gdrive_db.append(p)
+            elif "dropbox" in path_lower and (name_lower in ("info.json", "nucleus.sqlite3", "filecache.dbx") or name_lower.endswith(".dbx")):
+                candidate_dropbox.append(p)
 
         self._log(
             f"Found {len(candidate_onedrive_db)} OneDrive DBs, {len(candidate_safedelete_db)} SafeDelete DBs, "
-            f"{len(candidate_onedrive_ini)} INIs, {len(candidate_onedrive_dat)} DATs, and {len(candidate_gdrive_db)} Google Drive DBs."
+            f"{len(candidate_onedrive_ini)} INIs, {len(candidate_onedrive_dat)} DATs, {len(candidate_gdrive_db)} Google Drive DBs, "
+            f"and {len(candidate_dropbox)} Dropbox files."
         )
 
         with tempfile.TemporaryDirectory() as temp_dir_str:
@@ -452,6 +495,14 @@ class CloudParser(BaseParser):
                 except Exception as ex:
                     self._log(f"Error parsing OneDrive DAT {dat}: {ex}", "WARNING")
 
+            # 6. Parse Dropbox
+            for dbx in candidate_dropbox:
+                try:
+                    records = self._parse_dropbox_file(dbx)
+                    all_records.extend(records)
+                except Exception as ex:
+                    self._log(f"Error parsing Dropbox file {dbx}: {ex}", "WARNING")
+
         if all_records:
             row_count = self.insert_records(
                 table_name="parsed_cloud_files",
@@ -459,7 +510,7 @@ class CloudParser(BaseParser):
                 schema_ddl=CLOUD_SCHEMA_DDL,
                 artifact_id="cloud_storage_files",
                 category="CLOUD",
-                display_name="Cloud Storage Files (OneDrive / Google Drive)",
+                display_name="Cloud Storage Files (OneDrive / Google Drive / Dropbox)",
                 source_tool="CloudParser",
             )
         else:

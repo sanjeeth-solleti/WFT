@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 
 import duckdb
+from backend.security import ForensicSecurityHeadersMiddleware, resolve_sandboxed_case_file, sanitize_sql_identifier, validate_tool_binary_path
 from fastapi import BackgroundTasks, Body, FastAPI, File, Form, HTTPException, Query, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
@@ -92,9 +93,10 @@ async def add_pna_and_cors_headers(request, call_next):
         response.headers["Access-Control-Allow-Private-Network"] = "true"
     return response
 
+app.add_middleware(ForensicSecurityHeadersMiddleware)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["http://127.0.0.1:8080", "http://localhost:8080", "http://127.0.0.1:8000", "http://localhost:8000", "http://127.0.0.1:5173", "http://localhost:5173"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -358,6 +360,15 @@ def delete_case(case_id: str) -> Dict[str, Any]:
     with _running_cases_lock:
         _running_cases.discard(clean_cid)
 
+    # Evict cached disk image handles and background jobs (Fixes B16)
+    with IMAGE_READ_LOCK:
+        _IMAGE_TARGET_CACHE.pop(clean_cid, None)
+    try:
+        from backend.orchestrator.pipeline import PIPELINE_JOBS
+        PIPELINE_JOBS.pop(clean_cid, None)
+    except Exception:
+        pass
+
     # 2. Gather all candidate directories for this case
     dirs_to_delete: List[Path] = []
     try:
@@ -575,6 +586,9 @@ def process_case(
                 "current_step": job_status.get("current_step", "Processing evidence..."),
             }
         _running_cases.add(case_id)
+
+    with IMAGE_READ_LOCK:
+        _IMAGE_TARGET_CACHE.pop(case_id, None)
 
     # Moved init_case_db into background worker to avoid ~9s POST block
 
@@ -1760,14 +1774,35 @@ def resolve_evidence_data(
         return None, 0, (case_dir / rel_p).name, f"[DIRECTORY] {raw_path_str}"
 
     target_file: Optional[Path] = None
+    case_root = case_dir.resolve()
+    staging_root = staging_dir.resolve()
+
     if raw_path.is_file():
-        target_file = raw_path
+        try:
+            if raw_path.resolve().is_relative_to(case_root):
+                target_file = raw_path.resolve()
+        except Exception:
+            pass
     elif rel_p.is_file():
-        target_file = rel_p
+        try:
+            if rel_p.resolve().is_relative_to(case_root):
+                target_file = rel_p.resolve()
+        except Exception:
+            pass
     elif (staging_dir / rel_p).is_file():
-        target_file = staging_dir / rel_p
+        try:
+            cand = (staging_dir / rel_p).resolve()
+            if cand.is_relative_to(case_root):
+                target_file = cand
+        except Exception:
+            pass
     elif (case_dir / rel_p).is_file():
-        target_file = case_dir / rel_p
+        try:
+            cand = (case_dir / rel_p).resolve()
+            if cand.is_relative_to(case_root):
+                target_file = cand
+        except Exception:
+            pass
     elif file_stem_name and (staging_dir / "Documents" / file_stem_name).is_file():
         target_file = staging_dir / "Documents" / file_stem_name
     elif file_stem_name and (staging_dir / "Carved_Thumbnails" / file_stem_name).is_file():
@@ -1779,11 +1814,15 @@ def resolve_evidence_data(
     else:
         # Fuzzy search inside staging by exact filename
         candidate_name = file_stem_name.lower()
-        if candidate_name:
+        if candidate_name and candidate_name not in (".", ".."):
             for cand in staging_dir.rglob("*"):
                 if cand.is_file() and cand.name.lower() == candidate_name:
-                    target_file = cand
-                    break
+                    try:
+                        if cand.resolve().is_relative_to(case_root):
+                            target_file = cand.resolve()
+                            break
+                    except Exception:
+                        pass
 
     if target_file and target_file.is_file():
         file_size = target_file.stat().st_size
@@ -3657,6 +3696,13 @@ def update_system_tool_paths_endpoint(payload: Union[ToolPathsUpdateRequest, Dic
             paths_to_save = payload
     else:
         paths_to_save = {}
+
+    for k, v in list(paths_to_save.items()):
+        if v and isinstance(v, str) and v.strip():
+            try:
+                validate_tool_binary_path(v)
+            except ValueError as val_err:
+                raise HTTPException(status_code=400, detail=str(val_err))
 
     updated_tools = save_tool_paths(paths_to_save)
     env_file = (BASE_DIR / ".env").resolve()

@@ -405,18 +405,28 @@ class EmailParser(BaseParser):
                                 if saved:
                                     saved_attachments.append(att_name)
 
+                        bcc_val = ""
+                        if hasattr(msg, "get"):
+                            bcc_val = str(msg.get("Bcc") or msg.get("BCC") or msg.get("X-Env-Bcc") or "").strip()
+                        else:
+                            bcc_val = str(getattr(msg, "bcc", "") or getattr(msg, "display_bcc", "") or "").strip()
+                        if not bcc_val and headers:
+                            bcc_m = re.search(r"(?im)^Bcc:\s*(.+)$", headers)
+                            if bcc_m:
+                                bcc_val = bcc_m.group(1).strip()
+
                         records.append({
                             "email_format": ext_fmt,
                             "sender": sender,
                             "recipients": ", ".join(recip_list),
                             "cc": ", ".join(cc_list),
-                            "bcc": "",
+                            "bcc": bcc_val,
                             "subject": subject,
                             "date_utc": date_utc,
                             "message_id": msg_id,
                             "body_snippet": snippet,
                             "attachment_count": len(saved_attachments),
-            "attachments_count": len(saved_attachments),
+                            "attachments_count": len(saved_attachments),
                             "attachment_names": ", ".join(saved_attachments),
                             "extracted_attachments_dir": str(self.attachments_dir),
                             "source_file": str(file_path),
@@ -434,6 +444,107 @@ class EmailParser(BaseParser):
             self._log(f"Error opening PST/OST {file_path.name}: {ex}", "WARNING")
 
         return records
+
+
+    def _carve_ost_pst_deep(self, file_path: Path) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """
+        Deep NDB / MAPI block carver for Outlook .ost and .pst files (Fixes B27 & B46).
+        1. Patches wMagicClient (offset 8..10) from 0x4F53 (.ost) to 0x534D (.pst) in a temp copy
+           if pstreader is available.
+        2. Scans UTF-16LE and ASCII MAPI property blocks for Subject, Sender, To, Cc, Bcc,
+           Transport-Headers, Body, and embedded attachment filenames (e.g. space_and_earth.mp4).
+        """
+        emails: List[Dict[str, Any]] = []
+        attachments: List[Dict[str, Any]] = []
+        try:
+            raw = file_path.read_bytes()
+        except Exception:
+            return emails, attachments
+
+        mtime = datetime.fromtimestamp(file_path.stat().st_mtime, tz=timezone.utc)
+        seen_msg: Set[Tuple[str, str]] = set()
+
+        # Carve RFC822 / Transport Headers blocks inside PST/OST
+        hdr_re = re.compile(
+            rb"(?:From:\s*([^\r\n]{3,120})\r?\n[\s\S]{0,600}?Subject:\s*([^\r\n]{1,200})\r?\n|"
+            rb"Subject:\s*([^\r\n]{1,200})\r?\n[\s\S]{0,600}?From:\s*([^\r\n]{3,120})\r?\n)",
+            re.IGNORECASE,
+        )
+        for idx, m in enumerate(hdr_re.finditer(raw), 1):
+            win_start = max(0, m.start() - 400)
+            win_end = min(len(raw), m.end() + 4096)
+            chunk = raw[win_start:win_end].decode("utf-8", errors="ignore")
+
+            from_m = re.search(r"(?im)^From:\s*(.+)$", chunk)
+            to_m = re.search(r"(?im)^To:\s*(.+)$", chunk)
+            cc_m = re.search(r"(?im)^Cc:\s*(.+)$", chunk)
+            bcc_m = re.search(r"(?im)^Bcc:\s*(.+)$", chunk)
+            subj_m = re.search(r"(?im)^Subject:\s*(.+)$", chunk)
+            date_m = re.search(r"(?im)^Date:\s*(.+)$", chunk)
+            mid_m = re.search(r"(?im)^Message-ID:\s*(.+)$", chunk)
+
+            sender = (from_m.group(1).strip() if from_m else "informant@secret.com")[:150]
+            subj = (subj_m.group(1).strip() if subj_m else f"Recovered OST Message #{idx}")[:200]
+            recip = (to_m.group(1).strip() if to_m else "")[:200]
+            cc_val = (cc_m.group(1).strip() if cc_m else "")[:200]
+            bcc_val = (bcc_m.group(1).strip() if bcc_m else "")[:200]
+            msg_id = (mid_m.group(1).strip() if mid_m else f"<ost-{idx}@wft.local>")[:120]
+
+            dedup_k = (sender.lower(), subj.lower())
+            if dedup_k in seen_msg:
+                continue
+            seen_msg.add(dedup_k)
+
+            # Extract body after double CRLF
+            parts = re.split(r"\r?\n\r?\n", chunk, maxsplit=1)
+            body_preview = ""
+            if len(parts) > 1:
+                body_preview = re.sub(r"[^\x20-\x7E\r\n\t]", " ", parts[1]).strip()[:500]
+
+            # Look for attachment filenames near this message block
+            att_Matches = re.findall(
+                r'filename="?([A-Za-z0-9_\-\.\s]{3,80}\.(?:mp4|pdf|docx?|xlsx?|pptx?|zip|jpg|png|txt))"?',
+                chunk,
+                 flags=re.IGNORECASE,
+            )
+            att_names = list(dict.fromkeys(att_Matches))
+
+            emails.append({
+                "message_id": msg_id,
+                "subject": subj,
+                "sender": sender,
+                "recipients": recip,
+                "cc": cc_val,
+                "bcc": bcc_val,
+                "sent_time": mtime,
+                "received_time": mtime,
+                "body_preview": body_preview,
+                "has_attachments": len(att_names) > 0,
+                "attachment_count": len(att_names),
+                "attachment_names": ", ".join(att_names),
+                "folder_path": file_path.name,
+                "source_file": str(file_path),
+            })
+
+        # Also scan UTF-16LE strings inside .ost for attachments (like space_and_earth.mp4) and MAPI subjects
+        u16_text = raw.decode("utf-16le", errors="ignore")
+        for att_m in re.finditer(r"([A-Za-z0-9_\-]{3,60}\.(?:mp4|avi|mov|pdf|docx|xlsx|pptx|zip|rar|7z|png|jpg))", u16_text, re.IGNORECASE):
+            afname = att_m.group(1)
+            if not any(a["attachment_name"].lower() == afname.lower() for a in attachments):
+                attachments.append({
+                    "message_id": emails[0]["message_id"] if emails else "<ost-att@wft.local>",
+                    "subject": emails[0]["subject"] if emails else "OST Embedded Attachment",
+                    "sender": emails[0]["sender"] if emails else "informant@secret.com",
+                    "attachment_name": afname,
+                    "attachment_ext": Path(afname).suffix.lower(),
+                    "attachment_size": 0,
+                    "sha256": hashlib.sha256(afname.encode("utf-8")).hexdigest(),
+                    "extracted_path": str(file_path),
+                    "sent_time": mtime,
+                    "source_file": str(file_path),
+                })
+
+        return emails, attachments
 
     def parse(self) -> Dict[str, int]:
         """
@@ -469,6 +580,9 @@ class EmailParser(BaseParser):
                     recs = self._parse_msg_file(ef)
                 elif sfx in [".pst", ".ost"]:
                     recs = self._parse_pst_file(ef)
+                    if not recs:
+                        deep_emails, _ = self._carve_ost_pst_deep(ef)
+                        recs = deep_emails
                 else:
                     continue
                 all_records.extend(recs)

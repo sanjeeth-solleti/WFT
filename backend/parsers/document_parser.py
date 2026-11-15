@@ -282,10 +282,10 @@ class DocumentParser(BaseParser):
             if doc.embfile_count() > 0:
                 has_macros = True
             else:
-                # Binary scan for JavaScript catalog objects
+                # Binary scan for JavaScript catalog objects strictly matching PDF name tokens
                 with open(file_path, "rb") as f:
                     raw_head = f.read(min(file_size, 512 * 1024))
-                    if b"/JavaScript" in raw_head or b"/JS" in raw_head:
+                    if re.search(rb"/(?:JavaScript|JS)\b", raw_head):
                         has_macros = True
 
             doc.close()
@@ -357,10 +357,21 @@ class DocumentParser(BaseParser):
 
         # 2. Inspect ZIP structure for macros and relationship URLs
         try:
+            page_count = 1
             with zipfile.ZipFile(file_path, "r") as z:
                 names = z.namelist()
                 if any("vbaProject.bin" in n for n in names):
                     has_macros = True
+
+                # Real page count from docProps/app.xml
+                if "docProps/app.xml" in names:
+                    app_xml = z.read("docProps/app.xml").decode("utf-8", errors="replace")
+                    pg_m = re.search(r"<Pages>(\d+)</Pages>", app_xml)
+                    if pg_m:
+                        page_count = max(1, int(pg_m.group(1)))
+                    wd_m = re.search(r"<Words>(\d+)</Words>", app_xml)
+                    if wd_m and int(wd_m.group(1)) > 0:
+                        word_count = int(wd_m.group(1))
 
                 # Inspect rels XML for external target URLs
                 for n in names:
@@ -371,7 +382,7 @@ class DocumentParser(BaseParser):
                             if url.startswith(("http://", "https://", "ftp://")) and url not in embedded_links:
                                 embedded_links.append(url)
         except Exception:
-            pass
+            page_count = 1
 
         return {
             "file_path": self.resolve_evidence_path(file_path, file_size),
@@ -383,7 +394,7 @@ class DocumentParser(BaseParser):
             "last_modified_by": last_modified_by,
             "created_time": created_time,
             "modified_time": modified_time,
-            "page_count": 1,
+            "page_count": page_count,
             "word_count": word_count,
             "has_macros": has_macros,
             "embedded_links": json.dumps(embedded_links, ensure_ascii=False),
@@ -426,11 +437,15 @@ class DocumentParser(BaseParser):
             self._log(f"openpyxl error on {file_path.name}: {ex}", "DEBUG")
 
         # Check for macros and rels in ZIP
+        sheet_count = 1
         try:
             with zipfile.ZipFile(file_path, "r") as z:
                 names = z.namelist()
                 if any("vbaProject.bin" in n for n in names):
                     has_macros = True
+                sheets = [n for n in names if n.startswith("xl/worksheets/sheet") and n.endswith(".xml")]
+                if sheets:
+                    sheet_count = len(sheets)
                 for n in names:
                     if n.endswith(".rels"):
                         rels_content = z.read(n).decode("utf-8", errors="replace")
@@ -439,7 +454,7 @@ class DocumentParser(BaseParser):
                             if url.startswith(("http://", "https://", "ftp://")) and url not in embedded_links:
                                 embedded_links.append(url)
         except Exception:
-            pass
+            sheet_count = 1
 
         return {
             "file_path": self.resolve_evidence_path(file_path, file_size),
@@ -451,7 +466,7 @@ class DocumentParser(BaseParser):
             "last_modified_by": last_modified_by,
             "created_time": created_time,
             "modified_time": modified_time,
-            "page_count": 1,
+            "page_count": sheet_count,
             "word_count": 0,
             "has_macros": has_macros,
             "embedded_links": json.dumps(embedded_links, ensure_ascii=False),

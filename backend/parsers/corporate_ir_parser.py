@@ -1,4 +1,5 @@
-﻿"""
+from backend.security import sanitize_sql_identifier, strip_unsafe_xml_entities
+"""
 Windows Forensic Toolkit (WFT) DFIR Suite - Corporate Incident Response & Universal SQLite Parser
 Parses:
 1. Windows Scheduled Tasks XMLs -> parsed_scheduled_tasks
@@ -132,12 +133,12 @@ class CorporateIRParser(BaseParser):
 
                 for block_idx, block in enumerate(task_blocks):
                     try:
-                        root = ET.fromstring(block)
+                        root = ET.fromstring(strip_unsafe_xml_entities(block))
                     except ET.ParseError as pe:
                         # Attempt to wrap with xmlns strip
                         try:
                             block_no_ns = re.sub(r'\sxmlns="[^"]+"', '', block)
-                            root = ET.fromstring(block_no_ns)
+                            root = ET.fromstring(strip_unsafe_xml_entities(block_no_ns))
                         except Exception as inner_pe:
                             self._log(f"Failed parsing task XML block in {t_file.name}: {pe}", "WARNING")
                             continue

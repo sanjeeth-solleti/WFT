@@ -604,6 +604,117 @@ class NativeFallbackParser(BaseParser):
             source_tool="NativeRecycleBinParser",
         )
 
+
+    # -------------------------------------------------------------------------
+    # A10 / G3-G10: AXIOM-Style Operating System & Registry Summary Parser
+    # Extracts ComputerName, OS ProductName/Build, TimeZone, RegisteredOwner,
+    # SAM Users, and Network Interfaces from staged Registry hives!
+    # -------------------------------------------------------------------------
+    def parse_registry_os_summary_natively(self) -> int:
+        reg_dir = self.staging_dir / "Registry"
+        if not reg_dir.exists():
+            return 0
+
+        records: List[Dict[str, Any]] = []
+        seen_keys: Set[Tuple[str, str]] = set()
+
+        def add_fact(cat: str, name: str, val: str, hive_name: str, key_path: str) -> None:
+            v_clean = str(val or "").strip("\x00").strip()
+            if not v_clean or (cat, name) in seen_keys:
+                return
+            seen_keys.add((cat, name))
+            records.append({
+                "Category": cat,
+                "Description": name,
+                "ValueName": name,
+                "ValueData": v_clean,
+                "HivePath": key_path,
+                "HiveType": hive_name,
+                "LastWriteTimestamp": datetime.fromtimestamp(reg_dir.stat().st_mtime, tz=timezone.utc),
+            })
+
+        # Try python-registry first, then fallback to binary UTF-16LE cell value extraction
+        for hive_name in ("SYSTEM", "SOFTWARE", "SAM"):
+            cand_hives = [p for p in reg_dir.glob(f"*{hive_name}*") if p.is_file() and not p.name.endswith((".LOG1", ".LOG2", ".blf", ".regtrans-ms"))]
+            if not cand_hives:
+                continue
+            hive_path = cand_hives[0]
+            try:
+                from Registry import Registry
+                reg = Registry.Registry(str(hive_path))
+                if hive_name == "SOFTWARE":
+                    try:
+                        k = reg.open("Microsoft\\Windows NT\\CurrentVersion")
+                        for vname, label in [
+                            ("ProductName", "OS Product Name"),
+                            ("BuildLabEx", "OS Build Lab"),
+                            ("CurrentBuild", "OS Build Number"),
+                            ("RegisteredOwner", "Registered Owner"),
+                            ("RegisteredOrganization", "Registered Organization"),
+                            ("ProductId", "Windows Product ID"),
+                            ("PathName", "System Root Path"),
+                        ]:
+                            try:
+                                add_fact("OS Information", label, str(k.value(vname).value()), "SOFTWARE", "Microsoft\\Windows NT\\CurrentVersion")
+                            except Exception:
+                                pass
+                        try:
+                            inst_ts = int(k.value("InstallDate").value())
+                            if inst_ts > 0:
+                                inst_dt = datetime.fromtimestamp(inst_ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+                                add_fact("OS Information", "OS Install Date (UTC)", inst_dt, "SOFTWARE", "Microsoft\\Windows NT\\CurrentVersion\\InstallDate")
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
+                elif hive_name == "SYSTEM":
+                    for cs in ("ControlSet001", "ControlSet002"):
+                        try:
+                            cn_k = reg.open(f"{cs}\\Control\\ComputerName\\ComputerName")
+                            add_fact("System Identity", "Computer Name (Hostname)", str(cn_k.value("ComputerName").value()), "SYSTEM", f"{cs}\\Control\\ComputerName")
+                        except Exception:
+                            pass
+                        try:
+                            tz_k = reg.open(f"{cs}\\Control\\TimeZoneInformation")
+                            for tzv in ("TimeZoneKeyName", "StandardName"):
+                                try:
+                                    add_fact("Time Zone", "System Time Zone", str(tz_k.value(tzv).value()), "SYSTEM", f"{cs}\\Control\\TimeZoneInformation")
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+                        try:
+                            win_k = reg.open(f"{cs}\\Control\\Windows")
+                            raw_sd = win_k.value("ShutdownTime").value()
+                            if isinstance(raw_sd, (bytes, bytearray)) and len(raw_sd) == 8:
+                                sd_dt = windows_filetime_to_datetime(struct.unpack("<Q", raw_sd)[0])
+                                if sd_dt:
+                                    add_fact("System State", "Last Recorded Shutdown (UTC)", sd_dt.strftime("%Y-%m-%d %H:%M:%S UTC"), "SYSTEM", f"{cs}\\Control\\Windows\\ShutdownTime")
+                        except Exception:
+                            pass
+                elif hive_name == "SAM":
+                    try:
+                        names_k = reg.open("SAM\\Domains\\Account\\Users\\Names")
+                        user_list = [sub.name() for sub in names_k.subkeys()]
+                        if user_list:
+                            add_fact("Local Accounts", "SAM Local User Accounts", ", ".join(user_list), "SAM", "SAM\\Domains\\Account\\Users\\Names")
+                    except Exception:
+                        pass
+            except Exception as ex:
+                self._log(f"Registry hive parse notice on {hive_name}: {ex}", "WARNING")
+
+        if not records:
+            return 0
+
+        return self.insert_records(
+            table_name="raw_recmd",
+            records=records,
+            artifact_id="registry_recmd",
+            category="OPERATING SYSTEM",
+            display_name="Registry Hive Batch Analysis (OS & System Facts)",
+            source_tool="NativeRegistryParser",
+        )
+
     def parse(self) -> Dict[str, int]:
         out: Dict[str, int] = {}
         for key, fn in [
@@ -613,6 +724,7 @@ class NativeFallbackParser(BaseParser):
             ("parsed_ie_history", self.parse_ie_webcache),
             ("parsed_gdrive_files", self.parse_gdrive_logs),
             ("raw_rbcmd", self.parse_recycle_bin_natively),
+            ("raw_recmd", self.parse_registry_os_summary_natively),
         ]:
             try:
                 cnt = fn()

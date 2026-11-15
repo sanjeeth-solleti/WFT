@@ -382,7 +382,7 @@ class BaseParser:
         m_us = re.search(r"(?i)\\(Users\\.+)$", s_str)
         if m_us:
             return f"C:\\{m_us.group(1)}"
-        return f"C:\\Users\\Public\\{fname}"
+        return f"[Staged] {staged_file.name}"
 
     def parse(self) -> Dict[str, int]:
         self._log("Base parser parse() called", "INFO")

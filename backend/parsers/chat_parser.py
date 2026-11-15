@@ -430,7 +430,7 @@ class ChatParser(BaseParser):
                     "title": xml_data["title"][:1000],
                     "body": xml_data["body"][:4000],
                     "header": xml_data["header"][:500],
-                    "action_url": xml_data["action_url"][:2000],
+                    "action_url": xml_data["action_url"][:50000],
                     "source_file": str(db_path),
                 })
         finally:

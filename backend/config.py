@@ -515,6 +515,13 @@ EZ_BINARIES_SPEC: List[Dict[str, str]] = [
         "name": "RecentFileCacheParser.exe (RecentFileCache)",
         "description": "Parses RecentFileCache.bcf from legacy Windows systems",
     },
+    {
+        "key": "ez_sumecmd",
+        "env_var": "WFT_EZ_SUMECMD_EXE",
+        "binary": "SumECmd.exe",
+        "name": "SumECmd.exe (User Access Logging)",
+        "description": "Parses Microsoft User Access Logging (UAL) database (Current.mdb)",
+    },
 ]
 
 EZ_BINARY_TO_ENV: Dict[str, str] = {
@@ -615,7 +622,7 @@ def find_ez_binary(exe_name: str) -> Path:
     # Priority 2: Recursive search in EZ tools directories (WFT_EZTOOLS_DIR, tools/ez_tools, EZTools)
     search_dirs = get_ez_tools_dirs()
     for search_root in search_dirs:
-        if search_root.is_dir():
+        if search_root.is_dir() and search_root.resolve() not in (Path("/"), Path("C:\\")):
             for candidate in search_root.rglob("*.exe"):
                 if candidate.name.lower() == target_lower:
                     return candidate.resolve()
