@@ -4,7 +4,6 @@ import {
   CheckCircle2,
   AlertTriangle,
   XCircle,
-  Clock,
   Terminal,
   Cpu,
   Shield,
@@ -12,13 +11,10 @@ import {
   FolderOpen,
   Zap,
   Activity,
-  Layers,
   Search,
-  HardDrive,
   FileText,
   Disc,
   ListChecks,
-  ChevronRight,
   ArrowLeft,
   ArrowRight,
   Eye,
@@ -45,9 +41,6 @@ interface ProcessWizardProps {
   onNavigateToExamine?: () => void;
 }
 
-// ---------------------------------------------------------------------------
-// Static Catalog for Step 3: Select Artifacts (Authentic WFT Taxonomy)
-// ---------------------------------------------------------------------------
 interface CatalogItem {
   id: string;
   name: string;
@@ -189,23 +182,18 @@ export const ProcessWizard: React.FC<ProcessWizardProps> = ({
 }) => {
   const [currentStep, setCurrentStep] = useState<number>(1);
 
-  // Step 1: Case Details
   const [caseName, setCaseName] = useState(`Incident_${new Date().toISOString().slice(0, 10).replace(/-/g, '')}`);
   const [caseNumber, setCaseNumber] = useState(`DFIR-${new Date().getFullYear()}-${Math.floor(1000 + Math.random() * 9000)}`);
   const [examinerName, setExaminerName] = useState('');
   const [caseNotes, setCaseNotes] = useState('');
 
-  // Step 2: Evidence Sources (Exclusively Forensic Disk Images)
   const [sourceType, setSourceType] = useState<'folder' | 'live_triage' | 'image' | 'directory'>('image');
   const [sourcePath, setSourcePath] = useState('');
-  const [selectedImageFile, setSelectedImageFile] = useState<string>('');
 
-  // Step 1 & 2 Path Validation & In-App Browsing
   const [pathValidation, setPathValidation] = useState<ValidatePathResponse | null>(null);
   const [isValidatingPath, setIsValidatingPath] = useState<boolean>(false);
   const [targetStorageDir, setTargetStorageDir] = useState<string>('');
 
-  // In-App File & Drive Explorer Modal State
   const [fileBrowserOpen, setFileBrowserOpen] = useState<boolean>(false);
   const [fileBrowserMode, setFileBrowserMode] = useState<'file' | 'folder'>('file');
   const [fileBrowserTarget, setFileBrowserTarget] = useState<'evidence' | 'storage'>('evidence');
@@ -232,14 +220,9 @@ export const ProcessWizard: React.FC<ProcessWizardProps> = ({
       }
     } else {
       setTargetStorageDir(clean);
-      const folderName = clean.replace(/[\\/]+$/, '').split(/[\\/]/).pop();
-      if (folderName && !['cases', 'wft_cases', 'desktop'].includes(folderName.toLowerCase()) && caseName.startsWith('Incident_')) {
-        setCaseName(folderName);
-      }
     }
   };
 
-  // Validate path on disk via backend
   const validateInputPath = async (p: string) => {
     const clean = p.trim().replace(/^["']|["']$/g, '').trim();
     if (!clean) {
@@ -269,7 +252,6 @@ export const ProcessWizard: React.FC<ProcessWizardProps> = ({
     }
   };
 
-  // Debounced auto-validation on path change
   useEffect(() => {
     if (!sourcePath.trim()) {
       setPathValidation(null);
@@ -282,7 +264,6 @@ export const ProcessWizard: React.FC<ProcessWizardProps> = ({
     return () => clearTimeout(timer);
   }, [sourcePath]);
 
-  // Step 3: Select Artifacts
   const [selectedCategory, setSelectedCategory] = useState<string>('Operating System');
   const [selectedArtifactIds, setSelectedArtifactIds] = useState<Set<string>>(() => {
     const all = new Set<string>();
@@ -293,7 +274,6 @@ export const ProcessWizard: React.FC<ProcessWizardProps> = ({
   const [enableOcr, setEnableOcr] = useState(true);
   const [step3SubTab, setStep3SubTab] = useState<'artifacts' | 'keywords'>('artifacts');
 
-  // Step 3 Resizable Category Column
   const step3ContainerRef = useRef<HTMLDivElement>(null);
   const step3Left = useResizable({
     initialWidth: 288,
@@ -305,7 +285,6 @@ export const ProcessWizard: React.FC<ProcessWizardProps> = ({
     minCenterWidth: 320,
   });
 
-  // Step 4: Status, Running, Logs
   const [activeCaseId, setActiveCaseId] = useState<string>(currentCaseId);
   const [statusData, setStatusData] = useState<CaseStatusResponse | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -320,7 +299,6 @@ export const ProcessWizard: React.FC<ProcessWizardProps> = ({
     }
   }, [currentCaseId]);
 
-  // Status Polling for Step 4
   useEffect(() => {
     if (!activeCaseId) return;
     setStatusData((prev) => (prev && prev.case_id !== activeCaseId ? null : prev));
@@ -351,7 +329,6 @@ export const ProcessWizard: React.FC<ProcessWizardProps> = ({
     };
   }, [activeCaseId, statusData?.status, isSubmitting]);
 
-  // Handle Preset Selection in Step 1 (Classic Enterprise Presets)
   const applyPreset = (preset: 'quick' | 'comprehensive' | 'malware') => {
     const all = new Set<string>();
     if (preset === 'quick') {
@@ -373,20 +350,15 @@ export const ProcessWizard: React.FC<ProcessWizardProps> = ({
     }
   };
 
-  // Toggle individual artifact in Step 3
   const toggleArtifact = (id: string) => {
     setSelectedArtifactIds((prev) => {
       const next = new Set(prev);
-      if (next.has(id)) {
-        next.delete(id);
-      } else {
-        next.add(id);
-      }
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
       return next;
     });
   };
 
-  // Select / Deselect All for current category
   const toggleCategoryAll = (catName: string, select: boolean) => {
     const cat = ARTIFACT_CATEGORIES_CATALOG.find((c) => c.category === catName);
     if (!cat) return;
@@ -400,9 +372,8 @@ export const ProcessWizard: React.FC<ProcessWizardProps> = ({
     });
   };
 
-  // Select / Deselect All Globally
   const toggleAllGlobally = (select: boolean) => {
-    setSelectedArtifactIds((prev) => {
+    setSelectedArtifactIds(() => {
       const next = new Set<string>();
       if (select) {
         ARTIFACT_CATEGORIES_CATALOG.forEach((cat) => cat.items.forEach((item) => next.add(item.id)));
@@ -411,16 +382,16 @@ export const ProcessWizard: React.FC<ProcessWizardProps> = ({
     });
   };
 
-  // Step 4: Submit Processing Job
+  // Single-click Process Evidence: starts immediately and jumps directly to live execution monitor
   const handleStartProcessing = async () => {
     if (isSubmitting || statusData?.status === 'RUNNING') return;
     setIsSubmitting(true);
     setSubmissionError(null);
 
-    let finalSourcePath = sourcePath.trim().replace(/^["']|["']$/g, '').trim();
-    finalSourcePath = finalSourcePath || selectedImageFile;
+    const finalSourcePath = sourcePath.trim().replace(/^["']|["']$/g, '').trim();
     if (!finalSourcePath) {
-      setSubmissionError('Please specify the file path to the forensic disk image (.E01, .VHDX, .VMDK, .RAW, .DD, .ISO).');
+      setSubmissionError('Please select an evidence folder or forensic disk image in Step 2 first.');
+      setCurrentStep(2);
       setIsSubmitting(false);
       return;
     }
@@ -430,7 +401,7 @@ export const ProcessWizard: React.FC<ProcessWizardProps> = ({
       const req: ProcessCaseRequest = {
         case_name: caseName.trim(),
         source_type: sourceType,
-        source_path: finalSourcePath || undefined,
+        source_path: finalSourcePath,
         target_dir: cleanTarget || undefined,
         enable_yara: enableYara,
         enable_ocr: enableOcr,
@@ -438,7 +409,14 @@ export const ProcessWizard: React.FC<ProcessWizardProps> = ({
       };
 
       const res = await apiClient.processCase(req);
-      setStatusData(null);
+      setStatusData({
+        case_id: res.case_id,
+        status: 'RUNNING',
+        progress: 5,
+        current_step: 'Initializing forensic evidence pipeline...',
+        logs: [],
+        total_logs: 0,
+      });
       setActiveCaseId(res.case_id);
       setCurrentStep(4);
       onCaseCreated(res.case_id);
@@ -449,7 +427,6 @@ export const ProcessWizard: React.FC<ProcessWizardProps> = ({
     }
   };
 
-  // Filter logs for Step 4
   const logs: ProcessingLog[] = statusData?.logs || [];
   const filteredLogs = logs.filter((l) => {
     if (moduleFilter !== 'ALL' && l.status !== moduleFilter) return false;
@@ -466,9 +443,9 @@ export const ProcessWizard: React.FC<ProcessWizardProps> = ({
 
   const steps = [
     { num: 1, title: 'Case Details', subtitle: 'Case identifiers & acquisition profiles', icon: FileText },
-    { num: 2, title: 'Evidence Sources', subtitle: 'Forensic image file mounting', icon: Disc },
+    { num: 2, title: 'Evidence Sources', subtitle: 'Forensic image or folder selection', icon: Disc },
     { num: 3, title: 'Processing Options', subtitle: 'Artifact parsers & IOC keywords', icon: ListChecks },
-    { num: 4, title: 'Process Evidence', subtitle: 'Job monitor & execution logs', icon: Terminal },
+    { num: 4, title: 'Execution Monitor', subtitle: 'Live job progress & audit logs', icon: Terminal },
   ];
 
   const activeCategoryObj = ARTIFACT_CATEGORIES_CATALOG.find((c) => c.category === selectedCategory);
@@ -479,358 +456,308 @@ export const ProcessWizard: React.FC<ProcessWizardProps> = ({
   return (
     <>
       <div className="flex flex-col h-full bg-[#f1f5f9] dark:bg-[#0f172a] text-[#0f172a] dark:text-[#f8fafc] overflow-hidden font-sans select-none">
-      {/* WFT Top Header Bar (Classic Enterprise) */}
-      <div className="h-12 bg-white dark:bg-[#1e293b] border-b border-[#cbd5e1] dark:border-[#334155] px-4 flex items-center justify-between shrink-0 select-none">
-        <div className="flex items-center gap-3">
-          <div className="flex items-center gap-2">
-            <span className="font-bold tracking-wider text-sm text-[#0284c7] dark:text-[#38bdf8] font-mono">WINDOWS FORENSIC TOOLKIT (WFT) PROCESS</span>
+        <div className="h-12 bg-white dark:bg-[#1e293b] border-b border-[#cbd5e1] dark:border-[#334155] px-4 flex items-center justify-between shrink-0 select-none">
+          <div className="flex items-center gap-3">
+            <span className="font-bold tracking-wider text-sm text-[#0284c7] dark:text-[#38bdf8] font-mono">
+              WINDOWS FORENSIC TOOLKIT (WFT) PROCESS
+            </span>
+            <span className="text-slate-300 dark:text-slate-600">|</span>
+            <span className="text-xs text-slate-500 dark:text-slate-400">
+              Forensic Acquisition & Evidence Ingestion Workbench
+            </span>
           </div>
-          <span className="text-slate-300 dark:text-slate-600">|</span>
-          <span className="text-xs text-slate-500 dark:text-slate-400">Forensic Acquisition & Evidence Ingestion Workbench</span>
+
+          <div className="flex items-center gap-2">
+            {/* Single-Click Process Evidence Button available directly in header once source path is selected */}
+            {sourcePath.trim() && currentStep !== 4 && (
+              <button
+                type="button"
+                onClick={handleStartProcessing}
+                disabled={isSubmitting || statusData?.status === 'RUNNING'}
+                className="flex items-center gap-1.5 px-3.5 py-1 bg-[#166534] hover:bg-emerald-800 text-white rounded text-xs font-bold transition-colors shadow-2xs cursor-pointer"
+              >
+                <Play className="w-3.5 h-3.5 fill-current" />
+                <span>Process Evidence Now</span>
+              </button>
+            )}
+
+            {onNavigateToExamine && (
+              <button
+                onClick={onNavigateToExamine}
+                className="flex items-center gap-1.5 px-3 py-1 bg-white hover:bg-slate-50 dark:bg-[#0f172a] dark:hover:bg-[#334155] border border-[#cbd5e1] dark:border-[#334155] text-[#0284c7] dark:text-[#38bdf8] rounded text-xs font-semibold transition-colors shadow-2xs cursor-pointer"
+              >
+                <Eye className="w-3.5 h-3.5" />
+                <span>Go to Examine</span>
+              </button>
+            )}
+            {isOpenAsModal && onCloseModal && (
+              <button
+                onClick={onCloseModal}
+                className="p-1 hover:bg-slate-100 dark:hover:bg-[#334155] rounded text-slate-500 hover:text-[#0f172a] dark:hover:text-white transition-colors cursor-pointer"
+                title="Close Wizard"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            )}
+          </div>
         </div>
 
-        <div className="flex items-center gap-2">
-          {onNavigateToExamine && (
-            <button
-              onClick={onNavigateToExamine}
-              className="flex items-center gap-1.5 px-3 py-1 bg-white hover:bg-slate-50 dark:bg-[#0f172a] dark:hover:bg-[#334155] border border-[#cbd5e1] dark:border-[#334155] text-[#0284c7] dark:text-[#38bdf8] rounded text-xs font-semibold transition-colors shadow-2xs cursor-pointer"
-              title="Open Evidence in WFT Examine"
-            >
-              <Eye className="w-3.5 h-3.5" />
-              <span>Go to Examine</span>
-            </button>
-          )}
-          {isOpenAsModal && onCloseModal && (
-            <button
-              onClick={onCloseModal}
-              className="p-1 hover:bg-slate-100 dark:hover:bg-[#334155] rounded text-slate-500 hover:text-[#0f172a] dark:hover:text-white transition-colors cursor-pointer"
-              title="Close Wizard"
-            >
-              <X className="w-4 h-4" />
-            </button>
-          )}
-        </div>
-      </div>
+        <div className="flex-1 flex overflow-hidden">
+          <div className="w-64 bg-white dark:bg-[#1e293b] border-r border-[#cbd5e1] dark:border-[#334155] flex flex-col justify-between shrink-0 select-none p-4">
+            <div className="space-y-6">
+              <div className="text-[11px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400 font-mono">
+                Workflow Steps
+              </div>
 
-      {/* Main Body: Left Stepper Navigation + Right Step Content */}
-      <div className="flex-1 flex overflow-hidden">
-        {/* Left Stepper Navigation (Authentic WFT Process Wizard Left Bar) */}
-        <div className="w-64 bg-white dark:bg-[#1e293b] border-r border-[#cbd5e1] dark:border-[#334155] flex flex-col justify-between shrink-0 select-none p-4">
-          <div className="space-y-6">
-            <div className="text-[11px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400 font-mono">
-              Workflow Steps
-            </div>
+              <div className="space-y-2">
+                {steps.map((st) => {
+                  const isActive = currentStep === st.num;
+                  const isPassed = currentStep > st.num;
 
-            <div className="space-y-2">
-              {steps.map((st) => {
-                const isActive = currentStep === st.num;
-                const isPassed = currentStep > st.num;
-
-                return (
-                  <button
-                    key={st.num}
-                    onClick={() => setCurrentStep(st.num)}
-                    className={`w-full flex items-start gap-3 p-2.5 rounded text-left transition-all cursor-pointer border ${
-                      isActive
-                        ? 'bg-[#bae6fd] dark:bg-[#0c4a6e] border-[#0284c7] dark:border-[#38bdf8] text-[#0f172a] dark:text-[#f8fafc] font-bold shadow-2xs'
-                        : isPassed
-                        ? 'bg-slate-50 dark:bg-[#0f172a] hover:bg-slate-100 dark:hover:bg-[#334155] border-[#cbd5e1] dark:border-[#334155] text-slate-700 dark:text-slate-300'
-                        : 'bg-transparent hover:bg-slate-100 dark:hover:bg-[#0f172a]/40 border-transparent text-slate-400 dark:text-slate-500'
-                    }`}
-                  >
-                    <div
-                      className={`w-6 h-6 rounded flex items-center justify-center shrink-0 text-xs font-mono font-bold transition-colors ${
+                  return (
+                    <button
+                      key={st.num}
+                      onClick={() => setCurrentStep(st.num)}
+                      className={`w-full flex items-start gap-3 p-2.5 rounded text-left transition-all cursor-pointer border ${
                         isActive
-                          ? 'bg-[#0284c7] text-white'
+                          ? 'bg-[#bae6fd] dark:bg-[#0c4a6e] border-[#0284c7] dark:border-[#38bdf8] text-[#0f172a] dark:text-[#f8fafc] font-bold shadow-2xs'
                           : isPassed
-                          ? 'bg-slate-200 dark:bg-[#1e293b] text-slate-700 dark:text-slate-300 border border-[#cbd5e1] dark:border-[#334155]'
-                          : 'bg-slate-100 dark:bg-[#0f172a] text-slate-400 dark:text-slate-500 border border-[#cbd5e1] dark:border-[#334155]'
+                          ? 'bg-slate-50 dark:bg-[#0f172a] hover:bg-slate-100 dark:hover:bg-[#334155] border-[#cbd5e1] dark:border-[#334155] text-slate-700 dark:text-slate-300'
+                          : 'bg-transparent hover:bg-slate-100 dark:hover:bg-[#0f172a]/40 border-transparent text-slate-400 dark:text-slate-500'
                       }`}
                     >
-                      {isPassed ? <Check className="w-3.5 h-3.5 stroke-[3]" /> : st.num}
-                    </div>
-
-                    <div className="min-w-0 flex-1 pt-0.5">
-                      <div className={`text-xs font-bold leading-tight ${isActive ? 'text-[#0f172a] dark:text-[#f8fafc]' : 'text-slate-700 dark:text-slate-300'}`}>
-                        {st.title}
+                      <div
+                        className={`w-6 h-6 rounded flex items-center justify-center shrink-0 text-xs font-mono font-bold transition-colors ${
+                          isActive
+                            ? 'bg-[#0284c7] text-white'
+                            : isPassed
+                            ? 'bg-slate-200 dark:bg-[#1e293b] text-slate-700 dark:text-slate-300 border border-[#cbd5e1] dark:border-[#334155]'
+                            : 'bg-slate-100 dark:bg-[#0f172a] text-slate-400 dark:text-slate-500 border border-[#cbd5e1] dark:border-[#334155]'
+                        }`}
+                      >
+                        {isPassed ? <Check className="w-3.5 h-3.5 stroke-[3]" /> : st.num}
                       </div>
-                      <div className="text-[10px] text-slate-500 dark:text-slate-400 truncate mt-0.5 font-sans">
-                        {st.subtitle}
+
+                      <div className="min-w-0 flex-1 pt-0.5">
+                        <div className={`text-xs font-bold leading-tight ${isActive ? 'text-[#0f172a] dark:text-[#f8fafc]' : 'text-slate-700 dark:text-slate-300'}`}>
+                          {st.title}
+                        </div>
+                        <div className="text-[10px] text-slate-500 dark:text-slate-400 truncate mt-0.5 font-sans">
+                          {st.subtitle}
+                        </div>
                       </div>
-                    </div>
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-
-          {/* Stepper Bottom Summary Badge */}
-          <div className="p-3 bg-slate-50 dark:bg-[#0f172a] border border-[#cbd5e1] dark:border-[#334155] rounded text-[11px] space-y-1.5 font-mono">
-            <div className="text-slate-500 dark:text-slate-400 flex justify-between">
-              <span>Target:</span>
-              <span className="text-[#0284c7] dark:text-[#38bdf8] font-bold uppercase truncate max-w-[120px]">
-                Disk Image
-              </span>
-            </div>
-            <div className="text-slate-500 dark:text-slate-400 flex justify-between">
-              <span>Artifacts:</span>
-              <span className="text-[#0f172a] dark:text-[#f8fafc] font-semibold">{selectedArtifactIds.size} Selected</span>
-            </div>
-            <div className="text-slate-500 dark:text-slate-400 flex justify-between">
-              <span>Threat YARA:</span>
-              <span className={enableYara ? 'text-[#166534] dark:text-emerald-400 font-bold' : 'text-slate-400'}>{enableYara ? 'Enabled' : 'Off'}</span>
-            </div>
-            <div className="text-slate-500 dark:text-slate-400 flex justify-between">
-              <span>Optical OCR:</span>
-              <span className={enableOcr ? 'text-[#166534] dark:text-emerald-400 font-bold' : 'text-slate-400'}>{enableOcr ? 'Enabled' : 'Off'}</span>
-            </div>
-          </div>
-        </div>
-
-        {/* Right Step Workbench Content */}
-        <div className="flex-1 flex flex-col overflow-hidden bg-[#f1f5f9] dark:bg-[#0f172a]">
-          {/* STEP 1: CASE DETAILS */}
-          {currentStep === 1 && (
-            <div className="flex-1 overflow-y-auto p-8 max-w-4xl space-y-6">
-              <div>
-                <h2 className="text-lg font-bold text-[#0f172a] dark:text-[#f8fafc] flex items-center gap-2">
-                  <FileText className="w-5 h-5 text-[#0284c7] dark:text-[#38bdf8]" />
-                  <span>Case Details & DFIR Acquisition Profile</span>
-                </h2>
-                <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
-                  Configure forensic case identifiers, examiner metadata, and select pre-tuned investigative profiles.
-                </p>
-              </div>
-
-              {/* DFIR Preset Buttons (Dense Enterprise Aesthetic) */}
-              <div className="space-y-2">
-                <label className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 font-mono">
-                  Quick Investigative Presets
-                </label>
-                <div className="grid grid-cols-3 gap-3">
-                  <button
-                    type="button"
-                    onClick={() => applyPreset('quick')}
-                    className="p-3 bg-white dark:bg-[#1e293b] hover:bg-slate-50 dark:hover:bg-[#334155] border border-[#cbd5e1] dark:border-[#334155] hover:border-[#0284c7] dark:hover:border-[#38bdf8] rounded text-left transition-colors cursor-pointer group shadow-2xs"
-                  >
-                    <div className="text-xs font-bold text-[#0f172a] dark:text-[#f8fafc] group-hover:text-[#0284c7] dark:group-hover:text-[#38bdf8] flex items-center justify-between">
-                      <span>Quick Triage</span>
-                      <Zap className="w-3.5 h-3.5 text-slate-400 group-hover:text-[#0284c7] dark:group-hover:text-[#38bdf8]" />
-                    </div>
-                    <div className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">
-                      Event Logs, Prefetch, LNK, USB, and ShimCache. Fast baseline in under 30 seconds.
-                    </div>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => applyPreset('comprehensive')}
-                    className="p-3 bg-white dark:bg-[#1e293b] hover:bg-slate-50 dark:hover:bg-[#334155] border border-[#0284c7] dark:border-[#38bdf8] rounded text-left transition-colors cursor-pointer group shadow-2xs"
-                  >
-                    <div className="text-xs font-bold text-[#0284c7] dark:text-[#38bdf8] flex items-center justify-between">
-                      <span>Comprehensive IR</span>
-                      <Cpu className="w-3.5 h-3.5 text-[#0284c7] dark:text-[#38bdf8]" />
-                    </div>
-                    <div className="text-[11px] text-slate-600 dark:text-slate-300 mt-1">
-                      All 15 EZ Tools, $MFT, $J, SRUM, Browsers, Chat, Emails, YARA-X & RapidOCR.
-                    </div>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => applyPreset('malware')}
-                    className="p-3 bg-white dark:bg-[#1e293b] hover:bg-slate-50 dark:hover:bg-[#334155] border border-[#cbd5e1] dark:border-[#334155] hover:border-[#0284c7] dark:hover:border-[#38bdf8] rounded text-left transition-colors cursor-pointer group shadow-2xs"
-                  >
-                    <div className="text-xs font-bold text-[#0f172a] dark:text-[#f8fafc] group-hover:text-[#0284c7] dark:group-hover:text-[#38bdf8] flex items-center justify-between">
-                      <span>Threat Hunting</span>
-                      <Shield className="w-3.5 h-3.5 text-slate-400 group-hover:text-[#0284c7] dark:group-hover:text-[#38bdf8]" />
-                    </div>
-                    <div className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">
-                      Full YARA-X rule execution, BAM/DAM execution, Tasks, PowerShell, and Registry persistence.
-                    </div>
-                  </button>
-                </div>
-              </div>
-
-              {/* Form Fields */}
-              <div className="grid grid-cols-2 gap-4">
-                <div className="space-y-1.5">
-                  <label className="text-xs font-semibold text-slate-700 dark:text-slate-300">Case Name / Directory Stem *</label>
-                  <input
-                    type="text"
-                    value={caseName}
-                    onChange={(e) => setCaseName(e.target.value)}
-                    placeholder="e.g. Incident_20261031_01"
-                    className="w-full bg-white dark:bg-[#1e293b] border border-[#cbd5e1] dark:border-[#334155] rounded px-3 py-2 text-xs text-[#0f172a] dark:text-[#f8fafc] font-mono focus:border-[#0284c7] focus:outline-none"
-                    required
-                  />
-                </div>
-
-                <div className="space-y-1.5">
-                  <label className="text-xs font-semibold text-slate-700 dark:text-slate-300">Case Number / Incident Ticket</label>
-                  <input
-                    type="text"
-                    value={caseNumber}
-                    onChange={(e) => setCaseNumber(e.target.value)}
-                    placeholder="e.g. DFIR-2026-0891"
-                    className="w-full bg-white dark:bg-[#1e293b] border border-[#cbd5e1] dark:border-[#334155] rounded px-3 py-2 text-xs text-[#0f172a] dark:text-[#f8fafc] font-mono focus:border-[#0284c7] focus:outline-none"
-                  />
-                </div>
-
-                <div className="space-y-1.5">
-                  <label className="text-xs font-semibold text-slate-700 dark:text-slate-300">Primary Examiner</label>
-                  <input
-                    type="text"
-                    value={examinerName}
-                    onChange={(e) => setExaminerName(e.target.value)}
-                    placeholder="e.g. Senior DFIR Specialist"
-                    className="w-full bg-white dark:bg-[#1e293b] border border-[#cbd5e1] dark:border-[#334155] rounded px-3 py-2 text-xs text-[#0f172a] dark:text-[#f8fafc] font-mono focus:border-[#0284c7] focus:outline-none"
-                  />
-                </div>
-
-                <div className="space-y-1.5">
-                  <div className="flex items-center justify-between">
-                    <label className="text-xs font-semibold text-slate-700 dark:text-slate-300">Target Case / Output Folder</label>
-                    <button
-                      type="button"
-                      onClick={() => openInAppBrowser('storage', 'folder')}
-                      className="flex items-center gap-1.5 px-2.5 py-0.5 bg-[#0284c7] hover:bg-[#0369a1] text-white rounded text-[11px] font-semibold transition-colors cursor-pointer shadow-2xs"
-                      title="Browse folders using Explorer"
-                    >
-                      <FolderOpen className="w-3.5 h-3.5" />
-                      <span>Browse Folder...</span>
                     </button>
-                  </div>
-                  <input
-                    type="text"
-                    value={targetStorageDir}
-                    onChange={(e) => setTargetStorageDir(e.target.value.replace(/^["']|["']$/g, ''))}
-                    placeholder="e.g. C:\Forensics\Cases or D:\Cases\Case01"
-                    className="w-full bg-white dark:bg-[#1e293b] border border-[#cbd5e1] dark:border-[#334155] rounded px-3 py-2 text-xs text-[#0f172a] dark:text-[#f8fafc] font-mono focus:border-[#0284c7] focus:outline-none"
-                  />
-                  <div className="p-2 rounded bg-white dark:bg-[#1e293b] border border-[#cbd5e1] dark:border-[#334155] text-[10.5px] font-mono text-slate-500 dark:text-slate-400 flex items-center justify-between">
-                    <span className="truncate max-w-[280px]">
-                      Target: <span className="text-[#0284c7] dark:text-[#38bdf8] font-semibold">
-                        {targetStorageDir
-                          ? (['cases', 'wft_cases'].includes(targetStorageDir.replace(/[\\/]+$/, '').split(/[\\/]/).pop()?.toLowerCase() || '')
-                            ? `${targetStorageDir.replace(/[\\/]+$/, '')}\\${caseName || 'case'}\\case.duckdb`
-                            : `${targetStorageDir.replace(/[\\/]+$/, '')}\\case.duckdb`)
-                          : `${caseName || 'case'}\\case.duckdb (Select Target Folder)`}
-                      </span>
-                    </span>
-                  </div>
-                </div>
-
-                <div className="col-span-2 space-y-1.5">
-                  <label className="text-xs font-semibold text-slate-700 dark:text-slate-300">Case Notes / Forensic Scope</label>
-                  <textarea
-                    rows={2}
-                    value={caseNotes}
-                    onChange={(e) => setCaseNotes(e.target.value)}
-                    placeholder="Provide evidence intake context, suspected malware beacons, user accounts of interest, etc."
-                    className="w-full bg-white dark:bg-[#1e293b] border border-[#cbd5e1] dark:border-[#334155] rounded px-3 py-2 text-xs text-[#0f172a] dark:text-[#f8fafc] font-mono focus:border-[#0284c7] focus:outline-none"
-                  />
-                </div>
+                  );
+                })}
               </div>
             </div>
-          )}
 
-          {/* STEP 2: EVIDENCE SOURCES */}
-          {currentStep === 2 && (
-            <div className="flex-1 overflow-y-auto p-8 max-w-4xl space-y-6">
-              <div>
-                <h2 className="text-lg font-bold text-[#0f172a] dark:text-[#f8fafc] flex items-center gap-2">
-                  <Disc className="w-5 h-5 text-[#0284c7] dark:text-[#38bdf8]" />
-                  <span>Evidence Source Selection</span>
-                </h2>
-                <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
-                  Select an evidence folder/directory or a forensic disk image (.E01, .VHDX, .RAW) for deep forensic ingestion.
-                </p>
+            <div className="p-3 bg-slate-50 dark:bg-[#0f172a] border border-[#cbd5e1] dark:border-[#334155] rounded text-[11px] space-y-1.5 font-mono">
+              <div className="text-slate-500 dark:text-slate-400 flex justify-between">
+                <span>Target:</span>
+                <span className="text-[#0284c7] dark:text-[#38bdf8] font-bold uppercase truncate max-w-[120px]">
+                  {sourceType === 'folder' ? 'Folder' : 'Disk Image'}
+                </span>
               </div>
+              <div className="text-slate-500 dark:text-slate-400 flex justify-between">
+                <span>Artifacts:</span>
+                <span className="text-[#0f172a] dark:text-[#f8fafc] font-semibold">{selectedArtifactIds.size} Selected</span>
+              </div>
+              <div className="text-slate-500 dark:text-slate-400 flex justify-between">
+                <span>Threat YARA:</span>
+                <span className={enableYara ? 'text-[#166534] dark:text-emerald-400 font-bold' : 'text-slate-400'}>{enableYara ? 'Enabled' : 'Off'}</span>
+              </div>
+              <div className="text-slate-500 dark:text-slate-400 flex justify-between">
+                <span>Optical OCR:</span>
+                <span className={enableOcr ? 'text-[#166534] dark:text-emerald-400 font-bold' : 'text-slate-400'}>{enableOcr ? 'Enabled' : 'Off'}</span>
+              </div>
+            </div>
+          </div>
 
-              {/* Forensic Source Banner */}
-              <div className="p-4 rounded border border-[#cbd5e1] dark:border-[#334155] bg-white dark:bg-[#1e293b] flex items-start gap-4">
-                <div className="p-3 rounded bg-slate-100 dark:bg-[#0f172a] border border-[#cbd5e1] dark:border-[#334155] text-[#0284c7] dark:text-[#38bdf8] shrink-0">
-                  {sourceType === 'folder' ? <FolderOpen className="w-7 h-7" /> : <Disc className="w-7 h-7" />}
-                </div>
-                <div className="flex-1">
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2">
-                      <span className="font-bold text-sm text-[#0f172a] dark:text-[#f8fafc]">
-                        {sourceType === 'folder' ? 'Evidence Folder / Triage Directory' : 'Forensic Disk Image & Containers'}
-                      </span>
-                      <span className="text-[10px] font-mono font-bold px-1.5 py-0.5 rounded bg-slate-100 dark:bg-[#0f172a] text-[#0284c7] dark:text-[#38bdf8] border border-[#cbd5e1] dark:border-[#334155]">
-                        {sourceType === 'folder' ? 'Folder Source' : 'Image Source'}
-                      </span>
-                    </div>
-                    <CheckCircle2 className="w-5 h-5 text-[#166534] dark:text-emerald-400 shrink-0" />
-                  </div>
-                  <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed mt-1">
-                    Supports Expert Witness formats (.E01 / .Ex01), Hyper-V (.VHDX / .VHD), VMware (.VMDK), RAW bitstream captures (.RAW / .DD / .IMG / .001), optical discs (.ISO), as well as staged evidence folders, triage directories, and live file extractions.
+          <div className="flex-1 flex flex-col overflow-hidden bg-[#f1f5f9] dark:bg-[#0f172a]">
+            {currentStep === 1 && (
+              <div className="flex-1 overflow-y-auto p-8 max-w-4xl space-y-6">
+                <div>
+                  <h2 className="text-lg font-bold text-[#0f172a] dark:text-[#f8fafc] flex items-center gap-2">
+                    <FileText className="w-5 h-5 text-[#0284c7] dark:text-[#38bdf8]" />
+                    <span>Case Details & DFIR Acquisition Profile</span>
+                  </h2>
+                  <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
+                    Configure forensic case identifiers, examiner metadata, and select pre-tuned investigative profiles.
                   </p>
                 </div>
+
+                <div className="space-y-2">
+                  <label className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 font-mono">
+                    Quick Investigative Presets
+                  </label>
+                  <div className="grid grid-cols-3 content-start auto-rows-max items-start gap-3">
+                    <button
+                      type="button"
+                      onClick={() => applyPreset('quick')}
+                      className="p-3 bg-white dark:bg-[#1e293b] hover:bg-slate-50 dark:hover:bg-[#334155] border border-[#cbd5e1] dark:border-[#334155] hover:border-[#0284c7] dark:hover:border-[#38bdf8] rounded text-left transition-colors cursor-pointer group shadow-2xs"
+                    >
+                      <div className="text-xs font-bold text-[#0f172a] dark:text-[#f8fafc] group-hover:text-[#0284c7] dark:group-hover:text-[#38bdf8] flex items-center justify-between">
+                        <span>Quick Triage</span>
+                        <Zap className="w-3.5 h-3.5 text-slate-400 group-hover:text-[#0284c7] dark:group-hover:text-[#38bdf8]" />
+                      </div>
+                      <div className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">
+                        Event Logs, Prefetch, LNK, USB, and ShimCache. Fast baseline in under 30 seconds.
+                      </div>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => applyPreset('comprehensive')}
+                      className="p-3 bg-white dark:bg-[#1e293b] hover:bg-slate-50 dark:hover:bg-[#334155] border border-[#0284c7] dark:border-[#38bdf8] rounded text-left transition-colors cursor-pointer group shadow-2xs"
+                    >
+                      <div className="text-xs font-bold text-[#0284c7] dark:text-[#38bdf8] flex items-center justify-between">
+                        <span>Comprehensive IR</span>
+                        <Cpu className="w-3.5 h-3.5 text-[#0284c7] dark:text-[#38bdf8]" />
+                      </div>
+                      <div className="text-[11px] text-slate-600 dark:text-slate-300 mt-1">
+                        All 15 EZ Tools, $MFT, $J, SRUM, Browsers, Chat, Emails, YARA-X & RapidOCR.
+                      </div>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => applyPreset('malware')}
+                      className="p-3 bg-white dark:bg-[#1e293b] hover:bg-slate-50 dark:hover:bg-[#334155] border border-[#cbd5e1] dark:border-[#334155] hover:border-[#0284c7] dark:hover:border-[#38bdf8] rounded text-left transition-colors cursor-pointer group shadow-2xs"
+                    >
+                      <div className="text-xs font-bold text-[#0f172a] dark:text-[#f8fafc] group-hover:text-[#0284c7] dark:group-hover:text-[#38bdf8] flex items-center justify-between">
+                        <span>Threat Hunting</span>
+                        <Shield className="w-3.5 h-3.5 text-slate-400 group-hover:text-[#0284c7] dark:group-hover:text-[#38bdf8]" />
+                      </div>
+                      <div className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">
+                        Full YARA-X rule execution, BAM/DAM execution, Tasks, PowerShell, and Registry persistence.
+                      </div>
+                    </button>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 content-start auto-rows-max items-start gap-4">
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-semibold text-slate-700 dark:text-slate-300">Case Name / Directory Stem *</label>
+                    <input
+                      type="text"
+                      value={caseName}
+                      onChange={(e) => setCaseName(e.target.value)}
+                      placeholder="e.g. Incident_20261031_01"
+                      className="w-full bg-white dark:bg-[#1e293b] border border-[#cbd5e1] dark:border-[#334155] rounded px-3 py-2 text-xs text-[#0f172a] dark:text-[#f8fafc] font-mono focus:border-[#0284c7] focus:outline-none"
+                      required
+                    />
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-semibold text-slate-700 dark:text-slate-300">Case Number / Incident Ticket</label>
+                    <input
+                      type="text"
+                      value={caseNumber}
+                      onChange={(e) => setCaseNumber(e.target.value)}
+                      placeholder="e.g. DFIR-2026-0891"
+                      className="w-full bg-white dark:bg-[#1e293b] border border-[#cbd5e1] dark:border-[#334155] rounded px-3 py-2 text-xs text-[#0f172a] dark:text-[#f8fafc] font-mono focus:border-[#0284c7] focus:outline-none"
+                    />
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-semibold text-slate-700 dark:text-slate-300">Primary Examiner</label>
+                    <input
+                      type="text"
+                      value={examinerName}
+                      onChange={(e) => setExaminerName(e.target.value)}
+                      placeholder="e.g. Senior DFIR Specialist"
+                      className="w-full bg-white dark:bg-[#1e293b] border border-[#cbd5e1] dark:border-[#334155] rounded px-3 py-2 text-xs text-[#0f172a] dark:text-[#f8fafc] font-mono focus:border-[#0284c7] focus:outline-none"
+                    />
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between">
+                      <label className="text-xs font-semibold text-slate-700 dark:text-slate-300">Target Case / Output Folder</label>
+                      <button
+                        type="button"
+                        onClick={() => openInAppBrowser('storage', 'folder')}
+                        className="flex items-center gap-1.5 px-2.5 py-0.5 bg-[#0284c7] hover:bg-[#0369a1] text-white rounded text-[11px] font-semibold transition-colors cursor-pointer shadow-2xs"
+                      >
+                        <FolderOpen className="w-3.5 h-3.5" />
+                        <span>Browse Folder...</span>
+                      </button>
+                    </div>
+                    <input
+                      type="text"
+                      value={targetStorageDir}
+                      onChange={(e) => setTargetStorageDir(e.target.value.replace(/^["']|["']$/g, ''))}
+                      placeholder="e.g. C:\Forensics\Cases or D:\Cases\Case01"
+                      className="w-full bg-white dark:bg-[#1e293b] border border-[#cbd5e1] dark:border-[#334155] rounded px-3 py-2 text-xs text-[#0f172a] dark:text-[#f8fafc] font-mono focus:border-[#0284c7] focus:outline-none"
+                    />
+                  </div>
+
+                  <div className="col-span-2 space-y-1.5">
+                    <label className="text-xs font-semibold text-slate-700 dark:text-slate-300">Case Notes / Forensic Scope</label>
+                    <textarea
+                      rows={2}
+                      value={caseNotes}
+                      onChange={(e) => setCaseNotes(e.target.value)}
+                      placeholder="Provide evidence intake context, suspected malware beacons, user accounts of interest, etc."
+                      className="w-full bg-white dark:bg-[#1e293b] border border-[#cbd5e1] dark:border-[#334155] rounded px-3 py-2 text-xs text-[#0f172a] dark:text-[#f8fafc] font-mono focus:border-[#0284c7] focus:outline-none"
+                    />
+                  </div>
+                </div>
               </div>
+            )}
 
-              {/* Source Path Input & Native Browsing */}
-              <div className="space-y-4 p-5 bg-white dark:bg-[#1e293b] border border-[#cbd5e1] dark:border-[#334155] rounded">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <label className="text-xs font-semibold text-[#0f172a] dark:text-[#f8fafc]">
-                      Evidence Source Path *
-                    </label>
-                    <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
-                      Choose an evidence folder or forensic disk image, or paste the path directly.
-                    </p>
-                  </div>
-                  <span className="text-[10px] font-mono text-[#0284c7] dark:text-[#38bdf8] bg-slate-100 dark:bg-[#0f172a] border border-[#cbd5e1] dark:border-[#334155] px-2 py-0.5 rounded">
-                    Zero-Copy VFS & Raw Ingestion
-                  </span>
+            {currentStep === 2 && (
+              <div className="flex-1 overflow-y-auto p-8 max-w-4xl space-y-6">
+                <div>
+                  <h2 className="text-lg font-bold text-[#0f172a] dark:text-[#f8fafc] flex items-center gap-2">
+                    <Disc className="w-5 h-5 text-[#0284c7] dark:text-[#38bdf8]" />
+                    <span>Evidence Source Selection</span>
+                  </h2>
+                  <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
+                    Select an evidence folder/directory or a forensic disk image (.E01, .VHDX, .RAW), then click <strong>Process Evidence</strong> below to start immediately.
+                  </p>
                 </div>
 
-                {/* Browse Action Bar */}
-                <div className="flex flex-wrap items-center gap-3 pt-1">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setSourceType('folder');
-                      openInAppBrowser('evidence', 'folder');
-                    }}
-                    className="flex items-center gap-2 px-4 py-2 bg-[#0284c7] hover:bg-[#0369a1] text-white rounded text-xs font-bold transition-all border border-[#0369a1] shadow-2xs cursor-pointer"
-                    title="Browse folders and triage directories using in-app Explorer"
-                  >
-                    <FolderOpen className="w-4 h-4" />
-                    <span>Browse Folder...</span>
-                  </button>
+                <div className="space-y-4 p-5 bg-white dark:bg-[#1e293b] border border-[#cbd5e1] dark:border-[#334155] rounded">
+                  <div className="flex flex-wrap items-center gap-3 pt-1">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSourceType('folder');
+                        openInAppBrowser('evidence', 'folder');
+                      }}
+                      className="flex items-center gap-2 px-4 py-2 bg-[#0284c7] hover:bg-[#0369a1] text-white rounded text-xs font-bold transition-all border border-[#0369a1] shadow-2xs cursor-pointer"
+                    >
+                      <FolderOpen className="w-4 h-4" />
+                      <span>Browse Folder...</span>
+                    </button>
 
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setSourceType('image');
-                      openInAppBrowser('evidence', 'file');
-                    }}
-                    className="flex items-center gap-2 px-4 py-2 bg-white dark:bg-[#0f172a] hover:bg-slate-50 dark:hover:bg-[#334155] border border-[#cbd5e1] dark:border-[#334155] text-[#0f172a] dark:text-[#f8fafc] rounded text-xs font-bold transition-all shadow-2xs cursor-pointer"
-                    title="Browse forensic disk images (.E01, .VHDX, .RAW, .VMDK, etc.) using in-app Explorer"
-                  >
-                    <Disc className="w-4 h-4 text-[#0284c7] dark:text-[#38bdf8]" />
-                    <span>Browse Disk Image...</span>
-                  </button>
-                </div>
-
-                {/* Manual Path Input */}
-                <div className="space-y-2 pt-1">
-                  <div className="flex items-center justify-between">
-                    <label className="text-xs font-semibold text-slate-700 dark:text-slate-300">
-                      Evidence Path:
-                    </label>
-                    {isValidatingPath && (
-                      <span className="text-[11px] text-[#0284c7] dark:text-[#38bdf8] flex items-center gap-1 font-mono">
-                        <RefreshCw className="w-3 h-3 animate-spin" />
-                        <span>Validating source on disk...</span>
-                      </span>
-                    )}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSourceType('image');
+                        openInAppBrowser('evidence', 'file');
+                      }}
+                      className="flex items-center gap-2 px-4 py-2 bg-white dark:bg-[#0f172a] hover:bg-slate-50 dark:hover:bg-[#334155] border border-[#cbd5e1] dark:border-[#334155] text-[#0f172a] dark:text-[#f8fafc] rounded text-xs font-bold transition-all shadow-2xs cursor-pointer"
+                    >
+                      <Disc className="w-4 h-4 text-[#0284c7] dark:text-[#38bdf8]" />
+                      <span>Browse Disk Image...</span>
+                    </button>
                   </div>
 
-                  <div className="relative">
+                  <div className="space-y-2 pt-1">
+                    <div className="flex items-center justify-between">
+                      <label className="text-xs font-semibold text-slate-700 dark:text-slate-300">
+                        Evidence Path:
+                      </label>
+                      {isValidatingPath && (
+                        <span className="text-[11px] text-[#0284c7] dark:text-[#38bdf8] flex items-center gap-1 font-mono">
+                          <RefreshCw className="w-3 h-3 animate-spin" />
+                          <span>Validating source on disk...</span>
+                        </span>
+                      )}
+                    </div>
+
                     <input
                       type="text"
                       value={sourcePath}
@@ -850,118 +777,103 @@ export const ProcessWizard: React.FC<ProcessWizardProps> = ({
                       placeholder="e.g. C:\Evidence\TriageFolder or D:\Forensics\evidence_disk.E01"
                       className="w-full bg-[#f8fafc] dark:bg-[#0f172a] border border-[#cbd5e1] dark:border-[#334155] rounded px-3 py-2 text-xs text-[#0f172a] dark:text-[#f8fafc] font-mono focus:border-[#0284c7] focus:outline-none"
                     />
-                  </div>
 
-                  {/* Live Path Validation Feedback Indicator */}
-                  {pathValidation && pathValidation.valid && (
-                    <div className="p-3 rounded badge-status-success text-xs flex items-center justify-between font-mono animate-in fade-in duration-200">
-                      <div className="flex items-center gap-2.5">
-                        <CheckCircle2 className="w-5 h-5 shrink-0" />
+                    {pathValidation && pathValidation.valid && (
+                      <div className="p-3 rounded badge-status-success text-xs flex items-center justify-between font-mono">
+                        <div className="flex items-center gap-2.5">
+                          <CheckCircle2 className="w-5 h-5 shrink-0" />
+                          <div>
+                            <span className="font-bold">
+                              {pathValidation.is_dir
+                                ? '✓ Valid Evidence Folder Verified on Disk'
+                                : '✓ Valid Disk Image Verified on Disk'}
+                            </span>
+                            <span className="text-[11px] block mt-0.5 opacity-90">
+                              {pathValidation.detected_type} {pathValidation.formatted_size ? `• File Size: ${pathValidation.formatted_size}` : ''}
+                            </span>
+                          </div>
+                        </div>
+                        <span className="text-[10px] px-2 py-0.5 rounded border font-semibold uppercase tracking-wider">
+                          VERIFIED
+                        </span>
+                      </div>
+                    )}
+
+                    {pathValidation && !pathValidation.valid && sourcePath.trim() && (
+                      <div className="p-2.5 rounded badge-status-error text-xs flex items-center gap-2.5 font-mono">
+                        <XCircle className="w-4 h-4 shrink-0" />
                         <div>
-                          <span className="font-bold">
-                            {pathValidation.is_dir
-                              ? '✓ Valid Evidence Folder Verified on Disk'
-                              : '✓ Valid Disk Image Verified on Disk'}
-                          </span>
+                          <span className="font-bold">Path not found on disk</span>
                           <span className="text-[11px] block mt-0.5 opacity-90">
-                            {pathValidation.detected_type} {pathValidation.formatted_size ? `• File Size: ${pathValidation.formatted_size}` : ''}
+                            {pathValidation.error || 'Ensure the file or folder exists and is accessible.'}
                           </span>
                         </div>
                       </div>
-                      <span className="text-[10px] px-2 py-0.5 rounded border font-semibold uppercase tracking-wider">
-                        VERIFIED
-                      </span>
-                    </div>
-                  )}
-
-                  {pathValidation && !pathValidation.valid && sourcePath.trim() && (
-                    <div className="p-2.5 rounded badge-status-error text-xs flex items-center gap-2.5 font-mono">
-                      <XCircle className="w-4 h-4 shrink-0" />
-                      <div>
-                        <span className="font-bold">Path not found on disk</span>
-                        <span className="text-[11px] block mt-0.5 opacity-90">
-                          {pathValidation.error || 'Ensure the file or folder exists and is accessible.'}
-                        </span>
-                      </div>
-                    </div>
-                  )}
-
-                  <p className="text-[11px] text-slate-500 dark:text-slate-400">
-                    Surrounding quotes from Windows Explorer's <em>"Copy as path"</em> are stripped automatically.
-                  </p>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* STEP 3: SELECT ARTIFACTS & KEYWORD LISTS */}
-          {currentStep === 3 && (
-            <div className="flex-1 flex flex-col overflow-hidden">
-              {/* Step 3 Header & Navigation Tabs */}
-              <div className="p-3 px-4 border-b border-[#cbd5e1] dark:border-[#334155] bg-white dark:bg-[#1e293b] flex items-center justify-between shrink-0">
-                <div className="flex items-center gap-4">
-                  <div>
-                    <h2 className="text-base font-bold text-[#0f172a] dark:text-[#f8fafc] flex items-center gap-2">
-                      <ListChecks className="w-5 h-5 text-[#0284c7] dark:text-[#38bdf8]" />
-                      <span>Processing Options & Artifacts</span>
-                    </h2>
-                    <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-                      Configure evidence artifact extraction parsers and case keyword hunting lists.
-                    </p>
-                  </div>
-
-                  {/* Sub-Tabs: Artifact Selection vs Keyword Lists to Search */}
-                  <div className="flex items-center gap-1 bg-[#f1f5f9] dark:bg-[#0f172a] p-0.5 rounded border border-[#cbd5e1] dark:border-[#334155]">
-                    <button
-                      type="button"
-                      onClick={() => setStep3SubTab('artifacts')}
-                      className={`flex items-center gap-1.5 px-3 py-1 rounded text-xs font-semibold transition-colors cursor-pointer ${
-                        step3SubTab === 'artifacts'
-                          ? 'bg-[#0284c7] text-white border border-[#0369a1] shadow-2xs'
-                          : 'text-slate-600 dark:text-slate-400 hover:text-[#0f172a] dark:hover:text-[#f8fafc]'
-                      }`}
-                    >
-                      <ListChecks className="w-3.5 h-3.5" />
-                      <span>Artifact Selection ({selectedArtifactIds.size})</span>
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() => setStep3SubTab('keywords')}
-                      className={`flex items-center gap-1.5 px-3 py-1 rounded text-xs font-semibold transition-colors cursor-pointer ${
-                        step3SubTab === 'keywords'
-                          ? 'bg-[#0284c7] text-white border border-[#0369a1] shadow-2xs'
-                          : 'text-slate-600 dark:text-slate-400 hover:text-[#0f172a] dark:hover:text-[#f8fafc]'
-                      }`}
-                    >
-                      <Hash className="w-3.5 h-3.5" />
-                      <span>Keyword Lists to Search</span>
-                    </button>
+                    )}
                   </div>
                 </div>
-
-                {step3SubTab === 'artifacts' && (
-                  <div className="flex items-center gap-3">
-                    <button
-                      type="button"
-                      onClick={() => toggleAllGlobally(true)}
-                      className="px-2.5 py-1 text-xs rounded bg-white hover:bg-slate-50 dark:bg-[#0f172a] dark:hover:bg-[#334155] text-slate-700 dark:text-slate-300 border border-[#cbd5e1] dark:border-[#334155] transition-colors cursor-pointer"
-                    >
-                      Select All
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => toggleAllGlobally(false)}
-                      className="px-2.5 py-1 text-xs rounded bg-white hover:bg-slate-50 dark:bg-[#0f172a] dark:hover:bg-[#334155] text-slate-700 dark:text-slate-300 border border-[#cbd5e1] dark:border-[#334155] transition-colors cursor-pointer"
-                    >
-                      Deselect All
-                    </button>
-                    <span className="text-xs font-mono text-[#0284c7] dark:text-[#38bdf8] font-bold px-2 py-0.5 bg-slate-100 dark:bg-[#0f172a] border border-[#cbd5e1] dark:border-[#334155] rounded">
-                      {selectedArtifactIds.size} Selected
-                    </span>
-                  </div>
-                )}
               </div>
+            )}
+
+            {currentStep === 3 && (
+              <div className="flex-1 flex flex-col overflow-hidden">
+                <div className="p-3 px-4 border-b border-[#cbd5e1] dark:border-[#334155] bg-white dark:bg-[#1e293b] flex items-center justify-between shrink-0">
+                  <div className="flex items-center gap-4">
+                    <div>
+                      <h2 className="text-base font-bold text-[#0f172a] dark:text-[#f8fafc] flex items-center gap-2">
+                        <ListChecks className="w-5 h-5 text-[#0284c7] dark:text-[#38bdf8]" />
+                        <span>Processing Options & Artifacts</span>
+                      </h2>
+                    </div>
+
+                    <div className="flex items-center gap-1 bg-[#f1f5f9] dark:bg-[#0f172a] p-0.5 rounded border border-[#cbd5e1] dark:border-[#334155]">
+                      <button
+                        type="button"
+                        onClick={() => setStep3SubTab('artifacts')}
+                        className={`flex items-center gap-1.5 px-3 py-1 rounded text-xs font-semibold transition-colors cursor-pointer ${
+                          step3SubTab === 'artifacts'
+                            ? 'bg-[#0284c7] text-white border border-[#0369a1] shadow-2xs'
+                            : 'text-slate-600 dark:text-slate-400 hover:text-[#0f172a] dark:hover:text-[#f8fafc]'
+                        }`}
+                      >
+                        <ListChecks className="w-3.5 h-3.5" />
+                        <span>Artifact Selection ({selectedArtifactIds.size})</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => setStep3SubTab('keywords')}
+                        className={`flex items-center gap-1.5 px-3 py-1 rounded text-xs font-semibold transition-colors cursor-pointer ${
+                          step3SubTab === 'keywords'
+                            ? 'bg-[#0284c7] text-white border border-[#0369a1] shadow-2xs'
+                            : 'text-slate-600 dark:text-slate-400 hover:text-[#0f172a] dark:hover:text-[#f8fafc]'
+                        }`}
+                      >
+                        <Hash className="w-3.5 h-3.5" />
+                        <span>Keyword Lists to Search</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  {step3SubTab === 'artifacts' && (
+                    <div className="flex items-center gap-3">
+                      <button
+                        type="button"
+                        onClick={() => toggleAllGlobally(true)}
+                        className="px-2.5 py-1 text-xs rounded bg-white hover:bg-slate-50 dark:bg-[#0f172a] dark:hover:bg-[#334155] text-slate-700 dark:text-slate-300 border border-[#cbd5e1] dark:border-[#334155] transition-colors cursor-pointer"
+                      >
+                        Select All
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => toggleAllGlobally(false)}
+                        className="px-2.5 py-1 text-xs rounded bg-white hover:bg-slate-50 dark:bg-[#0f172a] dark:hover:bg-[#334155] text-slate-700 dark:text-slate-300 border border-[#cbd5e1] dark:border-[#334155] transition-colors cursor-pointer"
+                      >
+                        Deselect All
+                      </button>
+                    </div>
+                  )}
+                </div>
 
                 {step3SubTab === 'keywords' ? (
                   <div className="flex-1 overflow-hidden p-4 bg-[#f1f5f9] dark:bg-[#0f172a]">
@@ -973,438 +885,416 @@ export const ProcessWizard: React.FC<ProcessWizardProps> = ({
                     </div>
                   </div>
                 ) : (
-                /* 2-Pane Checklist */
-                <div ref={step3ContainerRef} className="flex-1 flex overflow-hidden relative">
-                  {/* Left Category Selection Column (Resizable) */}
-                  <div
-                    style={{ width: `${step3Left.width}px` }}
-                    className="bg-white dark:bg-[#1e293b] border-r border-[#cbd5e1] dark:border-[#334155] overflow-y-auto p-2 space-y-1 select-none shrink-0"
-                  >
-                  {ARTIFACT_CATEGORIES_CATALOG.map((cat) => {
-                    const isSelected = selectedCategory === cat.category;
-                    const catSelectedCount = cat.items.filter((i) => selectedArtifactIds.has(i.id)).length;
-                    const totalInCat = cat.items.length;
+                  <div ref={step3ContainerRef} className="flex-1 flex overflow-hidden relative">
+                    <div
+                      style={{ width: `${step3Left.width}px` }}
+                      className="bg-white dark:bg-[#1e293b] border-r border-[#cbd5e1] dark:border-[#334155] overflow-y-auto p-2 space-y-1 select-none shrink-0"
+                    >
+                      {ARTIFACT_CATEGORIES_CATALOG.map((cat) => {
+                        const isSelected = selectedCategory === cat.category;
+                        const catSelectedCount = cat.items.filter((i) => selectedArtifactIds.has(i.id)).length;
+                        const totalInCat = cat.items.length;
 
-                    return (
-                      <button
-                        key={cat.category}
-                        type="button"
-                        onClick={() => setSelectedCategory(cat.category)}
-                        className={`w-full p-2 rounded flex items-center justify-between text-left transition-colors cursor-pointer border ${
-                          isSelected
-                            ? 'bg-[#bae6fd] dark:bg-[#0c4a6e] text-[#0f172a] dark:text-[#f8fafc] font-bold border-[#0284c7] dark:border-[#38bdf8] shadow-2xs'
-                            : 'text-[#0f172a] dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-[#334155] border-transparent'
+                        return (
+                          <button
+                            key={cat.category}
+                            type="button"
+                            onClick={() => setSelectedCategory(cat.category)}
+                            className={`w-full p-2 rounded flex items-center justify-between text-left transition-colors cursor-pointer border ${
+                              isSelected
+                                ? 'bg-[#bae6fd] dark:bg-[#0c4a6e] text-[#0f172a] dark:text-[#f8fafc] font-bold border-[#0284c7] dark:border-[#38bdf8] shadow-2xs'
+                                : 'text-[#0f172a] dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-[#334155] border-transparent'
+                            }`}
+                          >
+                            <span className="text-xs truncate">{cat.category}</span>
+                            <span className="text-[10px] font-mono px-1.5 py-0.5 rounded border bg-slate-100 dark:bg-[#0f172a]">
+                              {catSelectedCount}/{totalInCat}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+
+                    <ResizeHandle
+                      orientation="vertical"
+                      onMouseDown={step3Left.handleMouseDown}
+                      onDoubleClick={step3Left.resetWidth}
+                      isDragging={step3Left.isDragging}
+                    />
+
+                    <div className="flex-1 overflow-y-auto p-6 bg-[#f1f5f9] dark:bg-[#0f172a] space-y-4 min-w-0">
+                      {activeCategoryObj && (
+                        <>
+                          <div className="flex items-center justify-between border-b border-[#cbd5e1] dark:border-[#334155] pb-3">
+                            <div>
+                              <h3 className="text-sm font-bold text-[#0f172a] dark:text-[#f8fafc]">{activeCategoryObj.category}</h3>
+                              <span className="text-xs text-slate-500 font-mono">
+                                {activeSelectedCount} of {activeCategoryObj.items.length} artifacts active
+                              </span>
+                            </div>
+
+                            <div className="flex items-center gap-2">
+                              <button
+                                type="button"
+                                onClick={() => toggleCategoryAll(activeCategoryObj.category, true)}
+                                className="text-[11px] text-[#0284c7] dark:text-[#38bdf8] hover:underline cursor-pointer font-semibold"
+                              >
+                                Select Category
+                              </button>
+                              <span className="text-slate-300 dark:text-slate-600">|</span>
+                              <button
+                                type="button"
+                                onClick={() => toggleCategoryAll(activeCategoryObj.category, false)}
+                                className="text-[11px] text-slate-500 hover:underline cursor-pointer"
+                              >
+                                Deselect Category
+                              </button>
+                            </div>
+                          </div>
+
+                          <div className="space-y-2">
+                            {activeCategoryObj.items.map((item) => {
+                              const isChecked = selectedArtifactIds.has(item.id);
+                              return (
+                                <label
+                                  key={item.id}
+                                  className={`p-3 rounded border flex items-start gap-3 cursor-pointer select-none transition-colors ${
+                                    isChecked
+                                      ? 'bg-white dark:bg-[#1e293b] border-[#0284c7] dark:border-[#38bdf8]'
+                                      : 'bg-white/60 dark:bg-[#1e293b]/60 border-[#cbd5e1] dark:border-[#334155] text-slate-500'
+                                  }`}
+                                >
+                                  <input
+                                    type="checkbox"
+                                    checked={isChecked}
+                                    onChange={() => toggleArtifact(item.id)}
+                                    className="mt-0.5 rounded border-[#cbd5e1] text-[#0284c7] focus:ring-0 w-4 h-4 cursor-pointer"
+                                  />
+                                  <div className="flex-1 min-w-0">
+                                    <div className="flex items-center gap-2">
+                                      <span className={`text-xs font-bold ${isChecked ? 'text-[#0f172a] dark:text-[#f8fafc]' : 'text-slate-500'}`}>
+                                        {item.name}
+                                      </span>
+                                      <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-slate-100 dark:bg-[#0f172a] text-[#0284c7] dark:text-[#38bdf8] border border-[#cbd5e1] dark:border-[#334155]">
+                                        {item.tool}
+                                      </span>
+                                    </div>
+                                    <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5 leading-snug">{item.desc}</p>
+                                  </div>
+                                </label>
+                              );
+                            })}
+                          </div>
+
+                          {activeCategoryObj.category.includes('Malware') && (
+                            <div className="mt-6 p-4 rounded border border-[#cbd5e1] dark:border-[#334155] bg-white dark:bg-[#1e293b] space-y-3">
+                              <span className="text-xs font-bold text-[#0f172a] dark:text-[#f8fafc] uppercase font-mono tracking-wider">
+                                Advanced Enrichment Toggles
+                              </span>
+                              <div className="flex items-center justify-between">
+                                <div>
+                                  <div className="text-xs font-semibold text-[#0f172a] dark:text-[#f8fafc]">Compile & Scan with YARA-X</div>
+                                  <div className="text-[11px] text-slate-500 dark:text-slate-400">Match staged payloads against rules/*.yar</div>
+                                </div>
+                                <input
+                                  type="checkbox"
+                                  checked={enableYara}
+                                  onChange={(e) => setEnableYara(e.target.checked)}
+                                  className="rounded border-[#cbd5e1] text-[#0284c7] focus:ring-0 w-4 h-4 cursor-pointer"
+                                />
+                              </div>
+
+                              <div className="flex items-center justify-between pt-2 border-t border-[#cbd5e1] dark:border-[#334155]">
+                                <div>
+                                  <div className="text-xs font-semibold text-[#0f172a] dark:text-[#f8fafc]">RapidOCR Optical Character Recognition</div>
+                                  <div className="text-[11px] text-slate-500 dark:text-slate-400">Extract readable text from evidence screenshots</div>
+                                </div>
+                                <input
+                                  type="checkbox"
+                                  checked={enableOcr}
+                                  onChange={(e) => setEnableOcr(e.target.checked)}
+                                  className="rounded border-[#cbd5e1] text-[#0284c7] focus:ring-0 w-4 h-4 cursor-pointer"
+                                />
+                              </div>
+                            </div>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {currentStep === 4 && (
+              <div className="flex-1 flex flex-col overflow-hidden p-6 space-y-4">
+                <div className="p-4 bg-white dark:bg-[#1e293b] border border-[#cbd5e1] dark:border-[#334155] rounded space-y-3 shadow-2xs">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                      <span className="text-base font-bold text-[#0f172a] dark:text-[#f8fafc]">{caseName}</span>
+                      <span
+                        className={`text-[10px] font-mono px-2 py-0.5 rounded font-bold uppercase ${
+                          statusData?.status === 'SUCCESS' || statusData?.status === 'COMPLETED'
+                            ? 'badge-status-success'
+                            : statusData?.status === 'RUNNING'
+                            ? 'badge-status-running'
+                            : statusData?.status === 'FAILED'
+                            ? 'badge-status-error'
+                            : 'badge-status-neutral'
                         }`}
                       >
-                        <span className="text-xs truncate">{cat.category}</span>
-                        <span
-                          className={`text-[10px] font-mono px-1.5 py-0.5 rounded border ${
-                            catSelectedCount === totalInCat
-                              ? 'bg-slate-200 dark:bg-[#0f172a] text-[#0284c7] dark:text-[#38bdf8] border-[#cbd5e1] dark:border-[#334155]'
-                              : catSelectedCount > 0
-                              ? 'bg-slate-100 dark:bg-[#0f172a] text-slate-700 dark:text-slate-300 border-[#cbd5e1] dark:border-[#334155]'
-                              : 'bg-slate-100 dark:bg-[#0f172a] text-slate-400 border-transparent'
-                          }`}
+                        {statusData?.status || 'IDLE'}
+                      </span>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      {statusData?.status !== 'RUNNING' && (
+                        <button
+                          type="button"
+                          onClick={handleStartProcessing}
+                          disabled={isSubmitting}
+                          className="px-3.5 py-1.5 bg-[#0284c7] hover:bg-[#0369a1] disabled:opacity-50 text-white rounded text-xs font-semibold flex items-center gap-1.5 border border-[#0369a1] shadow-2xs transition-colors cursor-pointer"
                         >
-                          {catSelectedCount}/{totalInCat}
-                        </span>
-                      </button>
-                    );
-                  })}
-                </div>
-
-                {/* Draggable Vertical Splitter (Between Categories and Checklist) */}
-                <ResizeHandle
-                  orientation="vertical"
-                  onMouseDown={step3Left.handleMouseDown}
-                  onDoubleClick={step3Left.resetWidth}
-                  isDragging={step3Left.isDragging}
-                  title="Drag to resize Category Selection column (double-click to reset)"
-                />
-
-                {/* Right Items Checklist for Active Category */}
-                <div className="flex-1 overflow-y-auto p-6 bg-[#f1f5f9] dark:bg-[#0f172a] space-y-4 min-w-0">
-                  {activeCategoryObj && (
-                    <>
-                      <div className="flex items-center justify-between border-b border-[#cbd5e1] dark:border-[#334155] pb-3">
-                        <div>
-                          <h3 className="text-sm font-bold text-[#0f172a] dark:text-[#f8fafc]">{activeCategoryObj.category}</h3>
-                          <span className="text-xs text-slate-500 font-mono">
-                            {activeSelectedCount} of {activeCategoryObj.items.length} artifacts active
-                          </span>
-                        </div>
-
-                        <div className="flex items-center gap-2">
-                          <button
-                            type="button"
-                            onClick={() => toggleCategoryAll(activeCategoryObj.category, true)}
-                            className="text-[11px] text-[#0284c7] dark:text-[#38bdf8] hover:underline cursor-pointer font-semibold"
-                          >
-                            Select Category
-                          </button>
-                          <span className="text-slate-300 dark:text-slate-600">|</span>
-                          <button
-                            type="button"
-                            onClick={() => toggleCategoryAll(activeCategoryObj.category, false)}
-                            className="text-[11px] text-slate-500 hover:underline cursor-pointer"
-                          >
-                            Deselect Category
-                          </button>
-                        </div>
-                      </div>
-
-                      <div className="space-y-2">
-                        {activeCategoryObj.items.map((item) => {
-                          const isChecked = selectedArtifactIds.has(item.id);
-                          return (
-                            <label
-                              key={item.id}
-                              className={`p-3 rounded border flex items-start gap-3 cursor-pointer select-none transition-colors ${
-                                isChecked
-                                  ? 'bg-white dark:bg-[#1e293b] border-[#0284c7] dark:border-[#38bdf8]'
-                                  : 'bg-white/60 dark:bg-[#1e293b]/60 border-[#cbd5e1] dark:border-[#334155] text-slate-500'
-                              }`}
-                            >
-                              <input
-                                type="checkbox"
-                                checked={isChecked}
-                                onChange={() => toggleArtifact(item.id)}
-                                className="mt-0.5 rounded border-[#cbd5e1] text-[#0284c7] focus:ring-0 w-4 h-4 cursor-pointer"
-                              />
-
-                              <div className="flex-1 min-w-0">
-                                <div className="flex items-center gap-2">
-                                  <span className={`text-xs font-bold ${isChecked ? 'text-[#0f172a] dark:text-[#f8fafc]' : 'text-slate-500'}`}>
-                                    {item.name}
-                                  </span>
-                                  <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-slate-100 dark:bg-[#0f172a] text-[#0284c7] dark:text-[#38bdf8] border border-[#cbd5e1] dark:border-[#334155]">
-                                    {item.tool}
-                                  </span>
-                                </div>
-                                <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5 leading-snug">{item.desc}</p>
-                              </div>
-                            </label>
-                          );
-                        })}
-                      </div>
-
-                      {/* Module Enrichment Toggles for Malware Category */}
-                      {activeCategoryObj.category.includes('Malware') && (
-                        <div className="mt-6 p-4 rounded border border-[#cbd5e1] dark:border-[#334155] bg-white dark:bg-[#1e293b] space-y-3">
-                          <span className="text-xs font-bold text-[#0f172a] dark:text-[#f8fafc] uppercase font-mono tracking-wider">
-                            Advanced Enrichment Toggles
-                          </span>
-                          <div className="flex items-center justify-between">
-                            <div>
-                              <div className="text-xs font-semibold text-[#0f172a] dark:text-[#f8fafc]">Compile & Scan with YARA-X</div>
-                              <div className="text-[11px] text-slate-500 dark:text-slate-400">Match staged payloads against default_malware.yar</div>
-                            </div>
-                            <input
-                              type="checkbox"
-                              checked={enableYara}
-                              onChange={(e) => setEnableYara(e.target.checked)}
-                              className="rounded border-[#cbd5e1] text-[#0284c7] focus:ring-0 w-4 h-4 cursor-pointer"
-                            />
-                          </div>
-
-                          <div className="flex items-center justify-between pt-2 border-t border-[#cbd5e1] dark:border-[#334155]">
-                            <div>
-                              <div className="text-xs font-semibold text-[#0f172a] dark:text-[#f8fafc]">RapidOCR Optical Character Recognition</div>
-                              <div className="text-[11px] text-slate-500 dark:text-slate-400">Extract readable text from evidence screenshots and memes</div>
-                            </div>
-                            <input
-                              type="checkbox"
-                              checked={enableOcr}
-                              onChange={(e) => setEnableOcr(e.target.checked)}
-                              className="rounded border-[#cbd5e1] text-[#0284c7] focus:ring-0 w-4 h-4 cursor-pointer"
-                            />
-                          </div>
-                        </div>
+                          <RefreshCw className="w-3.5 h-3.5" />
+                          <span>Re-Run Pipeline</span>
+                        </button>
                       )}
-                    </>
-                  )}
-                </div>
-              </div>
-              )}
-            </div>
-          )}
 
-          {/* STEP 4: PROCESS EVIDENCE & LIVE DASHBOARD */}
-          {currentStep === 4 && (
-            <div className="flex-1 flex flex-col overflow-hidden p-6 space-y-4">
-              {/* Dashboard Progress Header */}
-              <div className="p-4 bg-white dark:bg-[#1e293b] border border-[#cbd5e1] dark:border-[#334155] rounded space-y-3 shadow-2xs">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-3">
-                    <span className="text-base font-bold text-[#0f172a] dark:text-[#f8fafc]">{caseName}</span>
-                    <span
-                      className={`text-[10px] font-mono px-2 py-0.5 rounded font-bold uppercase ${
-                        statusData?.status === 'SUCCESS' || statusData?.status === 'COMPLETED'
-                          ? 'badge-status-success'
-                          : statusData?.status === 'RUNNING'
-                          ? 'badge-status-running'
-                          : statusData?.status === 'FAILED'
-                          ? 'badge-status-error'
-                          : 'badge-status-neutral'
-                      }`}
-                    >
-                      {statusData?.status || 'IDLE'}
-                    </span>
+                      {onNavigateToExamine && (
+                        <button
+                          type="button"
+                          onClick={onNavigateToExamine}
+                          className="px-3 py-1.5 bg-white dark:bg-[#0f172a] hover:bg-slate-50 dark:hover:bg-[#334155] text-[#0284c7] dark:text-[#38bdf8] rounded text-xs font-semibold flex items-center gap-1.5 border border-[#cbd5e1] dark:border-[#334155] transition-colors cursor-pointer"
+                        >
+                          <Eye className="w-3.5 h-3.5" />
+                          <span>View in Examine</span>
+                        </button>
+                      )}
+                    </div>
                   </div>
 
-                  <div className="flex items-center gap-2">
-                    <button
-                      type="button"
-                      id="wft-step4-process-btn" onClick={handleStartProcessing}
-                      disabled={isSubmitting || statusData?.status === 'RUNNING'}
-                      className="px-3.5 py-1.5 bg-[#0284c7] hover:bg-[#0369a1] disabled:opacity-50 text-white rounded text-xs font-semibold flex items-center gap-1.5 border border-[#0369a1] shadow-2xs transition-colors cursor-pointer"
-                    >
-                      <Play className="w-3.5 h-3.5 fill-current" />
-                      <span>{statusData?.status === 'RUNNING' ? 'Running...' : 'Process Evidence'}</span>
-                    </button>
+                  <div className="space-y-1">
+                    <div className="flex justify-between text-xs font-mono text-slate-500 dark:text-slate-400">
+                      <span className="truncate max-w-[500px]">
+                        {statusData?.current_step || 'Processing evidence...'}
+                      </span>
+                      <span className="font-bold text-[#0284c7] dark:text-[#38bdf8]">{statusData?.progress || 0}%</span>
+                    </div>
 
-                    {onNavigateToExamine && (
-                      <button
-                        type="button"
-                        onClick={onNavigateToExamine}
-                        className="px-3 py-1.5 bg-white dark:bg-[#0f172a] hover:bg-slate-50 dark:hover:bg-[#334155] text-[#0284c7] dark:text-[#38bdf8] rounded text-xs font-semibold flex items-center gap-1.5 border border-[#cbd5e1] dark:border-[#334155] transition-colors cursor-pointer"
-                      >
-                        <Eye className="w-3.5 h-3.5" />
-                        <span>View in Examine</span>
-                      </button>
-                    )}
-                  </div>
-                </div>
-
-                {/* Real-time Progress Bar */}
-                <div className="space-y-1">
-                  <div className="flex justify-between text-xs font-mono text-slate-500 dark:text-slate-400">
-                    <span className="truncate max-w-[500px]">
-                      {statusData?.current_step || 'Ready to begin forensic acquisition and processing'}
-                    </span>
-                    <span className="font-bold text-[#0284c7] dark:text-[#38bdf8]">{statusData?.progress || 0}%</span>
-                  </div>
-
-                  <div className="w-full bg-[#f1f5f9] dark:bg-[#0f172a] rounded h-2 overflow-hidden border border-[#cbd5e1] dark:border-[#334155]">
-                    <div
-                      className={`h-full transition-all duration-300 rounded ${
-                        statusData?.status === 'FAILED'
-                          ? 'bg-[#991b1b]'
-                          : statusData?.status === 'SUCCESS' || statusData?.status === 'COMPLETED'
-                          ? 'bg-[#166534]'
-                          : 'bg-[#0284c7] dark:bg-[#38bdf8]'
-                      }`}
-                      style={{ width: `${statusData?.progress || 0}%` }}
-                    />
-                  </div>
-                </div>
-
-                {submissionError && (
-                  <div className="p-2.5 badge-status-error text-xs flex items-center gap-2 rounded">
-                    <AlertTriangle className="w-4 h-4 shrink-0 text-[#991b1b]" />
-                    <span>{submissionError}</span>
-                  </div>
-                )}
-              </div>
-
-              {/* Module Status Table (Live Progress Table) */}
-              <div className="flex-1 flex flex-col bg-white dark:bg-[#1e293b] border border-[#cbd5e1] dark:border-[#334155] rounded overflow-hidden">
-                <div className="p-3 border-b border-[#cbd5e1] dark:border-[#334155] bg-[#f8fafc] dark:bg-[#0f172a] flex items-center justify-between shrink-0">
-                  <div className="flex items-center gap-2 text-xs font-bold text-[#0f172a] dark:text-[#f8fafc] uppercase font-mono">
-                    <Activity className="w-4 h-4 text-[#0284c7] dark:text-[#38bdf8]" />
-                    <span>Module Execution Status Table</span>
-                    <span className="text-slate-500 font-normal">({filteredLogs.length} events logged)</span>
-                  </div>
-
-                  {/* Filter & Search */}
-                  <div className="flex items-center gap-2">
-                    <div className="relative">
-                      <Search className="w-3 h-3 absolute left-2.5 top-2.5 text-slate-400" />
-                      <input
-                        type="text"
-                        value={logSearch}
-                        onChange={(e) => setLogSearch(e.target.value)}
-                        placeholder="Search module logs..."
-                        className="bg-white dark:bg-[#1e293b] border border-[#cbd5e1] dark:border-[#334155] text-[#0f172a] dark:text-[#f8fafc] text-xs rounded pl-8 pr-3 py-1 font-mono focus:outline-none focus:border-[#0284c7] w-48"
+                    <div className="w-full bg-[#f1f5f9] dark:bg-[#0f172a] rounded h-2 overflow-hidden border border-[#cbd5e1] dark:border-[#334155]">
+                      <div
+                        className={`h-full transition-all duration-300 rounded ${
+                          statusData?.status === 'FAILED'
+                            ? 'bg-[#991b1b]'
+                            : statusData?.status === 'SUCCESS' || statusData?.status === 'COMPLETED'
+                            ? 'bg-[#166534]'
+                            : 'bg-[#0284c7] dark:bg-[#38bdf8]'
+                        }`}
+                        style={{ width: `${statusData?.progress || 0}%` }}
                       />
                     </div>
-
-                    <select
-                      value={moduleFilter}
-                      onChange={(e) => setModuleFilter(e.target.value)}
-                      className="bg-white dark:bg-[#1e293b] border border-[#cbd5e1] dark:border-[#334155] text-[#0f172a] dark:text-[#f8fafc] text-xs rounded px-2.5 py-1 font-mono focus:outline-none focus:border-[#0284c7]"
-                    >
-                      <option value="ALL">All Status</option>
-                      <option value="SUCCESS">Success Only</option>
-                      <option value="ERROR">Errors Only</option>
-                    </select>
-
-                    <button
-                      type="button"
-                      onClick={() => setIsLogDrawerExpanded(!isLogDrawerExpanded)}
-                      className="p-1 rounded bg-white dark:bg-[#1e293b] hover:bg-slate-50 dark:hover:bg-[#334155] text-slate-700 dark:text-slate-300 border border-[#cbd5e1] dark:border-[#334155] cursor-pointer"
-                      title={isLogDrawerExpanded ? 'Collapse CLI Drawer' : 'Expand CLI Drawer'}
-                    >
-                      <Terminal className="w-3.5 h-3.5" />
-                    </button>
                   </div>
-                </div>
 
-                {/* Table Data */}
-                <div className="flex-1 overflow-y-auto">
-                  {filteredLogs.length === 0 ? (
-                    <div className="p-8 text-center text-slate-500 text-xs italic">
-                      No module logs recorded yet. Click &quot;Process Evidence&quot; to begin.
+                  {submissionError && (
+                    <div className="p-2.5 badge-status-error text-xs flex items-center gap-2 rounded">
+                      <AlertTriangle className="w-4 h-4 shrink-0 text-[#991b1b]" />
+                      <span>{submissionError}</span>
                     </div>
-                  ) : (
-                    <table className="w-full text-left text-xs border-collapse">
-                      <thead className="bg-[#f1f5f9] dark:bg-[#0f172a] text-slate-600 dark:text-slate-400 text-[11px] font-mono sticky top-0 border-b border-[#cbd5e1] dark:border-[#334155] select-none">
-                        <tr>
-                          <th className="py-2 px-3 font-semibold">Module / Tool</th>
-                          <th className="py-2 px-3 font-semibold">Command Executed</th>
-                          <th className="py-2 px-3 font-semibold">Status</th>
-                          <th className="py-2 px-3 font-semibold">Duration</th>
-                          <th className="py-2 px-3 font-semibold">Rows Ingested</th>
-                          <th className="py-2 px-3 font-semibold">Timestamp (UTC)</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-[#e2e8f0] dark:divide-[#334155] font-sans">
-                        {filteredLogs.map((log) => (
-                          <tr key={log.log_id} className="hover:bg-slate-50 dark:hover:bg-[#334155]/50 transition-colors">
-                            <td className="py-2 px-3 font-mono font-bold text-[#0f172a] dark:text-[#f8fafc]">
-                              {log.module_name}
-                            </td>
-                            <td className="py-2 px-3 font-mono text-slate-500 dark:text-slate-400 truncate max-w-xs" title={log.command_executed}>
-                              {log.command_executed}
-                            </td>
-                            <td className="py-2 px-3">
-                              <span
-                                className={`text-[10px] font-mono px-2 py-0.5 rounded font-bold uppercase ${
-                                  log.status === 'SUCCESS'
-                                    ? 'badge-status-success'
-                                    : log.status === 'ERROR'
-                                    ? 'badge-status-error'
-                                    : 'badge-status-running'
-                                }`}
-                              >
-                                {log.status}
-                              </span>
-                            </td>
-                            <td className="py-2 px-3 font-mono text-slate-700 dark:text-slate-300">
-                              {log.duration_ms}ms
-                            </td>
-                            <td className="py-2 px-3 font-mono font-bold text-[#0284c7] dark:text-[#38bdf8]">
-                              {log.rows_ingested.toLocaleString()}
-                            </td>
-                            <td className="py-2 px-3 font-mono text-slate-500 text-[11px]">
-                              {log.timestamp_utc ? log.timestamp_utc.slice(11, 19) : ''}
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
                   )}
                 </div>
 
-                {/* Expandable CLI Output Drawer */}
-                {isLogDrawerExpanded && (
-                  <div className="h-48 border-t border-[#cbd5e1] dark:border-[#334155] bg-slate-50 dark:bg-[#0f172a] p-3 font-mono text-xs overflow-y-auto space-y-1">
-                    <div className="text-slate-500 dark:text-slate-400 text-[11px] font-bold uppercase pb-1 border-b border-[#cbd5e1] dark:border-[#334155] flex justify-between">
-                      <span>Subprocess Terminal Output</span>
-                      <span>Exit Codes & Diagnostics</span>
+                <div className="flex-1 flex flex-col bg-white dark:bg-[#1e293b] border border-[#cbd5e1] dark:border-[#334155] rounded overflow-hidden">
+                  <div className="p-3 border-b border-[#cbd5e1] dark:border-[#334155] bg-[#f8fafc] dark:bg-[#0f172a] flex items-center justify-between shrink-0">
+                    <div className="flex items-center gap-2 text-xs font-bold text-[#0f172a] dark:text-[#f8fafc] uppercase font-mono">
+                      <Activity className="w-4 h-4 text-[#0284c7] dark:text-[#38bdf8]" />
+                      <span>Module Execution Status Table</span>
+                      <span className="text-slate-500 font-normal">({filteredLogs.length} events logged)</span>
                     </div>
-                    {filteredLogs.map((l) => (
-                      <div key={l.log_id} className="text-slate-600 dark:text-slate-400">
-                        <span className="text-[#0284c7] dark:text-[#38bdf8]">[{l.module_name}]</span>{' '}
-                        <span className="text-slate-800 dark:text-slate-200">$ {l.command_executed}</span>{' '}
-                        <span className={l.exit_code === 0 ? 'text-[#166534] dark:text-emerald-400' : 'text-[#991b1b] dark:text-red-400'}>
-                          (Exit: {l.exit_code}, {l.duration_ms}ms)
-                        </span>
-                        {l.error_message && (
-                          <div className="text-[#991b1b] dark:text-red-400 pl-4">STDERR: {l.error_message}</div>
-                        )}
+
+                    <div className="flex items-center gap-2">
+                      <div className="relative">
+                        <Search className="w-3 h-3 absolute left-2.5 top-2.5 text-slate-400" />
+                        <input
+                          type="text"
+                          value={logSearch}
+                          onChange={(e) => setLogSearch(e.target.value)}
+                          placeholder="Search module logs..."
+                          className="bg-white dark:bg-[#1e293b] border border-[#cbd5e1] dark:border-[#334155] text-[#0f172a] dark:text-[#f8fafc] text-xs rounded pl-8 pr-3 py-1 font-mono focus:outline-none focus:border-[#0284c7] w-48"
+                        />
                       </div>
-                    ))}
+
+                      <select
+                        value={moduleFilter}
+                        onChange={(e) => setModuleFilter(e.target.value)}
+                        className="bg-white dark:bg-[#1e293b] border border-[#cbd5e1] dark:border-[#334155] text-[#0f172a] dark:text-[#f8fafc] text-xs rounded px-2.5 py-1 font-mono focus:outline-none focus:border-[#0284c7]"
+                      >
+                        <option value="ALL">All Status</option>
+                        <option value="SUCCESS">Success Only</option>
+                        <option value="ERROR">Errors Only</option>
+                      </select>
+
+                      <button
+                        type="button"
+                        onClick={() => setIsLogDrawerExpanded(!isLogDrawerExpanded)}
+                        className="p-1 rounded bg-white dark:bg-[#1e293b] hover:bg-slate-50 dark:hover:bg-[#334155] text-slate-700 dark:text-slate-300 border border-[#cbd5e1] dark:border-[#334155] cursor-pointer"
+                        title={isLogDrawerExpanded ? 'Collapse CLI Drawer' : 'Expand CLI Drawer'}
+                      >
+                        <Terminal className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
                   </div>
+
+                  <div className="flex-1 overflow-y-auto">
+                    {filteredLogs.length === 0 ? (
+                      <div className="p-8 text-center text-slate-500 text-xs italic">
+                        Executing pipeline modules... Logs will appear here live.
+                      </div>
+                    ) : (
+                      <table className="w-full text-left text-xs border-collapse">
+                        <thead className="bg-[#f1f5f9] dark:bg-[#0f172a] text-slate-600 dark:text-slate-400 text-[11px] font-mono sticky top-0 border-b border-[#cbd5e1] dark:border-[#334155] select-none">
+                          <tr>
+                            <th className="py-2 px-3 font-semibold">Module / Tool</th>
+                            <th className="py-2 px-3 font-semibold">Command Executed</th>
+                            <th className="py-2 px-3 font-semibold">Status</th>
+                            <th className="py-2 px-3 font-semibold">Duration</th>
+                            <th className="py-2 px-3 font-semibold">Rows Ingested</th>
+                            <th className="py-2 px-3 font-semibold">Timestamp (UTC)</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-[#e2e8f0] dark:divide-[#334155] font-sans">
+                          {filteredLogs.map((log) => (
+                            <tr key={log.log_id} className="hover:bg-slate-50 dark:hover:bg-[#334155]/50 transition-colors">
+                              <td className="py-2 px-3 font-mono font-bold text-[#0f172a] dark:text-[#f8fafc]">
+                                {log.module_name}
+                              </td>
+                              <td className="py-2 px-3 font-mono text-slate-500 dark:text-slate-400 truncate max-w-xs" title={log.command_executed}>
+                                {log.command_executed}
+                              </td>
+                              <td className="py-2 px-3">
+                                <span
+                                  className={`text-[10px] font-mono px-2 py-0.5 rounded font-bold uppercase ${
+                                    log.status === 'SUCCESS'
+                                      ? 'badge-status-success'
+                                      : log.status === 'ERROR'
+                                      ? 'badge-status-error'
+                                      : 'badge-status-running'
+                                  }`}
+                                >
+                                  {log.status}
+                                </span>
+                              </td>
+                              <td className="py-2 px-3 font-mono text-slate-700 dark:text-slate-300">
+                                {log.duration_ms}ms
+                              </td>
+                              <td className="py-2 px-3 font-mono font-bold text-[#0284c7] dark:text-[#38bdf8]">
+                                {log.rows_ingested.toLocaleString()}
+                              </td>
+                              <td className="py-2 px-3 font-mono text-slate-500 text-[11px]">
+                                {log.timestamp_utc ? log.timestamp_utc.slice(11, 19) : ''}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    )}
+                  </div>
+
+                  {isLogDrawerExpanded && (
+                    <div className="h-48 border-t border-[#cbd5e1] dark:border-[#334155] bg-slate-50 dark:bg-[#0f172a] p-3 font-mono text-xs overflow-y-auto space-y-1">
+                      <div className="text-slate-500 dark:text-slate-400 text-[11px] font-bold uppercase pb-1 border-b border-[#cbd5e1] dark:border-[#334155] flex justify-between">
+                        <span>Subprocess Terminal Output</span>
+                        <span>Exit Codes & Diagnostics</span>
+                      </div>
+                      {filteredLogs.map((l) => (
+                        <div key={l.log_id} className="text-slate-600 dark:text-slate-400">
+                          <span className="text-[#0284c7] dark:text-[#38bdf8]">[{l.module_name}]</span>{' '}
+                          <span className="text-slate-800 dark:text-slate-200">$ {l.command_executed}</span>{' '}
+                          <span className={l.exit_code === 0 ? 'text-[#166534] dark:text-emerald-400' : 'text-[#991b1b] dark:text-red-400'}>
+                            (Exit: {l.exit_code}, {l.duration_ms}ms)
+                          </span>
+                          {l.error_message && (
+                            <div className="text-[#991b1b] dark:text-red-400 pl-4">STDERR: {l.error_message}</div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* Bottom Navigation Footer: Single-Click "Process Evidence" starts immediately without an extra confirmation step */}
+            <div className="h-14 bg-white dark:bg-[#1e293b] border-t border-[#cbd5e1] dark:border-[#334155] px-6 flex items-center justify-between shrink-0 select-none">
+              <div>
+                {currentStep > 1 && (
+                  <button
+                    type="button"
+                    onClick={() => setCurrentStep((prev) => Math.max(1, prev - 1))}
+                    className="px-4 py-1.5 rounded bg-white hover:bg-slate-50 dark:bg-[#0f172a] dark:hover:bg-[#334155] text-slate-700 dark:text-slate-300 border border-[#cbd5e1] dark:border-[#334155] text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
+                  >
+                    <ArrowLeft className="w-3.5 h-3.5" />
+                    <span>Back</span>
+                  </button>
                 )}
               </div>
-            </div>
-          )}
 
-          {/* Stepper Bottom Navigation Action Footer */}
-          <div className="h-14 bg-white dark:bg-[#1e293b] border-t border-[#cbd5e1] dark:border-[#334155] px-6 flex items-center justify-between shrink-0 select-none">
-            <div>
-              {currentStep > 1 && (
-                <button
-                  type="button"
-                  onClick={() => setCurrentStep((prev) => Math.max(1, prev - 1))}
-                  className="px-4 py-1.5 rounded bg-white hover:bg-slate-50 dark:bg-[#0f172a] dark:hover:bg-[#334155] text-slate-700 dark:text-slate-300 border border-[#cbd5e1] dark:border-[#334155] text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
-                >
-                  <ArrowLeft className="w-3.5 h-3.5" />
-                  <span>Back</span>
-                </button>
-              )}
-            </div>
+              <div className="flex items-center gap-3">
+                {currentStep < 3 && (
+                  <button
+                    type="button"
+                    onClick={() => setCurrentStep((prev) => Math.min(3, prev + 1))}
+                    className="px-4 py-1.5 rounded bg-white hover:bg-slate-50 dark:bg-[#0f172a] dark:hover:bg-[#334155] text-slate-700 dark:text-slate-300 text-xs font-semibold flex items-center gap-1.5 border border-[#cbd5e1] dark:border-[#334155] transition-colors cursor-pointer"
+                  >
+                    <span>Configure Options</span>
+                    <ArrowRight className="w-3.5 h-3.5" />
+                  </button>
+                )}
 
-            <div className="flex items-center gap-3">
-              {currentStep < 3 && (
-                <button
-                  type="button"
-                  onClick={() => setCurrentStep((prev) => Math.min(4, prev + 1))}
-                  className="px-5 py-1.5 rounded bg-[#0284c7] hover:bg-[#0369a1] text-white text-xs font-semibold flex items-center gap-1.5 border border-[#0369a1] shadow-2xs transition-colors cursor-pointer"
-                >
-                  <span>Next: {steps[currentStep].title}</span>
-                  <ArrowRight className="w-3.5 h-3.5" />
-                </button>
-              )}
+                {currentStep !== 4 && (
+                  <button
+                    type="button"
+                    id="wft-auto-start-process-btn"
+                    onClick={handleStartProcessing}
+                    disabled={isSubmitting || statusData?.status === 'RUNNING'}
+                    className="px-5 py-2 rounded bg-[#0284c7] hover:bg-[#0369a1] disabled:opacity-50 text-white text-xs font-bold flex items-center gap-2 border border-[#0369a1] shadow-2xs transition-colors cursor-pointer"
+                  >
+                    <Play className="w-4 h-4 fill-current" />
+                    <span>{statusData?.status === 'RUNNING' ? 'Processing...' : 'Process Evidence'}</span>
+                  </button>
+                )}
 
-              {currentStep === 3 && (
-                <button
-                  type="button"
-                  id="wft-auto-start-process-btn" onClick={handleStartProcessing}
-                  disabled={isSubmitting || statusData?.status === 'RUNNING'}
-                  className="px-5 py-2 rounded bg-[#0284c7] hover:bg-[#0369a1] disabled:opacity-50 text-white text-xs font-bold flex items-center gap-2 border border-[#0369a1] shadow-2xs transition-colors cursor-pointer"
-                >
-                  <Play className="w-4 h-4 fill-current" />
-                  <span>{statusData?.status === 'RUNNING' ? 'Running...' : 'Start Evidence Processing'}</span>
-                </button>
-              )}
-
-              {currentStep === 4 && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    if (onNavigateToExamine) onNavigateToExamine();
-                  }}
-                  className="px-5 py-1.5 rounded bg-[#0284c7] hover:bg-[#0369a1] text-white text-xs font-semibold flex items-center gap-1.5 border border-[#0369a1] shadow-2xs transition-colors cursor-pointer"
-                >
-                  <Eye className="w-3.5 h-3.5" />
-                  <span>Examine Artifacts</span>
-                </button>
-              )}
+                {currentStep === 4 && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (onNavigateToExamine) onNavigateToExamine();
+                    }}
+                    className="px-5 py-1.5 rounded bg-[#0284c7] hover:bg-[#0369a1] text-white text-xs font-semibold flex items-center gap-1.5 border border-[#0369a1] shadow-2xs transition-colors cursor-pointer"
+                  >
+                    <Eye className="w-3.5 h-3.5" />
+                    <span>Examine Artifacts</span>
+                  </button>
+                )}
+              </div>
             </div>
           </div>
         </div>
       </div>
-    </div>
 
-    {/* In-App Server File & Drive Explorer Modal */}
-    <FileBrowserModal
-      isOpen={fileBrowserOpen}
-      onClose={() => setFileBrowserOpen(false)}
-      onSelect={handleInAppSelect}
-      mode={fileBrowserMode}
-      title={
-        fileBrowserTarget === 'evidence'
-          ? fileBrowserMode === 'file'
-            ? 'Select Forensic Disk Image (.E01, .VHDX, .RAW, .ISO)'
-            : 'Select Evidence Folder or Mounted Drive'
-          : 'Select Target Case Storage Directory'
-      }
-      initialPath={
-        fileBrowserTarget === 'evidence' ? sourcePath : targetStorageDir
-      }
-    />
-  </>
-);
+      <FileBrowserModal
+        isOpen={fileBrowserOpen}
+        onClose={() => setFileBrowserOpen(false)}
+        onSelect={handleInAppSelect}
+        mode={fileBrowserMode}
+        title={
+          fileBrowserTarget === 'evidence'
+            ? fileBrowserMode === 'file'
+              ? 'Select Forensic Disk Image (.E01, .VHDX, .RAW, .ISO)'
+              : 'Select Evidence Folder or Mounted Drive'
+            : 'Select Target Case Storage Directory'
+        }
+        initialPath={fileBrowserTarget === 'evidence' ? sourcePath : targetStorageDir}
+      />
+    </>
+  );
 };

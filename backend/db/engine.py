@@ -24,10 +24,6 @@ class DuckDBManager:
 
     @classmethod
     def get_lock(cls, case_id: str) -> threading.RLock:
-        """
-        Get or create a re-entrant lock (RLock) dedicated to the given case_id.
-        All concurrent threads synchronize on this per-case lock.
-        """
         with cls._instance_lock:
             db_path = get_case_db_path(case_id)
             db_key = str(db_path.resolve()).lower()
@@ -37,11 +33,6 @@ class DuckDBManager:
 
     @classmethod
     def get_connection(cls, case_id: str, read_only: bool = False) -> duckdb.DuckDBPyConnection:
-        """
-        Get or open a connection to the case.duckdb file for a given case_id.
-        DuckDB connections are thread-safe when using cursors.
-        Always maintains a unified read-write connection to eliminate configuration conflicts.
-        """
         with cls._instance_lock:
             db_path = get_case_db_path(case_id)
             db_key = str(db_path.resolve()).lower()
@@ -49,7 +40,6 @@ class DuckDBManager:
             if db_key in cls._connections:
                 return cls._connections[db_key]
 
-            # Ensure directory exists before connecting
             db_path.parent.mkdir(parents=True, exist_ok=True)
             conn = duckdb.connect(database=str(db_path), read_only=False)
             cls._connections[db_key] = conn
@@ -58,10 +48,6 @@ class DuckDBManager:
 
     @classmethod
     def close_connection(cls, case_id: str) -> None:
-        """
-        Close connection for a given case_id if open.
-        Immediately releases all DuckDB PyConnection handles and locks to release .duckdb and .wal files.
-        """
         import gc
         with cls._instance_lock:
             try:
@@ -97,14 +83,10 @@ class DuckDBManager:
                     except Exception as ex:
                         print(f"[DuckDBManager] Warning while closing connection for {k}: {ex}")
 
-        # Explicit garbage collection to release OS file handles on Windows
         gc.collect()
 
     @classmethod
     def close_all(cls) -> None:
-        """
-        Close all active connections.
-        """
         with cls._instance_lock:
             cls._is_read_only.clear()
             cls._case_locks.clear()
@@ -117,10 +99,6 @@ class DuckDBManager:
 
 
 def init_case_db(case_id: str) -> Path:
-    """
-    Initialize cases/<case_id>/case.duckdb with core forensic tables.
-    Returns the resolved Path to the initialized database.
-    """
     db_path = get_case_db_path(case_id)
     with DuckDBManager.get_lock(case_id):
         conn = DuckDBManager.get_connection(case_id, read_only=False)
@@ -129,18 +107,12 @@ def init_case_db(case_id: str) -> Path:
 
 
 def validate_table_or_column_name(name: str) -> str:
-    """
-    Validate that table or column name contains only alphanumeric and underscore characters.
-    """
     if not re.match(r"^[A-Za-z0-9_]+$", name):
         raise ValueError(f"Invalid SQL identifier: '{name}'")
     return name
 
 
 def get_table_columns(case_id: str, table_name: str) -> List[str]:
-    """
-    Discover column names for a given table via DESCRIBE.
-    """
     clean_table = validate_table_or_column_name(table_name)
     with DuckDBManager.get_lock(case_id):
         conn = DuckDBManager.get_connection(case_id, read_only=False)
@@ -162,10 +134,6 @@ def query_paginated(
     end_time: Optional[str] = None,
     tags: Optional[Union[str, List[str]]] = None,
 ) -> Dict[str, Any]:
-    """
-    Query paginated records with dynamic multi-column ILIKE search filter, column ordering,
-    optional timestamp range, and forensic tags.
-    """
     clean_table = validate_table_or_column_name(table_name)
     with DuckDBManager.get_lock(case_id):
         conn = DuckDBManager.get_connection(case_id, read_only=False)
@@ -175,10 +143,8 @@ def query_paginated(
         if not columns:
             return {"columns": [], "rows": [], "total_count": 0, "filtered_count": 0}
 
-        # Total count in the table
         total_count = cursor.execute(f'SELECT COUNT(*) FROM "{clean_table}";').fetchone()[0]
 
-        # Validate sorting strictly against DESCRIBE columns
         col_lookup = {c.lower(): c for c in columns}
         sort_direction = "DESC" if str(sort_dir).upper() == "DESC" else "ASC"
         sort_col_clean = str(sort_col).strip().lower()
@@ -189,7 +155,6 @@ def query_paginated(
         else:
             sort_column = columns[0]
 
-        # Parse column_filters if provided
         parsed_filters: Dict[str, List[Any]] = {}
         if column_filters:
             if isinstance(column_filters, str) and column_filters.strip():
@@ -200,7 +165,6 @@ def query_paginated(
             elif isinstance(column_filters, dict):
                 parsed_filters = column_filters
 
-        # Build WHERE conditions combining search and column_filters with AND
         where_conditions = []
         params: List[Any] = []
 
@@ -219,7 +183,6 @@ def query_paginated(
                     where_conditions.append(f'CAST("{actual_col}" AS VARCHAR) IN ({placeholders})')
                     params.extend([str(v) for v in filter_vals])
 
-        # Date & Time range filtering across primary timestamp column
         if (start_time and str(start_time).strip()) or (end_time and str(end_time).strip()):
             time_cols = [c for c in columns if any(t in c.lower() for t in ["time", "date", "created", "modified", "lastrun", "timestamp"])]
             if time_cols:
@@ -231,7 +194,6 @@ def query_paginated(
                     where_conditions.append(f'TRY_CAST("{primary_time_col}" AS TIMESTAMP) <= TRY_CAST(? AS TIMESTAMP)')
                     params.append(str(end_time).strip())
 
-        # Forensic Tags & Bookmarks filtering
         tag_list: List[str] = []
         if tags:
             if isinstance(tags, str):
@@ -257,7 +219,6 @@ def query_paginated(
 
         where_clause = f"WHERE {' AND '.join(where_conditions)}" if where_conditions else ""
 
-        # Filtered count
         if where_clause:
             filtered_count = cursor.execute(
                 f'SELECT COUNT(*) FROM "{clean_table}" {where_clause};',
@@ -266,7 +227,6 @@ def query_paginated(
         else:
             filtered_count = total_count
 
-        # Fetch rows
         fetch_query = (
             f'SELECT * FROM "{clean_table}" '
             f'{where_clause} '
@@ -276,7 +236,6 @@ def query_paginated(
         query_params = params + [limit, offset]
         result_rows = cursor.execute(fetch_query, query_params).fetchall()
 
-        # Convert to list of dicts for JSON serialization
         serialized_rows = [dict(zip(columns, row)) for row in result_rows]
         for s_row in serialized_rows:
             fp_val = s_row.get("file_path")
@@ -292,7 +251,7 @@ def query_paginated(
                     rest = m_e.group(1)
                     if rest.lower().startswith("userfiles\\"):
                         rest = "Users\\" + rest[10:]
-                    s_row["file_path"] = f"C:\\{rest.lstrip('\\')}"
+                    s_row["file_path"] = f"C:\\{rest.lstrip(chr(92))}"
 
         return {
             "columns": columns,
@@ -312,9 +271,6 @@ def log_processing_event(
     status: str,
     error_message: Optional[str] = None,
 ) -> None:
-    """
-    Log an entry to processing_logs and append to cases/<case_id>/processing.log on disk.
-    """
     with DuckDBManager.get_lock(case_id):
         conn = DuckDBManager.get_connection(case_id, read_only=False)
         cursor = conn.cursor()
@@ -354,7 +310,6 @@ def log_processing_event(
             ],
         )
 
-    # Also append to processing.log file
     log_file = get_case_dir(case_id) / "processing.log"
     log_entry = (
         f"[{module_name}] Status={status} ExitCode={exit_code} "
@@ -374,17 +329,11 @@ def get_distinct_column_values(
     column_name: str,
     limit: int = 500,
 ) -> List[Dict[str, Any]]:
-    """
-    Run: SELECT CAST("{column_name}" AS VARCHAR) AS val, COUNT(*) AS cnt
-    FROM "{table_name}" GROUP BY val ORDER BY cnt DESC LIMIT {limit}
-    Validates column_name against table's actual DESCRIBE column set before executing SQL.
-    """
     clean_table = validate_table_or_column_name(table_name)
     with DuckDBManager.get_lock(case_id):
         conn = DuckDBManager.get_connection(case_id, read_only=False)
         cursor = conn.cursor()
 
-        # Validate column name against table's actual DESCRIBE column set
         columns = [str(r[0]) for r in cursor.execute(f'DESCRIBE "{clean_table}";').fetchall()]
         col_lookup = {c.lower(): c for c in columns}
         col_clean = str(column_name).strip().lower()
@@ -406,8 +355,7 @@ def get_distinct_column_values(
 def scan_keywords_for_case(case_id: str, conn: Optional[duckdb.DuckDBPyConnection] = None) -> int:
     """
     Scans all populated forensic tables in case.duckdb against case_keywords,
-    populating both `parsed_keyword_hits` (with exact matching evidence rows and snippets)
-    and updating `case_keywords.hit_count` and `view_keyword_hits`.
+    populating parsed_keyword_hits, view_keyword_hits, and case_keywords.hit_count.
     """
     with DuckDBManager.get_lock(case_id):
         if conn is None:
@@ -471,7 +419,6 @@ def scan_keywords_for_case(case_id: str, conn: Optional[duckdb.DuckDBPyConnectio
         }
         candidate_tables = [t for t in all_base_tables if t not in excluded and not t.startswith("view_")]
 
-        # Map table_name -> friendly display_name
         disp_map = {}
         if "artifact_registry" in tables:
             for t_n, d_n in cursor.execute("SELECT table_name, display_name FROM artifact_registry;").fetchall():
@@ -499,7 +446,10 @@ def scan_keywords_for_case(case_id: str, conn: Optional[duckdb.DuckDBPyConnectio
                     text_cols = [c for c in col_names if c != "_row_id"]
                     if not text_cols:
                         continue
-                    col_concat = "CONCAT_WS(' | ', " + ", ".join([f'COALESCE(CAST("{c}" AS VARCHAR), '')' for c in text_cols[:12]]) + ")"
+
+                    # Properly escaped empty SQL string literal ''
+                    coalesced_cols = [f"COALESCE(CAST(\"{c}\" AS VARCHAR), '')" for c in text_cols[:20]]
+                    col_concat = f"CONCAT_WS(' | ', {', '.join(coalesced_cols)})"
 
                     if is_regex:
                         where_sql = f"regexp_matches({col_concat}, ?)"

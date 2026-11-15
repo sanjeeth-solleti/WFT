@@ -466,7 +466,7 @@ export const TimelineExplorer: React.FC<TimelineExplorerProps> = ({
               {selectedEvent.secondary_entity && (
                 <div className="bg-[#f8fafc] dark:bg-[#0f172a] p-2 rounded border border-[#cbd5e1] dark:border-[#334155]">
                   <span className="text-[10px] text-slate-500 block">SECONDARY ENTITY</span>
-                  <span className="text-slate-700 dark:text-slate-300 break-all select-all">
+                  <span className="text-slate-700 dark:text-slate-300 break-words select-all">
                     {selectedEvent.secondary_entity}
                   </span>
                 </div>
@@ -478,7 +478,7 @@ export const TimelineExplorer: React.FC<TimelineExplorerProps> = ({
                   Table: <span className="font-bold">{selectedEvent.source_table}</span> (Row #{selectedEvent.source_row_id})
                 </span>
                 {selectedEvent.source_file && (
-                  <span className="text-[10px] text-slate-500 break-all block mt-0.5" title={selectedEvent.source_file}>
+                  <span className="text-[10px] text-slate-500 break-words block mt-0.5" title={selectedEvent.source_file}>
                     File: {selectedEvent.source_file}
                   </span>
                 )}

@@ -424,7 +424,7 @@ if ((-not $RegRipperPath) -or $ForceUpdate) {
     }
 
     try {
-        Invoke-WebRequest -Uri "https://github.com/keydet89/RegRipper3.0/archive/refs/heads/master.zip" -OutFile $RRZip -UseBasicParsing -TimeoutSec 30
+        Invoke-WebRequest -Uri "https://github.com/keydet89/RegRipper4.0/archive/refs/heads/master.zip" -OutFile $RRZip -UseBasicParsing -TimeoutSec 30
         Expand-Archive -Path $RRZip -DestinationPath $RRDir -Force
         Remove-Item $RRZip -Force -ErrorAction SilentlyContinue
         $rescanRR = Find-AllForensicToolsFast -TargetExeNames @("rip.exe")

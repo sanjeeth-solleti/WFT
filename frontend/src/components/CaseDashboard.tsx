@@ -129,7 +129,7 @@ export const CaseDashboard: React.FC<CaseDashboardProps> = ({
       </div>
 
       {/* 2. Top Evidence Metric Cards (Solid Border Enterprise Design) */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5 mt-4">
+      <div className="grid grid-cols-1 content-start auto-rows-max items-start sm:grid-cols-2 lg:grid-cols-4 gap-3.5 mt-4">
         {/* Card 1: Artifact Rows */}
         <div className="p-3.5 bg-white dark:bg-[#1e293b] border border-[#cbd5e1] dark:border-[#334155] rounded shadow-2xs flex flex-col justify-between">
           <div className="flex items-center justify-between text-slate-600 dark:text-slate-400">
@@ -234,7 +234,7 @@ export const CaseDashboard: React.FC<CaseDashboardProps> = ({
           </span>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-3">
+        <div className="grid grid-cols-1 content-start auto-rows-max items-start md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-3">
           {dashboard.categories.map((catItem) => (
             <div
               key={catItem.category}
@@ -273,7 +273,7 @@ export const CaseDashboard: React.FC<CaseDashboardProps> = ({
       </div>
 
       {/* 5. Top Connected Entities Section (3 Column Enterprise Tables) */}
-      <div className="mt-6 grid grid-cols-1 md:grid-cols-3 gap-4">
+      <div className="mt-6 grid grid-cols-1 content-start auto-rows-max items-start md:grid-cols-3 gap-4">
         {/* Column 1: Top Users & Identifiers */}
         <div className="p-3.5 bg-white dark:bg-[#1e293b] border border-[#cbd5e1] dark:border-[#334155] rounded shadow-2xs flex flex-col">
           <div className="flex items-center justify-between pb-2 border-b border-[#cbd5e1] dark:border-[#334155] text-xs font-bold uppercase tracking-wider text-slate-700 dark:text-slate-300">
@@ -395,7 +395,7 @@ export const CaseDashboard: React.FC<CaseDashboardProps> = ({
               <span>Examiner Tagged Evidence & Bookmarks ({dashboard.bookmarks.length})</span>
             </div>
           </div>
-          <div className="mt-3 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2.5">
+          <div className="mt-3 grid grid-cols-1 content-start auto-rows-max items-start md:grid-cols-2 lg:grid-cols-3 gap-2.5">
             {dashboard.bookmarks.map((b) => (
               <div
                 key={b.bookmark_id}

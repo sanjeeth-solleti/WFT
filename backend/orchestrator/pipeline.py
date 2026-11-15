@@ -571,7 +571,9 @@ class ProcessingPipeline:
             # -------------------------------------------------------------
             try:
                 from backend.db.schema import sync_artifact_registry_counts
-                sync_artifact_registry_counts(self.conn, case_id=self.case_id)
+                with DuckDBManager.get_lock(self.case_id):
+                    sync_conn = DuckDBManager.get_connection(self.case_id, read_only=False)
+                    sync_artifact_registry_counts(sync_conn, case_id=self.case_id)
             except Exception as sync_err:
                 print(f"[Pipeline] Warning synchronizing artifact registry: {sync_err}")
 

@@ -180,7 +180,7 @@ export const KeywordManager: React.FC<KeywordManagerProps> = ({
       )}
 
       {/* Top Input & Upload Controls Card */}
-      <div className="p-4 grid grid-cols-1 md:grid-cols-2 gap-4 border-b border-[#cbd5e1] dark:border-[#334155] bg-[#f1f5f9] dark:bg-[#0f172a] shrink-0">
+      <div className="p-4 grid grid-cols-1 content-start auto-rows-max items-start md:grid-cols-2 gap-4 border-b border-[#cbd5e1] dark:border-[#334155] bg-[#f1f5f9] dark:bg-[#0f172a] shrink-0">
         {/* Option 1: File Upload */}
         <div className="p-3.5 rounded border border-[#cbd5e1] dark:border-[#334155] bg-white dark:bg-[#1e293b] shadow-2xs flex flex-col justify-between">
           <div>

@@ -20,6 +20,8 @@ import {
   ArrowUp,
   ArrowDown,
   Image as ImageIcon,
+  Film,
+  Bookmark,
 } from 'lucide-react';
 import { apiClient, ArtifactItem } from '../api/client';
 import { ColumnFilterPopover } from './ColumnFilterPopover';
@@ -43,7 +45,6 @@ interface ArtifactGridProps {
   tags?: string[];
 }
 
-// Infer best default view mode based on artifact category
 function getSuggestedViewMode(artifact: ArtifactItem | null): ViewMode {
   if (!artifact) return 'column';
   const cat = artifact.category.toLowerCase();
@@ -54,7 +55,8 @@ function getSuggestedViewMode(artifact: ArtifactItem | null): ViewMode {
   return 'column';
 }
 
-// Helper to format human-readable column headers for forensic artifacts (especially Prefetch 8 runs)
+const VIDEO_OR_AUDIO_EXTS = /\.(mp4|mov|m4v|wmv|avi|mkv|webm|mp3|wav|ogg|flac)$/i;
+
 export const formatColumnDisplayName = (colName: string): string => {
   const lower = colName.toLowerCase();
   switch (lower) {
@@ -85,7 +87,6 @@ export const formatColumnDisplayName = (colName: string): string => {
   }
 };
 
-// Custom AG Grid Header Component with Excel/WFT Multi-Select Checkbox Filter trigger
 interface CustomHeaderWithFilterProps extends CustomHeaderProps {
   onTriggerFilter: (colName: string, event: React.MouseEvent) => void;
   hasActiveFilter: boolean;
@@ -108,7 +109,6 @@ const CustomHeaderComponent: React.FC<CustomHeaderWithFilterProps> = (props) => 
 
   return (
     <div className="flex items-center justify-between w-full h-full select-none pr-1">
-      {/* Column Name & Sort */}
       <div
         className="flex items-center gap-1.5 cursor-pointer truncate flex-1 min-w-0"
         onClick={handleSort}
@@ -121,8 +121,7 @@ const CustomHeaderComponent: React.FC<CustomHeaderWithFilterProps> = (props) => 
         {sortDirection === 'desc' && <ArrowDown className="w-3 h-3 text-[#0284c7] dark:text-[#38bdf8] shrink-0" />}
       </div>
 
-      {/* Multi-Select Checkbox Filter Trigger Button */}
-      {colName !== '_row_id' && (
+      {colName !== '_row_id' && colName !== '_bookmark' && (
         <button
           onClick={handleFilterClick}
           className={`p-1 rounded transition-all shrink-0 ml-1 cursor-pointer ${
@@ -154,24 +153,19 @@ export const ArtifactGrid: React.FC<ArtifactGridProps> = ({
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Multi-Select Column Filters: { [columnName]: selectedValues[] }
+  const [bookmarkedKeys, setBookmarkedKeys] = useState<Set<string>>(new Set());
   const [columnFilters, setColumnFilters] = useState<Record<string, unknown[]>>({});
-
-  // Active Filter Popover State
   const [activeFilterPopover, setActiveFilterPopover] = useState<{
     columnName: string;
     position: { top: number; left: number };
   } | null>(null);
 
-  // View Mode: Column (AG Grid Single Page Virtualized), Thumbnail (Continuous Infinite Scroll)
   const [viewMode, setViewMode] = useState<ViewMode>('column');
   const [selectedRowId, setSelectedRowId] = useState<unknown>(null);
 
-  // Thumbnail rows state for continuous scrolling
   const [thumbnailRows, setThumbnailRows] = useState<Record<string, unknown>[]>([]);
   const [isLoadingThumbnails, setIsLoadingThumbnails] = useState(false);
 
-  // Right-Click Context Menu State
   const [contextMenu, setContextMenu] = useState<{
     position: { x: number; y: number };
     row: Record<string, any>;
@@ -181,7 +175,56 @@ export const ArtifactGrid: React.FC<ArtifactGridProps> = ({
   const gridApiRef = useRef<GridApi | null>(null);
   const tableName = selectedArtifact?.table_name;
 
-  // Suggested view mode and reset state when switching artifact tables
+  const loadBookmarks = useCallback(async () => {
+    if (!caseId) return;
+    try {
+      const res = await apiClient.listBookmarks(caseId);
+      const next = new Set<string>();
+      for (const b of res.bookmarks || []) {
+        next.add(`${b.source_table}:${b.source_row_id}`);
+      }
+      setBookmarkedKeys(next);
+    } catch {
+      // ignore
+    }
+  }, [caseId]);
+
+  useEffect(() => {
+    loadBookmarks();
+  }, [loadBookmarks]);
+
+  const handleToggleRowBookmark = useCallback(
+    async (row: Record<string, unknown>) => {
+      if (!caseId || !tableName) return;
+      const rowId = Number(row._row_id || row.timeline_id || 1);
+      const key = `${tableName}:${rowId}`;
+      const isAlreadyBookmarked = bookmarkedKeys.has(key);
+
+      setBookmarkedKeys((prev) => {
+        const updated = new Set(prev);
+        if (isAlreadyBookmarked) updated.delete(key);
+        else updated.add(key);
+        return updated;
+      });
+
+      try {
+        if (isAlreadyBookmarked) {
+          await apiClient.deleteBookmarkByRow(caseId, tableName, rowId);
+        } else {
+          await apiClient.createBookmark(caseId, {
+            source_table: tableName,
+            source_row_id: rowId,
+            tag_name: 'Key Evidence',
+          });
+        }
+        gridApiRef.current?.redrawRows();
+      } catch (err) {
+        console.error('Bookmark toggle failed:', err);
+      }
+    },
+    [caseId, tableName, bookmarkedKeys]
+  );
+
   useEffect(() => {
     if (selectedArtifact) {
       setViewMode(getSuggestedViewMode(selectedArtifact));
@@ -191,7 +234,6 @@ export const ArtifactGrid: React.FC<ArtifactGridProps> = ({
     }
   }, [selectedArtifact?.table_name]);
 
-  // Load initial table columns and counts whenever selectedArtifact changes
   useEffect(() => {
     let isCancelled = false;
     if (!caseId || !tableName) {
@@ -229,7 +271,6 @@ export const ArtifactGrid: React.FC<ArtifactGridProps> = ({
     };
   }, [caseId, tableName]);
 
-  // Handle Thumbnail Continuous Loading
   const fetchThumbnails = useCallback(
     async (reset: boolean = false) => {
       if (!caseId || !tableName) return;
@@ -251,14 +292,26 @@ export const ArtifactGrid: React.FC<ArtifactGridProps> = ({
           tags: tags.length > 0 ? tags : undefined,
         });
 
+        // Deduplicate media rows by (file_name + sha256/file_size) so videos/pictures never show twice
+        const deduplicateMedia = (rowsList: Record<string, unknown>[]) => {
+          const seen = new Set<string>();
+          return rowsList.filter((r) => {
+            const key = `${String(r.file_name || r.entry_hash || r._row_id).toLowerCase()}_${String(r.sha256 || r.file_size_bytes || r._row_id)}`;
+            if (seen.has(key)) return false;
+            seen.add(key);
+            return true;
+          });
+        };
+
         if (reset) {
-          setThumbnailRows(res.rows);
-          if (res.rows.length > 0) {
-            onSelectRow(res.rows[0]);
-            setSelectedRowId(res.rows[0]._row_id);
+          const cleanRows = deduplicateMedia(res.rows);
+          setThumbnailRows(cleanRows);
+          if (cleanRows.length > 0) {
+            onSelectRow(cleanRows[0]);
+            setSelectedRowId(cleanRows[0]._row_id);
           }
         } else {
-          setThumbnailRows((prev) => [...prev, ...res.rows]);
+          setThumbnailRows((prev) => deduplicateMedia([...prev, ...res.rows]));
         }
         setTotalCount(res.total_count);
         setFilteredCount(res.filtered_count);
@@ -271,7 +324,6 @@ export const ArtifactGrid: React.FC<ArtifactGridProps> = ({
     [caseId, tableName, globalSearch, externalKeywords, columnFilters, dateRange?.startUtc, dateRange?.endUtc, tags, thumbnailRows.length, onSelectRow]
   );
 
-  // Trigger thumbnail reload when entering thumbnail mode or filters change
   useEffect(() => {
     if (viewMode === 'thumbnail') {
       fetchThumbnails(true);
@@ -316,16 +368,10 @@ export const ArtifactGrid: React.FC<ArtifactGridProps> = ({
     });
   }, []);
 
-  const handleClearAllColumnFilters = useCallback(() => {
-    setColumnFilters({});
-  }, []);
-
   const handleClearFiltersPreservingBookmarks = useCallback(() => {
     setColumnFilters({});
   }, []);
 
-  // Construct AG Grid Single-Page Infinite Row Model Datasource
-  // This virtualizes all 98,904+ rows into a single continuous scrollable grid with NO page buttons
   const datasource: IDatasource = useMemo(() => {
     if (!caseId || !tableName) {
       return {
@@ -364,14 +410,10 @@ export const ArtifactGrid: React.FC<ArtifactGridProps> = ({
             tags: tags.length > 0 ? tags : undefined,
           });
 
-          // Inform AG Grid of rows and exact filtered count for the virtual scrollbar
           params.successCallback(res.rows, res.filtered_count);
-
-          // Update header count badges
           setTotalCount(res.total_count);
           setFilteredCount(res.filtered_count);
 
-          // Auto-select row 0 on initial load
           if (startRow === 0 && res.rows.length > 0) {
             setSelectedRowId((prev: unknown) => {
               if (prev === null) {
@@ -399,28 +441,61 @@ export const ArtifactGrid: React.FC<ArtifactGridProps> = ({
     onSelectRow,
   ]);
 
-  // Synchronize datasource with gridApi whenever datasource changes
   useEffect(() => {
     if (gridApiRef.current) {
       gridApiRef.current.setGridOption('datasource', datasource);
     }
   }, [datasource]);
 
-  // Handle Refresh button
   const handleRefresh = useCallback(() => {
+    loadBookmarks();
     if (gridApiRef.current) {
       gridApiRef.current.purgeInfiniteCache();
     }
     if (viewMode === 'thumbnail') {
       fetchThumbnails(true);
     }
-  }, [viewMode, fetchThumbnails]);
+  }, [viewMode, fetchThumbnails, loadBookmarks]);
 
-  // Build AG Grid Column Definitions
   const columnDefs = useMemo<ColDef[]>(() => {
     if (!columns || columns.length === 0) return [];
 
-    return columns.map((colName) => {
+    const bookmarkCol: ColDef = {
+      colId: '_bookmark',
+      headerName: '★',
+      width: 48,
+      minWidth: 48,
+      maxWidth: 48,
+      sortable: false,
+      resizable: false,
+      pinned: 'left',
+      cellRenderer: (params: { data?: Record<string, unknown> }) => {
+        if (!params.data || !tableName) return null;
+        const rowId = Number(params.data._row_id || params.data.timeline_id || 1);
+        const isMarked = bookmarkedKeys.has(`${tableName}:${rowId}`);
+        return (
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              handleToggleRowBookmark(params.data!);
+            }}
+            className="w-full h-full flex items-center justify-center cursor-pointer"
+            title={isMarked ? 'Remove Bookmark' : 'Bookmark Row'}
+          >
+            <Bookmark
+              className={`w-3.5 h-3.5 ${
+                isMarked
+                  ? 'fill-amber-400 text-amber-500'
+                  : 'text-slate-400 hover:text-amber-500'
+              }`}
+            />
+          </button>
+        );
+      },
+    };
+
+    const dynamicCols: ColDef[] = columns.map((colName) => {
       const isFilterActive = Boolean(columnFilters[colName] && columnFilters[colName].length > 0);
       const filterCount = columnFilters[colName]?.length || 0;
 
@@ -471,14 +546,12 @@ export const ArtifactGrid: React.FC<ArtifactGridProps> = ({
         filter: false,
         width: defaultWidth,
         minWidth: minColWidth,
-        maxWidth: undefined,
         cellRenderer: (params: { value: unknown; data: unknown }) => {
           if (!params.data) {
-            // Skeleton while loading block
             return <span className="text-slate-300 dark:text-slate-600 animate-pulse text-[11px] font-mono">...</span>;
           }
           const val = params.value;
-          if (val === null || val === undefined) {
+          if (val === null || val === undefined || val === '') {
             return <span className="text-slate-400 italic text-[11px] font-mono">—</span>;
           }
           const strVal = String(val);
@@ -493,7 +566,9 @@ export const ArtifactGrid: React.FC<ArtifactGridProps> = ({
         },
       };
     });
-  }, [columns, columnFilters, handleTriggerFilter]);
+
+    return [bookmarkCol, ...dynamicCols];
+  }, [columns, columnFilters, handleTriggerFilter, bookmarkedKeys, tableName, handleToggleRowBookmark]);
 
   const onRowSelected = useCallback(
     (event: RowSelectedEvent) => {
@@ -556,15 +631,13 @@ export const ArtifactGrid: React.FC<ArtifactGridProps> = ({
 
   return (
     <div className="flex flex-col h-full bg-white dark:bg-[#1e293b] overflow-hidden font-sans border-r border-[#cbd5e1] dark:border-[#334155]">
-      {/* Top Bar: EVIDENCE (<count>) on left, View Switcher & Refresh on right (NO pagination buttons!) */}
       <div className="h-12 px-4 bg-[#f1f5f9] dark:bg-[#0f172a] border-b border-[#cbd5e1] dark:border-[#334155] flex items-center justify-between shrink-0 select-none">
-        {/* Left: EVIDENCE (<count>) */}
         <div className="flex items-center gap-2.5 min-w-0">
           <Table className="w-4 h-4 text-[#0284c7] dark:text-[#38bdf8] shrink-0" />
           <span className="font-extrabold text-xs uppercase tracking-wide text-[#0f172a] dark:text-[#f8fafc] truncate">
             EVIDENCE{' '}
             <span className="font-mono text-[#0284c7] dark:text-[#38bdf8]">
-              ({filteredCount.toLocaleString()}
+              ({viewMode === 'thumbnail' ? thumbnailRows.length.toLocaleString() : filteredCount.toLocaleString()}
               {filteredCount !== totalCount && ` of ${totalCount.toLocaleString()}`})
             </span>
           </span>
@@ -576,9 +649,7 @@ export const ArtifactGrid: React.FC<ArtifactGridProps> = ({
           )}
         </div>
 
-        {/* Center / Right Controls: Column/Thumbnail View, Refresh */}
         <div className="flex items-center gap-3 shrink-0">
-          {/* View Selector Dropdown */}
           <div className="flex items-center gap-1 bg-white dark:bg-[#1e293b] p-0.5 rounded border border-[#cbd5e1] dark:border-[#334155] shadow-2xs">
             <button
               onClick={() => setViewMode('column')}
@@ -587,7 +658,6 @@ export const ArtifactGrid: React.FC<ArtifactGridProps> = ({
                   ? 'bg-[#0284c7] text-white border border-[#0369a1] shadow-2xs'
                   : 'text-slate-600 dark:text-slate-400 hover:text-[#0f172a] dark:hover:text-[#f8fafc]'
               }`}
-              title="Column View (Single Continuous Virtualized Grid)"
             >
               <Table className="w-3.5 h-3.5" />
               <span>Column view</span>
@@ -600,14 +670,12 @@ export const ArtifactGrid: React.FC<ArtifactGridProps> = ({
                   ? 'bg-[#0284c7] text-white border border-[#0369a1] shadow-2xs'
                   : 'text-slate-600 dark:text-slate-400 hover:text-[#0f172a] dark:hover:text-[#f8fafc]'
               }`}
-              title="Thumbnail View (Continuous Infinite Scroll)"
             >
               <LayoutGrid className="w-3.5 h-3.5" />
               <span>Thumbnail</span>
             </button>
           </div>
 
-          {/* Refresh Button */}
           <button
             onClick={handleRefresh}
             disabled={isLoading}
@@ -619,7 +687,6 @@ export const ArtifactGrid: React.FC<ArtifactGridProps> = ({
         </div>
       </div>
 
-      {/* Active Column Filters Pills Bar */}
       {activeFiltersList.length > 0 && (
         <div className="px-4 py-2 bg-[#f1f5f9] dark:bg-[#0f172a] border-b border-[#cbd5e1] dark:border-[#334155] flex items-center justify-between text-xs shrink-0">
           <div className="flex items-center gap-2 flex-wrap">
@@ -654,7 +721,6 @@ export const ArtifactGrid: React.FC<ArtifactGridProps> = ({
         </div>
       )}
 
-      {/* Main Grid View Area */}
       <div className="flex-1 overflow-hidden relative">
         {isLoading && columns.length === 0 && (
           <div className="absolute inset-0 bg-white/70 dark:bg-[#0f172a]/70 z-10 flex flex-col items-center justify-center gap-2">
@@ -694,6 +760,14 @@ export const ArtifactGrid: React.FC<ArtifactGridProps> = ({
               onCellContextMenu={onCellContextMenu}
               onRowSelected={onRowSelected}
               onRowClicked={onRowClicked}
+              getRowStyle={(params) => {
+                if (!params.data || !tableName) return undefined;
+                const rowId = Number(params.data._row_id || params.data.timeline_id || 1);
+                if (bookmarkedKeys.has(`${tableName}:${rowId}`)) {
+                  return { backgroundColor: 'rgba(245, 158, 11, 0.14)' };
+                }
+                return undefined;
+              }}
               onGridReady={(event) => {
                 gridApiRef.current = event.api;
                 event.api.setGridOption('datasource', datasource);
@@ -702,7 +776,7 @@ export const ArtifactGrid: React.FC<ArtifactGridProps> = ({
                 resizable: true,
                 sortable: true,
                 minWidth: 70,
-                 autoHeaderHeight: true,
+                autoHeaderHeight: true,
               }}
               rowHeight={38}
               headerHeight={40}
@@ -712,23 +786,45 @@ export const ArtifactGrid: React.FC<ArtifactGridProps> = ({
             />
           </div>
         ) : (
-          // Thumbnail View for Media/Carved files with Continuous Infinite Scroll
+          /* Fixed: content-start items-start auto-rows-max prevents cards from stretching vertically! */
           <div
             onScroll={handleThumbnailScroll}
-            className="h-full overflow-y-auto p-4 grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4 bg-[#f1f5f9] dark:bg-[#0f172a]"
+            className="h-full overflow-y-auto p-4 grid grid-cols-2 content-start auto-rows-max items-start sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4 content-start items-start auto-rows-max bg-[#f1f5f9] dark:bg-[#0f172a]"
           >
             {thumbnailRows.length === 0 && !isLoadingThumbnails ? (
               <div className="col-span-full text-center py-12 text-slate-400 text-xs">No media records found.</div>
             ) : (
               thumbnailRows.map((row, idx) => {
                 const isSelected = selectedRowId === row._row_id;
-                const fileName = String(row.file_name || row.FileName || row.SourceFilename || `Record_${idx}`);
-                const filePath = String(row.file_path || row.FullPath || row.Path || '');
+                const fileName = String(
+                  row.file_name || row.FileName || row.cache_name || row.SourceFilename || `Record_${idx + 1}`
+                );
+                // Prioritize the exact same path order used by DetailsAndHexPane so thumbnails always load
+                const primaryMediaPath = String(
+                  row.carved_path ||
+                    row.carved_file_path ||
+                    row.file_path ||
+                    row.source_file ||
+                    row.FullPath ||
+                    row.Path ||
+                    fileName
+                );
+                const fallbackMediaPath = String(row.source_file || row.file_path || fileName);
+                const isVideoOrAudio =
+                  VIDEO_OR_AUDIO_EXTS.test(fileName) ||
+                  VIDEO_OR_AUDIO_EXTS.test(primaryMediaPath) ||
+                  String(tableName || '').includes('video');
                 const ocrText = String(row.ocr_extracted_text || '');
+                const dims =
+                  row.image_width && row.image_height
+                    ? `${row.image_width}×${row.image_height}`
+                    : row.width && row.height
+                    ? `${row.width}×${row.height}`
+                    : '';
 
                 return (
                   <div
-                    key={idx}
+                    key={`${row._row_id ?? idx}_${fileName}`}
                     onClick={() => {
                       onSelectRow(row);
                       setSelectedRowId(row._row_id);
@@ -740,46 +836,67 @@ export const ArtifactGrid: React.FC<ArtifactGridProps> = ({
                       setContextMenu({
                         position: { x: e.clientX, y: e.clientY },
                         row,
-                        cellValue: row.file_name || row.FileName,
+                        cellValue: fileName,
                       });
                     }}
-                    className={`rounded border overflow-hidden transition-all cursor-pointer flex flex-col justify-between ${
+                    className={`h-48 rounded-md border overflow-hidden transition-all cursor-pointer flex flex-col justify-between shrink-0 ${
                       isSelected
-                        ? 'bg-[#bae6fd] dark:bg-[#0c4a6e] border-[#0284c7] dark:border-[#38bdf8] text-[#0f172a] dark:text-[#f8fafc] shadow-xs'
+                        ? 'bg-[#bae6fd] dark:bg-[#0c4a6e] border-[#0284c7] dark:border-[#38bdf8] text-[#0f172a] dark:text-[#f8fafc] shadow-sm ring-1 ring-[#0284c7] dark:ring-[#38bdf8]'
                         : 'bg-white dark:bg-[#1e293b] border-[#cbd5e1] dark:border-[#334155] hover:border-slate-400 text-[#0f172a] dark:text-[#f8fafc] shadow-2xs'
                     }`}
                   >
-                    <div className="h-32 bg-slate-100 dark:bg-[#0f172a] flex items-center justify-center relative overflow-hidden border-b border-[#cbd5e1] dark:border-[#334155]">
-                      {Boolean(row.source_file || row.carved_file_path || row.carved_path) && (
-                        <img
-                          src={apiClient.getMediaStreamUrl(caseId, String(row.carved_file_path || row.carved_path || row.source_file))}
-                          alt={fileName}
-                          className="w-full h-full object-cover absolute inset-0 z-10"
-                          onError={(e) => { (e.currentTarget as HTMLElement).style.display = 'none'; }}
-                        />
-                      )}
-                      {Boolean(row.source_file || row.carved_file_path || row.carved_path || row.file_path) ? (
-                        <img
-                          src={`/api/cases/${caseId}/raw-file?path=${encodeURIComponent(String(row.carved_file_path || row.carved_path || row.source_file || row.file_path))}`}
-                          alt={fileName}
-                          className="w-full h-full object-cover"
-                          onError={(e) => { (e.currentTarget as HTMLElement).style.display = 'none'; }}
-                        />
+                    <div className="h-32 w-full bg-slate-100 dark:bg-[#0f172a] flex flex-col items-center justify-center relative overflow-hidden border-b border-[#cbd5e1] dark:border-[#334155] shrink-0">
+                      {isVideoOrAudio ? (
+                        <div className="flex flex-col items-center justify-center gap-1.5 text-slate-400 dark:text-slate-500">
+                          <Film className="w-10 h-10 text-[#0284c7] dark:text-[#38bdf8]" />
+                          <span className="text-[10px] font-mono uppercase px-2 py-0.5 rounded bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300 font-bold">
+                            {String(row.file_type || fileName.split('.').pop() || 'VIDEO').toUpperCase()}
+                          </span>
+                        </div>
+                      ) : primaryMediaPath ? (
+                        <>
+                          <ImageIcon className="w-8 h-8 text-slate-400 dark:text-slate-600 absolute z-0" />
+                          <img
+                            src={apiClient.getFileRawUrl(caseId, primaryMediaPath, false)}
+                            alt={fileName}
+                            loading="lazy"
+                            className="w-full h-full object-cover relative z-10 bg-slate-100 dark:bg-[#0f172a]"
+                            onError={(e) => {
+                              const imgEl = e.currentTarget as HTMLImageElement;
+                              if (!imgEl.dataset.retried && fallbackMediaPath && fallbackMediaPath !== primaryMediaPath) {
+                                imgEl.dataset.retried = 'true';
+                                imgEl.src = apiClient.getFileRawUrl(caseId, fallbackMediaPath, false);
+                              } else {
+                                imgEl.style.display = 'none';
+                              }
+                            }}
+                          />
+                        </>
                       ) : (
                         <ImageIcon className="w-10 h-10 text-slate-400 dark:text-slate-600" />
                       )}
+
                       {ocrText && (
-                        <div className="absolute bottom-1 right-1 px-1.5 py-0.5 rounded bg-black/60 text-white font-mono text-[9px] uppercase">
-                          OCR Text
+                        <div className="absolute bottom-1 right-1 z-20 px-1.5 py-0.5 rounded bg-black/70 text-white font-mono text-[9px] uppercase">
+                          OCR
+                        </div>
+                      )}
+                      {dims && (
+                        <div className="absolute bottom-1 left-1 z-20 px-1.5 py-0.5 rounded bg-black/65 text-white font-mono text-[9px]">
+                          {dims}
                         </div>
                       )}
                     </div>
-                    <div className="p-2.5">
-                      <p className="font-bold text-xs truncate" title={fileName}>
+
+                    <div className="p-2 flex flex-col justify-center min-w-0 h-16 shrink-0">
+                      <p className="font-bold text-xs truncate leading-tight" title={fileName}>
                         {fileName}
                       </p>
-                      <p className="text-[10px] text-slate-500 dark:text-slate-400 font-mono truncate" title={filePath}>
-                        {filePath || `Row #${row._row_id}`}
+                      <p
+                        className="text-[10px] text-slate-500 dark:text-slate-400 font-mono truncate mt-0.5"
+                        title={primaryMediaPath}
+                      >
+                        {primaryMediaPath || `Row #${row._row_id}`}
                       </p>
                     </div>
                   </div>
@@ -790,14 +907,13 @@ export const ArtifactGrid: React.FC<ArtifactGridProps> = ({
             {isLoadingThumbnails && (
               <div className="col-span-full py-6 flex items-center justify-center gap-2 text-xs text-slate-500 font-mono">
                 <RefreshCw className="w-4 h-4 animate-spin text-[#0284c7]" />
-                <span>Loading more records in same page...</span>
+                <span>Loading more records...</span>
               </div>
             )}
           </div>
         )}
       </div>
 
-      {/* Floating Column Filter Popover */}
       {activeFilterPopover && tableName && (
         <ColumnFilterPopover
           caseId={caseId}
@@ -811,7 +927,6 @@ export const ArtifactGrid: React.FC<ArtifactGridProps> = ({
         />
       )}
 
-      {/* Native Magnet AXIOM-style Right-Click Forensic Context Menu */}
       {contextMenu && (
         <RowContextMenu
           caseId={caseId}

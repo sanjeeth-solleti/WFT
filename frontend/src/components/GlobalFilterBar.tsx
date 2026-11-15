@@ -43,7 +43,6 @@ interface GlobalFilterBarProps {
   onNavigateToRegRipper?: () => void;
 }
 
-// Content Types catalog
 export const CONTENT_TYPES = [
   { id: 'executables', label: 'Executables & Binaries (.exe, .dll, Prefetch, ShimCache)' },
   { id: 'documents', label: 'Documents & Office (.pdf, .docx, LNK, JumpLists)' },
@@ -53,7 +52,6 @@ export const CONTENT_TYPES = [
   { id: 'media', label: 'Media & Carved Images (JPEG, PNG, OCR)' },
 ] as const;
 
-// Helper to check whether an artifact matches selected content types
 export function matchContentType(artifact: ArtifactItem, types: string[]): boolean {
   if (!types || types.length === 0) return true;
   const cat = (artifact.category || '').toUpperCase();
@@ -131,7 +129,6 @@ export function matchContentType(artifact: ArtifactItem, types: string[]): boole
   return false;
 }
 
-// Forensic Bookmark & Tag Options (Classic Enterprise Flat Palette)
 export const TAG_OPTIONS = [
   { id: 'Key Evidence', label: 'Key Evidence', color: 'bg-slate-100 text-[#0284c7] border-[#cbd5e1] dark:bg-slate-800 dark:text-[#38bdf8] dark:border-slate-700' },
   { id: 'Malware', label: 'Malware', color: 'bg-red-50 text-[#991b1b] border-red-300 dark:bg-red-950/60 dark:text-red-300 dark:border-red-800' },
@@ -158,20 +155,17 @@ export const GlobalFilterBar: React.FC<GlobalFilterBarProps> = ({
   const [isLoadingKeywords, setIsLoadingKeywords] = useState(false);
   const [artifactSearch, setArtifactSearch] = useState('');
 
-  // RegRipper dropdown state
   const [regripperPlugins, setRegripperPlugins] = useState<RegRipperPluginItem[]>([]);
   const [isLoadingRegripper, setIsLoadingRegripper] = useState<boolean>(false);
   const [regripperSearch, setRegripperSearch] = useState<string>('');
   const [regripperHive, setRegripperHive] = useState<string>('ALL');
 
-  // Custom date picker state
   const [customStart, setCustomStart] = useState<string>('');
   const [customEnd, setCustomEnd] = useState<string>('');
 
   const barRef = useRef<HTMLDivElement>(null);
   const popoverRef = useRef<HTMLDivElement>(null);
 
-  // Close dropdown on outside click or Escape
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
       const target = e.target as Node;
@@ -201,7 +195,6 @@ export const GlobalFilterBar: React.FC<GlobalFilterBarProps> = ({
     };
   }, []);
 
-  // Fetch keywords when keyword dropdown is opened or case changes
   useEffect(() => {
     if (caseId && (activeDropdown === 'keywords' || caseKeywords.length === 0)) {
       setIsLoadingKeywords(true);
@@ -219,7 +212,6 @@ export const GlobalFilterBar: React.FC<GlobalFilterBarProps> = ({
     }
   }, [caseId, activeDropdown]);
 
-  // Fetch RegRipper plugins when dropdown is opened or case changes
   useEffect(() => {
     if (caseId && (activeDropdown === 'regripper' || regripperPlugins.length === 0)) {
       setIsLoadingRegripper(true);
@@ -237,7 +229,6 @@ export const GlobalFilterBar: React.FC<GlobalFilterBarProps> = ({
     }
   }, [caseId, activeDropdown]);
 
-  // Filtered RegRipper plugins for popover
   const filteredRegRipperPlugins = React.useMemo(() => {
     return regripperPlugins.filter((p) => {
       if (regripperHive !== 'ALL') {
@@ -274,24 +265,25 @@ export const GlobalFilterBar: React.FC<GlobalFilterBarProps> = ({
     }
   };
 
-  // Count active filters
   const activeCount =
-    (filterState.artifactTable ? 1 : 0) +
     filterState.contentTypes.length +
     (filterState.dateRange.preset !== 'all' ? 1 : 0) +
     filterState.keywords.length +
-    filterState.tags.length;
+    filterState.tags.length +
+    (filterState.search ? 1 : 0);
 
+  // Clear Filters ONLY resets transient filter criteria — never resets active artifact table or persisted bookmarks
   const handleClearAll = () => {
     onFilterChange({
-      evidenceSource: undefined,
-      artifactTable: undefined,
+      ...filterState,
       contentTypes: [],
-      dateRange: { preset: 'all' },
+      dateRange: { preset: 'all', startUtc: undefined, endUtc: undefined },
       keywords: [],
       tags: [],
       search: '',
     });
+    setCustomStart('');
+    setCustomEnd('');
     setActiveDropdown(null);
     setDropdownPos(null);
   };
@@ -378,7 +370,6 @@ export const GlobalFilterBar: React.FC<GlobalFilterBarProps> = ({
     setDropdownPos(null);
   };
 
-  // Find human-readable label for selected artifact
   const selectedArtifactItem = artifacts.find((a) => a.table_name === filterState.artifactTable);
   const artifactButtonLabel = selectedArtifactItem
     ? selectedArtifactItem.display_name
@@ -390,9 +381,7 @@ export const GlobalFilterBar: React.FC<GlobalFilterBarProps> = ({
         ref={barRef}
         className="h-11 bg-white dark:bg-[#1e293b] border-b border-[#cbd5e1] dark:border-[#334155] px-4 flex items-center justify-between select-none z-20 shrink-0 font-sans shadow-2xs relative"
       >
-        {/* Left: Filter Dropdown Pills */}
         <div className="flex items-center gap-2 overflow-visible py-1 shrink-0">
-          {/* 1. Artifacts ▾ */}
           <button
             onClick={(e) => toggleDropdown('artifacts', e, 320)}
             className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-medium border transition-colors cursor-pointer ${
@@ -408,7 +397,6 @@ export const GlobalFilterBar: React.FC<GlobalFilterBarProps> = ({
             <ChevronDown className="w-3 h-3 text-slate-400" />
           </button>
 
-          {/* 2b. RegRipper ▾ */}
           <button
             onClick={(e) => toggleDropdown('regripper', e, 380)}
             className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-medium border transition-colors cursor-pointer ${
@@ -428,7 +416,6 @@ export const GlobalFilterBar: React.FC<GlobalFilterBarProps> = ({
             <ChevronDown className="w-3 h-3 text-slate-400" />
           </button>
 
-          {/* 3. Content types ▾ */}
           <button
             onClick={(e) => toggleDropdown('content', e, 320)}
             className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-medium border transition-colors cursor-pointer ${
@@ -445,7 +432,6 @@ export const GlobalFilterBar: React.FC<GlobalFilterBarProps> = ({
             <ChevronDown className="w-3 h-3 text-slate-400" />
           </button>
 
-          {/* 4. Date & Time ▾ */}
           <button
             onClick={(e) => toggleDropdown('date', e, 280)}
             className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-medium border transition-colors cursor-pointer ${
@@ -465,7 +451,6 @@ export const GlobalFilterBar: React.FC<GlobalFilterBarProps> = ({
             <ChevronDown className="w-3 h-3 text-slate-400" />
           </button>
 
-          {/* 5. Keyword lists ▾ */}
           <button
             onClick={(e) => toggleDropdown('keywords', e, 300)}
             className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-medium border transition-colors cursor-pointer ${
@@ -482,7 +467,6 @@ export const GlobalFilterBar: React.FC<GlobalFilterBarProps> = ({
             <ChevronDown className="w-3 h-3 text-slate-400" />
           </button>
 
-          {/* 6. Tags & Bookmarks ▾ */}
           <button
             onClick={(e) => toggleDropdown('tags', e, 280)}
             className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-medium border transition-colors cursor-pointer ${
@@ -499,7 +483,6 @@ export const GlobalFilterBar: React.FC<GlobalFilterBarProps> = ({
             <ChevronDown className="w-3 h-3 text-slate-400" />
           </button>
 
-          {/* Clear All Filters Button */}
           {activeCount > 0 && (
             <button
               onClick={handleClearAll}
@@ -511,7 +494,6 @@ export const GlobalFilterBar: React.FC<GlobalFilterBarProps> = ({
           )}
         </div>
 
-        {/* Right: Global Search Bar */}
         <div className="relative w-64 md:w-80 shrink-0">
           <Search className="w-3.5 h-3.5 absolute left-3 top-2.5 text-slate-400 pointer-events-none" />
           <input
@@ -533,7 +515,6 @@ export const GlobalFilterBar: React.FC<GlobalFilterBarProps> = ({
         </div>
       </div>
 
-      {/* FLOATING DROPDOWN POPOVERS - Positioned fixed below trigger to prevent any clipping */}
       {activeDropdown && dropdownPos && (
         <div
           ref={popoverRef}
@@ -545,7 +526,6 @@ export const GlobalFilterBar: React.FC<GlobalFilterBarProps> = ({
           }}
           className="bg-white dark:bg-[#1e293b] border border-[#cbd5e1] dark:border-[#334155] rounded-md shadow-2xl p-2 font-sans text-xs animate-in fade-in zoom-in-95 duration-150"
         >
-          {/* 1. Artifacts Popover */}
           {activeDropdown === 'artifacts' && (
             <div className="w-80">
               <div className="px-2 py-1 border-b border-[#cbd5e1] dark:border-[#334155] mb-2 flex items-center justify-between">
@@ -639,7 +619,6 @@ export const GlobalFilterBar: React.FC<GlobalFilterBarProps> = ({
             </div>
           )}
 
-          {/* 2b. RegRipper Popover */}
           {activeDropdown === 'regripper' && (
             <div className="w-96">
               <div className="px-2 py-1 border-b border-[#cbd5e1] dark:border-[#334155] mb-2 flex items-center justify-between">
@@ -669,7 +648,6 @@ export const GlobalFilterBar: React.FC<GlobalFilterBarProps> = ({
                 </div>
               </div>
 
-              {/* Search input */}
               <div className="px-1 mb-2">
                 <div className="relative">
                   <Search className="w-3 h-3 absolute left-2 top-2 text-slate-400" />
@@ -692,7 +670,6 @@ export const GlobalFilterBar: React.FC<GlobalFilterBarProps> = ({
                 </div>
               </div>
 
-              {/* Hive filter pills */}
               <div className="flex flex-wrap gap-1 px-1 mb-2">
                 {['ALL', 'SYSTEM', 'SOFTWARE', 'SAM', 'SECURITY', 'NTUSER', 'USRCLASS', 'AMCACHE'].map((h) => (
                   <button
@@ -709,7 +686,6 @@ export const GlobalFilterBar: React.FC<GlobalFilterBarProps> = ({
                 ))}
               </div>
 
-              {/* Plugin List */}
               <div className="max-h-64 overflow-y-auto space-y-1 pr-1 custom-scrollbar">
                 {isLoadingRegripper ? (
                   <div className="p-4 text-center text-slate-400 flex items-center justify-center gap-1.5">
@@ -771,7 +747,6 @@ export const GlobalFilterBar: React.FC<GlobalFilterBarProps> = ({
             </div>
           )}
 
-          {/* 3. Content Types Popover */}
           {activeDropdown === 'content' && (
             <div className="w-80">
               <div className="flex items-center justify-between px-2 py-1 border-b border-[#cbd5e1] dark:border-[#334155] mb-2">
@@ -823,7 +798,6 @@ export const GlobalFilterBar: React.FC<GlobalFilterBarProps> = ({
             </div>
           )}
 
-          {/* 4. Date & Time Popover */}
           {activeDropdown === 'date' && (
             <div className="w-72">
               <div className="text-[11px] font-bold uppercase text-slate-500 px-2 py-1 border-b border-[#cbd5e1] dark:border-[#334155] mb-2">
@@ -853,7 +827,6 @@ export const GlobalFilterBar: React.FC<GlobalFilterBarProps> = ({
                 ))}
               </div>
 
-              {/* Custom Date Range Section */}
               <div className="mt-3 pt-2 border-t border-[#cbd5e1] dark:border-[#334155]">
                 <div className="flex items-center gap-1 text-[11px] font-bold uppercase text-slate-500 mb-2 px-1">
                   <CalendarRange className="w-3 h-3 text-[#0284c7]" />
@@ -890,7 +863,6 @@ export const GlobalFilterBar: React.FC<GlobalFilterBarProps> = ({
             </div>
           )}
 
-          {/* 5. Keywords Popover */}
           {activeDropdown === 'keywords' && (
             <div className="w-80">
               <div className="flex items-center justify-between px-2 py-1 mb-2 border-b border-[#cbd5e1] dark:border-[#334155]">
@@ -982,7 +954,6 @@ export const GlobalFilterBar: React.FC<GlobalFilterBarProps> = ({
             </div>
           )}
 
-          {/* 6. Tags & Bookmarks Popover */}
           {activeDropdown === 'tags' && (
             <div className="w-72">
               <div className="flex items-center justify-between px-2 py-1 border-b border-[#cbd5e1] dark:border-[#334155] mb-2">

@@ -1,35 +1,28 @@
 """
 Windows Forensic Toolkit (WFT) DFIR Suite - Media, EXIF & Windows Thumbcache Parser
 Extracts:
-1. Detailed EXIF & video metadata (Camera Make/Model, DateTimeOriginal, Software,
-   GPS Coordinates, dimensions, duration, SHA256) into parsed_media_exif.
+1. Detailed EXIF & video metadata into parsed_media_exif, parsed_media_pictures, and parsed_media_videos.
 2. Windows Explorer thumbcache_*.db databases & Snipping Tool / ScreenSketch screenshots,
-   carving embedded thumbnail headers, hashes, and saving images into staging/Carved_Thumbnails/
-   populating parsed_thumbcache.
-Zero stubs, full binary parsing, and timeline/connections normalization.
+   validating image magic bytes before carving into staging/Carved_Thumbnails/ -> parsed_thumbcache.
 """
 import hashlib
 import json
 import os
-import re
 import struct
 import time
-import traceback
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Union
 
 from PIL import ExifTags, Image
 
 from backend.parsers.base_parser import BaseParser
 
-# Optional dissect.thumbcache import
 try:
     from dissect.thumbcache import ThumbcacheFile
 except ImportError:
     ThumbcacheFile = None
 
-# Optional cv2 import for video metadata
 try:
     import cv2
 except ImportError:
@@ -51,9 +44,52 @@ CREATE TABLE IF NOT EXISTS parsed_media_exif (
     latitude DOUBLE,
     longitude DOUBLE,
     gps_coordinates VARCHAR,
+    gps_position VARCHAR,
+    image_width INTEGER,
+    image_height INTEGER,
     width INTEGER,
     height INTEGER,
     duration_seconds DOUBLE,
+    raw_metadata VARCHAR,
+    source_file VARCHAR
+);
+"""
+
+MEDIA_PICTURES_SCHEMA_DDL = """
+CREATE TABLE IF NOT EXISTS parsed_media_pictures (
+    _row_id BIGINT,
+    file_path VARCHAR,
+    file_name VARCHAR,
+    file_type VARCHAR,
+    file_size_bytes BIGINT,
+    sha256 VARCHAR,
+    camera_make VARCHAR,
+    camera_model VARCHAR,
+    datetime_original TIMESTAMP,
+    software VARCHAR,
+    image_width INTEGER,
+    image_height INTEGER,
+    latitude DOUBLE,
+    longitude DOUBLE,
+    gps_position VARCHAR,
+    gps_coordinates VARCHAR,
+    raw_metadata VARCHAR,
+    source_file VARCHAR
+);
+"""
+
+MEDIA_VIDEOS_SCHEMA_DDL = """
+CREATE TABLE IF NOT EXISTS parsed_media_videos (
+    _row_id BIGINT,
+    file_path VARCHAR,
+    file_name VARCHAR,
+    file_type VARCHAR,
+    file_size_bytes BIGINT,
+    sha256 VARCHAR,
+    datetime_original TIMESTAMP,
+    duration_seconds DOUBLE,
+    width INTEGER,
+    height INTEGER,
     raw_metadata VARCHAR,
     source_file VARCHAR
 );
@@ -83,9 +119,6 @@ CREATE TABLE IF NOT EXISTS parsed_thumbcache (
 
 
 def compute_sha256(data_or_path: Union[bytes, Path]) -> str:
-    """
-    Compute lowercase hexadecimal SHA256 digest from bytes or a file path.
-    """
     hasher = hashlib.sha256()
     if isinstance(data_or_path, (bytes, bytearray)):
         hasher.update(data_or_path)
@@ -97,9 +130,6 @@ def compute_sha256(data_or_path: Union[bytes, Path]) -> str:
 
 
 def dms_to_decimal(dms: Any, ref: Optional[str]) -> Optional[float]:
-    """
-    Convert EXIF GPS degrees, minutes, seconds tuple/rational to decimal degrees.
-    """
     try:
         if isinstance(dms, (list, tuple)) and len(dms) >= 3:
             def _val(x: Any) -> float:
@@ -127,14 +157,11 @@ def dms_to_decimal(dms: Any, ref: Optional[str]) -> Optional[float]:
 
 
 def parse_exif_timestamp(val: Any) -> Optional[datetime]:
-    """
-    Safely parse EXIF timestamp string into UTC datetime.
-    Format is typically 'YYYY:MM:DD HH:MM:SS'.
-    """
     if not val:
         return None
     val_str = str(val).strip()
-    # Try EXIF format: 'YYYY:MM:DD HH:MM:SS'
+    if not val_str or val_str.startswith("0000"):
+        return None
     for fmt in [
         "%Y:%m:%d %H:%M:%S",
         "%Y-%m-%d %H:%M:%S",
@@ -143,27 +170,23 @@ def parse_exif_timestamp(val: Any) -> Optional[datetime]:
         "%Y-%m-%dT%H:%M:%SZ",
     ]:
         try:
-            dt = datetime.strptime(val_str[:19], fmt[: len(val_str[:19])])
-            return dt.replace(tzinfo=timezone.utc)
+            dt = datetime.strptime(val_str[:19], fmt[: len(val_str[:19])]).replace(tzinfo=timezone.utc)
+            if 1990 <= dt.year <= 2099:
+                return dt
         except Exception:
             continue
     try:
-        # ISO fallback
         dt = datetime.fromisoformat(val_str.replace("Z", "+00:00"))
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
-        return dt
+        if 1990 <= dt.year <= 2099:
+            return dt
     except Exception:
-        return None
+        pass
+    return None
 
 
 def parse_mp4_mov_metadata(file_path: Path) -> Dict[str, Any]:
-    """
-    Parse ISO Base Media File Format (MP4 / MOV) atoms to extract:
-    - width, height
-    - duration_seconds
-    - creation_time (datetime_original)
-    """
     meta: Dict[str, Any] = {
         "width": 0,
         "height": 0,
@@ -174,7 +197,6 @@ def parse_mp4_mov_metadata(file_path: Path) -> Dict[str, Any]:
         "software": None,
     }
 
-    # 1. First try cv2 VideoCapture if available
     if cv2 is not None:
         try:
             cap = cv2.VideoCapture(str(file_path))
@@ -189,7 +211,6 @@ def parse_mp4_mov_metadata(file_path: Path) -> Dict[str, Any]:
         except Exception:
             pass
 
-    # 2. Binary parsing of MP4 atoms for creation timestamp & duration fallback
     try:
         with open(file_path, "rb") as f:
             file_size = os.path.getsize(file_path)
@@ -199,7 +220,6 @@ def parse_mp4_mov_metadata(file_path: Path) -> Dict[str, Any]:
                     break
                 box_size, box_type = struct.unpack(">I4s", box_header)
                 if box_size == 1:
-                    # 64-bit large box
                     large_header = f.read(8)
                     if len(large_header) < 8:
                         break
@@ -214,38 +234,30 @@ def parse_mp4_mov_metadata(file_path: Path) -> Dict[str, Any]:
                     break
 
                 if box_type == b"moov":
-                    # Read within moov atom
                     moov_bytes = f.read(min(content_size, 10 * 1024 * 1024))
-                    # Search for mvhd
                     mvhd_idx = moov_bytes.find(b"mvhd")
                     if mvhd_idx != -1 and mvhd_idx + 24 <= len(moov_bytes):
                         data_start = mvhd_idx + 4
                         version = moov_bytes[data_start]
                         if version == 0 and data_start + 20 <= len(moov_bytes):
-                            c_time, m_time, timescale, duration = struct.unpack(
+                            c_time, _, timescale, duration = struct.unpack(
                                 ">IIII", moov_bytes[data_start + 4 : data_start + 20]
                             )
-                            # Seconds from Jan 1, 1904 to Jan 1, 1970 UTC is 2082844800
                             epoch_sec = c_time - 2082844800
-                            if 0 < epoch_sec < 4102444800:
-                                meta["creation_time"] = datetime.fromtimestamp(
-                                    epoch_sec, tz=timezone.utc
-                                )
+                            if 631152000 < epoch_sec < 4102444800:
+                                meta["creation_time"] = datetime.fromtimestamp(epoch_sec, tz=timezone.utc)
                             if timescale > 0 and meta["duration_seconds"] == 0.0:
                                 meta["duration_seconds"] = round(duration / float(timescale), 2)
                         elif version == 1 and data_start + 32 <= len(moov_bytes):
-                            c_time, m_time, timescale, duration = struct.unpack(
+                            c_time, _, timescale, duration = struct.unpack(
                                 ">QQIQ", moov_bytes[data_start + 4 : data_start + 32]
                             )
                             epoch_sec = c_time - 2082844800
-                            if 0 < epoch_sec < 4102444800:
-                                meta["creation_time"] = datetime.fromtimestamp(
-                                    epoch_sec, tz=timezone.utc
-                                )
+                            if 631152000 < epoch_sec < 4102444800:
+                                meta["creation_time"] = datetime.fromtimestamp(epoch_sec, tz=timezone.utc)
                             if timescale > 0 and meta["duration_seconds"] == 0.0:
                                 meta["duration_seconds"] = round(duration / float(timescale), 2)
 
-                    # Look for tkhd for dimensions if cv2 failed
                     if meta["width"] == 0:
                         tkhd_idx = moov_bytes.find(b"tkhd")
                         if tkhd_idx != -1:
@@ -259,7 +271,6 @@ def parse_mp4_mov_metadata(file_path: Path) -> Dict[str, Any]:
                                     pass
                     break
                 else:
-                    # Skip atom
                     f.seek(f.tell() + content_size)
     except Exception:
         pass
@@ -272,11 +283,13 @@ class MediaParser(BaseParser):
     Forensic parser for multimedia files (Images, Videos, Windows Thumbcache).
     Populates:
       - parsed_media_exif
+      - parsed_media_pictures
+      - parsed_media_videos
       - parsed_thumbcache
     """
 
-    IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".tiff", ".tif", ".heic"}
-    VIDEO_EXTS = {".mp4", ".mov", ".m4v"}
+    IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tiff", ".tif", ".heic"}
+    VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".avi", ".mkv", ".wmv"}
 
     def __init__(self, case_id: str, staging_dir: Optional[Path] = None) -> None:
         super().__init__(case_id, staging_dir)
@@ -284,9 +297,6 @@ class MediaParser(BaseParser):
         self.carved_thumbnails_dir.mkdir(parents=True, exist_ok=True)
 
     def _parse_image_exif(self, file_path: Path) -> Dict[str, Any]:
-        """
-        Extract detailed EXIF and dimension metadata from image file.
-        """
         file_size = os.path.getsize(file_path)
         sha256 = compute_sha256(file_path)
         ext = file_path.suffix.lstrip(".").upper()
@@ -301,8 +311,6 @@ class MediaParser(BaseParser):
             "camera_model": None,
             "datetime_original": None,
             "software": None,
-            "gps_latitude": None,
-            "gps_longitude": None,
             "gps_coordinates": None,
             "gps_position": None,
             "latitude": None,
@@ -325,10 +333,8 @@ class MediaParser(BaseParser):
                 rec["height"] = img.height
                 rec["image_height"] = img.height
 
-                # Extract EXIF
                 exif = img.getexif()
                 if exif:
-                    # Parse top-level tags
                     for tag_id, val in exif.items():
                         tag_name = ExifTags.TAGS.get(tag_id, str(tag_id))
                         raw_tags[tag_name] = str(val)[:200]
@@ -342,7 +348,6 @@ class MediaParser(BaseParser):
                             if not rec["datetime_original"]:
                                 rec["datetime_original"] = parse_exif_timestamp(val)
 
-                    # Inspect Exif sub-IFD
                     try:
                         exif_ifd = exif.get_ifd(ExifTags.IFD.Exif)
                         for tag_id, val in exif_ifd.items():
@@ -354,7 +359,6 @@ class MediaParser(BaseParser):
                     except Exception:
                         pass
 
-                    # Inspect GPS sub-IFD
                     try:
                         gps_ifd = exif.get_ifd(ExifTags.IFD.GPSInfo)
                         gps_data: Dict[str, Any] = {}
@@ -363,40 +367,16 @@ class MediaParser(BaseParser):
                             gps_data[sub_tag] = val
                             raw_tags[f"GPS_{sub_tag}"] = str(val)[:200]
 
-                        lat_val = gps_data.get("GPSLatitude")
-                        lat_ref = gps_data.get("GPSLatitudeRef")
-                        lon_val = gps_data.get("GPSLongitude")
-                        lon_ref = gps_data.get("GPSLongitudeRef")
-
-                        lat_dec = dms_to_decimal(lat_val, lat_ref)
-                        lon_dec = dms_to_decimal(lon_val, lon_ref)
+                        lat_dec = dms_to_decimal(gps_data.get("GPSLatitude"), gps_data.get("GPSLatitudeRef"))
+                        lon_dec = dms_to_decimal(gps_data.get("GPSLongitude"), gps_data.get("GPSLongitudeRef"))
 
                         if lat_dec is not None and lon_dec is not None:
-                            rec["gps_latitude"] = lat_dec
-                            rec["gps_longitude"] = lon_dec
                             rec["gps_coordinates"] = f"{lat_dec:.6f}, {lon_dec:.6f}"
                             rec["gps_position"] = f"{lat_dec:.6f}, {lon_dec:.6f}"
                             rec["latitude"] = lat_dec
                             rec["longitude"] = lon_dec
                     except Exception:
                         pass
-
-                # Fallback to _getexif() for legacy formats
-                if not rec["camera_make"] and hasattr(img, "_getexif"):
-                    try:
-                        legacy_exif = img._getexif()
-                        if legacy_exif:
-                            for tag_id, val in legacy_exif.items():
-                                tag_name = ExifTags.TAGS.get(tag_id, str(tag_id))
-                                if tag_name == "Make" and not rec["camera_make"]:
-                                    rec["camera_make"] = str(val).strip()
-                                elif tag_name == "Model" and not rec["camera_model"]:
-                                    rec["camera_model"] = str(val).strip()
-                                elif tag_name == "DateTimeOriginal" and not rec["datetime_original"]:
-                                    rec["datetime_original"] = parse_exif_timestamp(val)
-                    except Exception:
-                        pass
-
         except Exception as ex:
             raw_tags["error"] = str(ex)
 
@@ -404,16 +384,12 @@ class MediaParser(BaseParser):
         return rec
 
     def _parse_video_file(self, file_path: Path) -> Dict[str, Any]:
-        """
-        Extract video dimensions, duration, SHA256 and creation metadata from MP4/MOV.
-        """
         file_size = os.path.getsize(file_path)
         sha256 = compute_sha256(file_path)
         ext = file_path.suffix.lstrip(".").upper()
-
         meta = parse_mp4_mov_metadata(file_path)
 
-        rec: Dict[str, Any] = {
+        return {
             "file_path": self.resolve_evidence_path(file_path, file_size),
             "file_name": file_path.name,
             "file_type": ext,
@@ -423,28 +399,23 @@ class MediaParser(BaseParser):
             "camera_model": meta.get("camera_model"),
             "datetime_original": meta.get("creation_time"),
             "software": meta.get("software"),
-            "gps_latitude": None,
-            "gps_longitude": None,
             "gps_coordinates": None,
             "gps_position": None,
             "latitude": None,
             "longitude": None,
-            "image_width": 0,
-            "image_height": 0,
+            "image_width": meta.get("width", 0),
+            "image_height": meta.get("height", 0),
             "width": meta.get("width", 0),
             "height": meta.get("height", 0),
             "duration_seconds": meta.get("duration_seconds", 0.0),
-            "raw_metadata": json.dumps(
-                {
-                    "width": meta.get("width", 0),
-                    "height": meta.get("height", 0),
-                    "duration_seconds": meta.get("duration_seconds", 0.0),
-                    "creation_time": str(meta.get("creation_time")) if meta.get("creation_time") else None,
-                }
-            ),
+            "raw_metadata": json.dumps({
+                "width": meta.get("width", 0),
+                "height": meta.get("height", 0),
+                "duration_seconds": meta.get("duration_seconds", 0.0),
+                "creation_time": str(meta.get("creation_time")) if meta.get("creation_time") else None,
+            }),
             "source_file": str(file_path),
         }
-        return rec
 
     def _carve_headers_from_bytes(
         self,
@@ -452,13 +423,9 @@ class MediaParser(BaseParser):
         cache_name: str,
         source_file: Path,
     ) -> List[Dict[str, Any]]:
-        """
-        Carve embedded image headers (JPEG, PNG, BMP) from raw bytes buffer.
-        """
         results: List[Dict[str, Any]] = []
         buf_len = len(raw_bytes)
 
-        # 1. Carve JPEG (\xFF\xD8\xFF ... \xFF\xD9)
         idx = 0
         while idx < buf_len - 4:
             start = raw_bytes.find(b"\xff\xd8\xff", idx)
@@ -470,7 +437,7 @@ class MediaParser(BaseParser):
                 continue
             end += 2
             img_data = raw_bytes[start:end]
-            if len(img_data) >= 128:
+            if len(img_data) >= 256:
                 img_hash = compute_sha256(img_data)
                 carved_name = f"{cache_name}_carved_jpg_{start}_{img_hash[:8]}.jpg"
                 out_path = self.carved_thumbnails_dir / carved_name
@@ -496,7 +463,6 @@ class MediaParser(BaseParser):
                 })
             idx = end
 
-        # 2. Carve PNG (\x89PNG\r\n\x1a\n ... IEND\xaeB`\x82)
         idx = 0
         png_sig = b"\x89PNG\r\n\x1a\n"
         png_end_sig = b"IEND\xaeB`\x82"
@@ -510,7 +476,7 @@ class MediaParser(BaseParser):
                 continue
             end += len(png_end_sig)
             img_data = raw_bytes[start:end]
-            if len(img_data) >= 128:
+            if len(img_data) >= 256:
                 img_hash = compute_sha256(img_data)
                 carved_name = f"{cache_name}_carved_png_{start}_{img_hash[:8]}.png"
                 out_path = self.carved_thumbnails_dir / carved_name
@@ -539,10 +505,6 @@ class MediaParser(BaseParser):
         return results
 
     def _parse_thumbcache_db(self, db_path: Path) -> List[Dict[str, Any]]:
-        """
-        Parse Windows Explorer thumbcache_*.db file using dissect.thumbcache
-        and fallback binary carver.
-        """
         records: List[Dict[str, Any]] = []
         cache_name = db_path.name
         parsed_via_dissect = False
@@ -556,8 +518,7 @@ class MediaParser(BaseParser):
                             data = entry.data
                             if not data or len(data) == 0:
                                 continue
-                            
-                            # Detect real image header within entry data (Windows thumbcache entries often prefix a 24-byte header)
+
                             jpeg_offset = data.find(b"\xff\xd8\xff")
                             png_offset = data.find(b"\x89PNG\r\n\x1a\n")
                             bmp_offset = data.find(b"BM")
@@ -572,7 +533,7 @@ class MediaParser(BaseParser):
                                 data = data[bmp_offset:]
                                 ext = "bmp"
                             else:
-                                ext = "bin"
+                                continue
 
                             entry_hash_raw = getattr(entry, "hash", 0)
                             entry_hash_hex = (
@@ -603,29 +564,23 @@ class MediaParser(BaseParser):
                                 "timestamp_utc": None,
                                 "source_file": str(db_path),
                             })
-                        except Exception as entry_ex:
-                            self._log(f"Error parsing entry in {db_path.name}: {entry_ex}", "DEBUG")
+                        except Exception:
+                            pass
                 if records:
                     parsed_via_dissect = True
-            except Exception as dissect_ex:
-                self._log(f"dissect.thumbcache failed on {db_path.name}: {dissect_ex}, falling back to carver", "DEBUG")
+            except Exception:
+                pass
 
-        # If dissect failed or returned 0 records, run fallback carving
         if not parsed_via_dissect or len(records) == 0:
             try:
                 raw_bytes = db_path.read_bytes()
-                carved = self._carve_headers_from_bytes(raw_bytes, cache_name, db_path)
-                records.extend(carved)
+                records.extend(self._carve_headers_from_bytes(raw_bytes, cache_name, db_path))
             except Exception as carve_ex:
                 self._log(f"Carving failed on {db_path.name}: {carve_ex}", "WARNING")
 
         return records
 
     def _parse_snipping_tool_screenshots(self) -> List[Dict[str, Any]]:
-        """
-        Scan staging directory for Snipping Tool / ScreenSketch screenshots.
-        Identifies images in ScreenSketch / SnippingTool / Screenshots folders.
-        """
         records: List[Dict[str, Any]] = []
 
         for p in self.staging_dir.rglob("*"):
@@ -634,11 +589,8 @@ class MediaParser(BaseParser):
             path_lower = str(p).lower().replace("\\", "/")
             if not any(k in path_lower for k in ["screensketch", "snippingtool", "screenshots"]):
                 continue
-
             if p.suffix.lower() not in self.IMAGE_EXTS:
                 continue
-
-            # Skip already carved thumbnails to avoid duplicates
             if "carved_thumbnails" in path_lower:
                 continue
 
@@ -672,21 +624,18 @@ class MediaParser(BaseParser):
                     "timestamp_utc": mtime,
                     "source_file": str(p),
                 })
-            except Exception as ex:
-                self._log(f"Error reading screenshot {p}: {ex}", "DEBUG")
+            except Exception:
+                pass
 
         return records
 
     def parse(self) -> Dict[str, int]:
-        """
-        Execute Media & Thumbcache parsing:
-          1. Images & Videos -> parsed_media_exif
-          2. Thumbcache DBs & Screenshots -> parsed_thumbcache
-        """
         start_time = time.time()
         self._log(f"Starting MediaParser across staging directory: {self.staging_dir}")
 
         exif_records: List[Dict[str, Any]] = []
+        picture_records: List[Dict[str, Any]] = []
+        video_records: List[Dict[str, Any]] = []
         thumb_records: List[Dict[str, Any]] = []
 
         candidate_media: List[Path] = []
@@ -703,19 +652,14 @@ class MediaParser(BaseParser):
 
             if sfx in self.IMAGE_EXTS or sfx in self.VIDEO_EXTS:
                 candidate_media.append(p)
-            elif "thumbcache_" in name_lower and sfx in [".db", ".db2", ""]:
-                candidate_thumbcache.append(p)
-            elif "iconcache_" in name_lower and sfx in [".db", ""]:
+            elif ("thumbcache_" in name_lower or "iconcache_" in name_lower) and sfx in [".db", ".db2", ""]:
                 candidate_thumbcache.append(p)
 
-        self._log(f"Found {len(candidate_media)} media files and {len(candidate_thumbcache)} thumbcache databases.")
-
-        # 1. Parse Image & Video metadata (Deduplicated by SHA-256, preferring UserFiles over Enrichment copies)
         candidate_media = sorted(candidate_media, key=lambda p: (1 if "enrichment" in str(p).lower() else 0, str(p)))
         seen_media_hashes = set()
         for mf in candidate_media:
             try:
-                if "carved_thumbnails" in str(mf).lower():
+                if "carved_thumbnails" in str(mf).lower() or mf.stat().st_size == 0:
                     continue
                 mf_hash = compute_sha256(mf)
                 dedup_key = (mf.name.lower(), mf_hash)
@@ -724,42 +668,72 @@ class MediaParser(BaseParser):
                 seen_media_hashes.add(dedup_key)
             except Exception:
                 continue
+
             try:
                 if mf.suffix.lower() in self.IMAGE_EXTS:
                     rec = self._parse_image_exif(mf)
+                    exif_records.append(rec)
+                    picture_records.append({k: v for k, v in rec.items() if k not in ("width", "height", "duration_seconds")})
                 else:
                     rec = self._parse_video_file(mf)
-                exif_records.append(rec)
+                    exif_records.append(rec)
+                    video_records.append({
+                        "file_path": rec["file_path"],
+                        "file_name": rec["file_name"],
+                        "file_type": rec["file_type"],
+                        "file_size_bytes": rec["file_size_bytes"],
+                        "sha256": rec["sha256"],
+                        "datetime_original": rec["datetime_original"],
+                        "duration_seconds": rec["duration_seconds"],
+                        "width": rec["width"],
+                        "height": rec["height"],
+                        "raw_metadata": rec["raw_metadata"],
+                        "source_file": rec["source_file"],
+                    })
             except Exception as ex:
                 self._log(f"Failed parsing media {mf}: {ex}", "WARNING")
 
-        # 2. Parse Thumbcache databases
         for tcf in candidate_thumbcache:
             try:
-                tc_records = self._parse_thumbcache_db(tcf)
-                thumb_records.extend(tc_records)
+                thumb_records.extend(self._parse_thumbcache_db(tcf))
             except Exception as ex:
                 self._log(f"Failed parsing thumbcache {tcf}: {ex}", "WARNING")
 
-        # 3. Parse Snipping Tool / ScreenSketch screenshots
-        screenshot_records = self._parse_snipping_tool_screenshots()
-        thumb_records.extend(screenshot_records)
+        thumb_records.extend(self._parse_snipping_tool_screenshots())
 
-        # Ingest parsed_media_exif
         exif_count = self.insert_records(
             table_name="parsed_media_exif",
             records=exif_records,
             schema_ddl=MEDIA_EXIF_SCHEMA_DDL,
         )
 
-        # Ingest parsed_thumbcache
+        pic_count = self.insert_records(
+            table_name="parsed_media_pictures",
+            records=picture_records,
+            schema_ddl=MEDIA_PICTURES_SCHEMA_DDL,
+            artifact_id="media_pictures",
+            category="MEDIA",
+            display_name="Pictures & EXIF Metadata",
+            source_tool="MediaParser",
+        )
+
+        vid_count = self.insert_records(
+            table_name="parsed_media_videos",
+            records=video_records,
+            schema_ddl=MEDIA_VIDEOS_SCHEMA_DDL,
+            artifact_id="media_videos",
+            category="MEDIA",
+            display_name="Videos & Audio Files",
+            source_tool="MediaParser",
+        )
+
         thumb_count = self.insert_records(
             table_name="parsed_thumbcache",
             records=thumb_records,
             schema_ddl=THUMBCACHE_SCHEMA_DDL,
             artifact_id="windows_thumbcache",
             category="MEDIA",
-            display_name="Windows Thumbcache & Screenshots",
+            display_name="Windows Thumbcache",
             source_tool="MediaParser",
         )
 
@@ -768,16 +742,14 @@ class MediaParser(BaseParser):
             module_name="Parser:Media",
             command_executed=f"MediaParser.parse({len(candidate_media)} media, {len(candidate_thumbcache)} thumbcache)",
             exit_code=0,
-            rows_ingested=exif_count + thumb_count,
+            rows_ingested=pic_count + vid_count + thumb_count,
             duration_ms=duration_ms,
             status="SUCCESS",
         )
 
-        self._log(
-            f"MediaParser complete in {duration_ms}ms: {exif_count} EXIF rows, {thumb_count} thumbcache rows."
-        )
-
         return {
             "parsed_media_exif": exif_count,
+            "parsed_media_pictures": pic_count,
+            "parsed_media_videos": vid_count,
             "parsed_thumbcache": thumb_count,
         }

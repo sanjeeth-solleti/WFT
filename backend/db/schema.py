@@ -1876,6 +1876,7 @@ def sync_granular_artifacts(conn: duckdb.DuckDBPyConnection, case_id: Optional[s
             src_expr = "source_file" if has_src else "CAST(NULL AS VARCHAR)"
 
             if "parsed_media_pictures" in tables_in_db:
+                cursor.execute("DELETE FROM parsed_media_pictures;")
                 cursor.execute(f"""
                     INSERT INTO parsed_media_pictures (
                         _row_id, file_path, file_name, file_type, file_size_bytes, sha256, camera_make, camera_model,
@@ -1896,6 +1897,7 @@ def sync_granular_artifacts(conn: duckdb.DuckDBPyConnection, case_id: Optional[s
                 """)
 
             if "parsed_media_videos" in tables_in_db:
+                cursor.execute("DELETE FROM parsed_media_videos;")
                 has_dur = "duration_seconds" in exif_cols
                 dur_expr = "duration_seconds" if has_dur else "CAST(NULL AS DOUBLE)"
                 cursor.execute(f"""

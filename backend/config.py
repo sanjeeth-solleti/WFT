@@ -12,8 +12,6 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
-# Root repository directory
-# Root repository or executable directory
 if getattr(sys, "frozen", False):
     BUNDLE_DIR: Path = Path(sys._MEIPASS)
     BASE_DIR: Path = Path(sys.executable).resolve().parent
@@ -21,9 +19,9 @@ else:
     BUNDLE_DIR: Path = Path(__file__).resolve().parent.parent
     BASE_DIR: Path = Path(__file__).resolve().parent.parent
 
-# Store app metadata in %LOCALAPPDATA%\WFT so WFT's own directory stays 100% clean
 APP_DATA_DIR: Path = Path(os.environ.get("LOCALAPPDATA", str(BASE_DIR))) / "WFT"
 APP_DATA_DIR.mkdir(parents=True, exist_ok=True)
+
 
 def get_runtime_log_dir() -> Path:
     """Standardized enterprise log directory where WFT.exe presents (BASE_DIR / logs)."""
@@ -36,14 +34,13 @@ def get_runtime_log_dir() -> Path:
         fallback.mkdir(parents=True, exist_ok=True)
         return fallback
 
+
 LOGS_DIR: Path = get_runtime_log_dir()
 LOG_FILE: Path = LOGS_DIR / "wft_runtime.log"
 
+
 def load_root_env() -> None:
-    """
-    Loads environment variables from the project root .env file on startup and refresh.
-    Updates os.environ directly and via python-dotenv if installed.
-    """
+    """Loads environment variables from the project root .env file on startup and refresh."""
     env_file = BASE_DIR / ".env"
     if env_file.exists():
         try:
@@ -64,10 +61,8 @@ def load_root_env() -> None:
             print(f"[config] Warning loading .env directly: {ex}")
 
 
-# Load root .env immediately on startup
 load_root_env()
 
-# Tool Paths Configuration Storage File
 TOOL_PATHS_FILE: Path = (APP_DATA_DIR / "tool_paths.json").resolve()
 LEGACY_TOOL_PATHS_FILE: Path = (BASE_DIR / "cases" / "tool_paths.json").resolve()
 _CUSTOM_TOOL_PATHS: Dict[str, str] = {}
@@ -90,38 +85,20 @@ _load_persisted_tool_paths()
 
 
 def _get_path_setting(env_var: str, fallback_relative: str) -> Path:
-    """
-    Resolve path priority:
-      1. UI-persisted tool_paths.json
-      2. Environment variable
-      3. Fallback relative to BASE_DIR
-    """
     _load_persisted_tool_paths()
-    keys_to_check = [env_var]
+    if env_var in _CUSTOM_TOOL_PATHS and _CUSTOM_TOOL_PATHS[env_var]:
+        custom_val = Path(_CUSTOM_TOOL_PATHS[env_var])
+        return custom_val.resolve() if custom_val.is_absolute() else (BASE_DIR / custom_val).resolve()
 
-    for k in keys_to_check:
-        if k in _CUSTOM_TOOL_PATHS and _CUSTOM_TOOL_PATHS[k]:
-            custom_val = Path(_CUSTOM_TOOL_PATHS[k])
-            return custom_val.resolve() if custom_val.is_absolute() else (BASE_DIR / custom_val).resolve()
-
-    for k in keys_to_check:
-        env_val = os.getenv(k)
-        if env_val:
-            p = Path(env_val.strip())
-            return p.resolve() if p.is_absolute() else (BASE_DIR / p).resolve()
+    env_val = os.getenv(env_var)
+    if env_val:
+        p = Path(env_val.strip())
+        return p.resolve() if p.is_absolute() else (BASE_DIR / p).resolve()
 
     return (BASE_DIR / fallback_relative).resolve()
 
 
 def _get_default_cases_dir() -> Path:
-    """
-    Resolve default cases storage directory.
-    Priority:
-      1. UI-persisted tool_paths.json (WFT_CASES_DIR)
-      2. Environment variable WFT_CASES_DIR
-      3. User's Desktop/cases or APP_DATA_DIR/cases
-    Never defaults to BASE_DIR / "cases" to prevent polluting the tool directory.
-    """
     _load_persisted_tool_paths()
     if "WFT_CASES_DIR" in _CUSTOM_TOOL_PATHS and _CUSTOM_TOOL_PATHS["WFT_CASES_DIR"]:
         val = _CUSTOM_TOOL_PATHS["WFT_CASES_DIR"]
@@ -134,13 +111,11 @@ def _get_default_cases_dir() -> Path:
     return desktop_cases.resolve()
 
 
-# Core filesystem locations
 CASES_DIR: Path = _get_default_cases_dir()
 TOOL_CASES_DIR: Path = (BASE_DIR / "cases").resolve()
 RULES_DIR: Path = (BUNDLE_DIR / "rules").resolve() if (BUNDLE_DIR / "rules").exists() else _get_path_setting("WFT_RULES_DIR", "rules")
 DEFAULT_YARA_FILE: Path = (RULES_DIR / "default_malware.yar").resolve()
 
-# Custom case locations storage file (persisted in BASE_DIR so CASES_DIR is never forcibly created)
 CUSTOM_LOCATIONS_FILE: Path = (APP_DATA_DIR / "custom_locations.json").resolve()
 LEGACY_LOCATIONS_FILE: Path = (BASE_DIR / "custom_locations.json").resolve()
 _CUSTOM_CASE_DIRS: Dict[str, str] = {}
@@ -149,10 +124,8 @@ _CUSTOM_CASE_DIRS: Dict[str, str] = {}
 def _load_custom_case_dirs() -> None:
     global _CUSTOM_CASE_DIRS
     changed = False
-
     raw_cases: Dict[str, str] = {}
 
-    # 1. Primary storage: APP_DATA_DIR / custom_locations.json
     if CUSTOM_LOCATIONS_FILE.exists():
         try:
             with open(CUSTOM_LOCATIONS_FILE, "r", encoding="utf-8") as f:
@@ -160,7 +133,6 @@ def _load_custom_case_dirs() -> None:
         except Exception:
             raw_cases = {}
 
-    # 2. Legacy fallback check: LEGACY_LOCATIONS_FILE and any existing custom_locations.json
     for legacy_f in [LEGACY_LOCATIONS_FILE, (TOOL_CASES_DIR / "custom_locations.json").resolve(), (CASES_DIR / "custom_locations.json").resolve()]:
         if legacy_f != CUSTOM_LOCATIONS_FILE and legacy_f.exists():
             try:
@@ -172,26 +144,34 @@ def _load_custom_case_dirs() -> None:
             except Exception:
                 pass
 
-    # 3. Filter out any entries whose directories no longer exist on disk
+    # Deduplicate by normalized target directory path so 1 case never creates 3 dropdown entries
     pruned_cases: Dict[str, str] = {}
+    seen_paths: Set[str] = set()
     for k, v in raw_cases.items():
         if isinstance(v, str) and v.strip() and Path(v).is_dir():
-            pruned_cases[k] = str(Path(v).resolve())
+            resolved_str = str(Path(v).resolve())
+            norm_path_key = resolved_str.lower()
+            if norm_path_key in seen_paths:
+                changed = True
+                continue
+            seen_paths.add(norm_path_key)
+            pruned_cases[k.strip()] = resolved_str
         else:
             changed = True
 
     _CUSTOM_CASE_DIRS = pruned_cases
 
-    # 4. Auto-discover cases in common sibling/external directories (e.g., Desktop/cases)
-    # Never override an existing registered case
     desktop_cases = Path.home() / "Desktop" / "cases"
     if desktop_cases.is_dir():
         for candidate in desktop_cases.iterdir():
             if candidate.is_dir() and (candidate / "case.duckdb").exists():
+                resolved_cand = str(candidate.resolve())
+                if resolved_cand.lower() in seen_paths:
+                    continue
                 cid = candidate.name
-                cid_l = cid.lower()
-                if not any(k.strip().lower() in (cid_l, cid_l.replace("_", " ")) for k in _CUSTOM_CASE_DIRS):
-                    _CUSTOM_CASE_DIRS[cid] = str(candidate.resolve())
+                if not any(k.strip().lower() == cid.lower() for k in _CUSTOM_CASE_DIRS):
+                    _CUSTOM_CASE_DIRS[cid] = resolved_cand
+                    seen_paths.add(resolved_cand.lower())
                     changed = True
 
     if changed:
@@ -205,24 +185,27 @@ def _load_custom_case_dirs() -> None:
 
 def register_case_dir(case_id: str, custom_dir: Union[str, Path]) -> Path:
     """
-    Register and persist custom storage folder for a case.
-    Ensures that if the user selects a custom folder, no redundant phantom case folder
-    is created in the WFT tool directory.
+    Register and persist custom storage folder for a case using a single canonical key.
     """
     global _CUSTOM_CASE_DIRS
-    import shutil
     clean_cid = (case_id or "").strip()
 
     resolved_p = Path(custom_dir).resolve()
     resolved_p.mkdir(parents=True, exist_ok=True)
+    resolved_str = str(resolved_p)
 
     _load_custom_case_dirs()
 
-    _CUSTOM_CASE_DIRS[clean_cid] = str(resolved_p)
-    _CUSTOM_CASE_DIRS[clean_cid.lower()] = str(resolved_p)
-    folder_name = resolved_p.name
-    _CUSTOM_CASE_DIRS[folder_name] = str(resolved_p)
-    _CUSTOM_CASE_DIRS[folder_name.lower()] = str(resolved_p)
+    # Remove any old alias keys pointing to this same folder or matching case_id case-insensitively
+    keys_to_remove = [
+        k for k, v in _CUSTOM_CASE_DIRS.items()
+        if k.strip().lower() == clean_cid.lower() or str(Path(v).resolve()).lower() == resolved_str.lower()
+    ]
+    for k in keys_to_remove:
+        del _CUSTOM_CASE_DIRS[k]
+
+    # Store strictly ONE entry per case
+    _CUSTOM_CASE_DIRS[clean_cid] = resolved_str
 
     try:
         CUSTOM_LOCATIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -237,7 +220,6 @@ def register_case_dir(case_id: str, custom_dir: Union[str, Path]) -> Path:
     except Exception:
         pass
 
-    # Remove any redundant empty phantom folder in tool cases directory
     try:
         tool_cases_dir = (BASE_DIR / "cases").resolve()
         if tool_cases_dir.exists() and tool_cases_dir.is_dir():
@@ -245,10 +227,6 @@ def register_case_dir(case_id: str, custom_dir: Union[str, Path]) -> Path:
             if phantom_p != resolved_p and phantom_p.exists() and phantom_p.is_dir():
                 if not (phantom_p / "case.duckdb").exists():
                     shutil.rmtree(phantom_p, ignore_errors=True)
-            phantom_folder = (tool_cases_dir / folder_name).resolve()
-            if phantom_folder != resolved_p and phantom_folder.exists() and phantom_folder.is_dir():
-                if not (phantom_folder / "case.duckdb").exists():
-                    shutil.rmtree(phantom_folder, ignore_errors=True)
             for sub in list(tool_cases_dir.iterdir()):
                 if sub.is_dir() and not any(sub.iterdir()):
                     try:
@@ -267,9 +245,6 @@ def register_case_dir(case_id: str, custom_dir: Union[str, Path]) -> Path:
 
 
 def unregister_case_dir(case_id: str) -> None:
-    """
-    Remove case_id from registered custom locations and persist to custom_locations.json.
-    """
     global _CUSTOM_CASE_DIRS
     _load_custom_case_dirs()
     changed = False
@@ -303,32 +278,21 @@ def unregister_case_dir(case_id: str) -> None:
 
 
 def get_registered_custom_cases() -> Dict[str, str]:
-    """
-    Return dictionary mapping case_id -> custom directory path.
-    """
     _load_custom_case_dirs()
     return dict(_CUSTOM_CASE_DIRS)
 
 
 def get_case_dir(case_id: str, create_if_missing: bool = False) -> Path:
-    """
-    Resolve and return directory path for a given case_id.
-    Checks registered custom locations first (exact, case-insensitive, and folder-name matches),
-    falling back to CASES_DIR / case_id only when no custom directory is specified.
-    Only creates the folder on disk when create_if_missing is True.
-    """
     _load_custom_case_dirs()
     cid_clean = (case_id or "").strip()
     cid_lower = cid_clean.lower()
 
-    # 1. Exact match in registered custom locations
     if cid_clean in _CUSTOM_CASE_DIRS:
         custom_dir = Path(_CUSTOM_CASE_DIRS[cid_clean]).resolve()
         if create_if_missing:
             custom_dir.mkdir(parents=True, exist_ok=True)
         return custom_dir
 
-    # 2. Case-insensitive match in registered custom locations
     for k, v in _CUSTOM_CASE_DIRS.items():
         if k.strip().lower() == cid_lower:
             custom_dir = Path(v).resolve()
@@ -336,7 +300,6 @@ def get_case_dir(case_id: str, create_if_missing: bool = False) -> Path:
                 custom_dir.mkdir(parents=True, exist_ok=True)
             return custom_dir
 
-    # 3. Match by folder name
     for k, v in _CUSTOM_CASE_DIRS.items():
         p = Path(v).resolve()
         if p.name.lower() == cid_lower:
@@ -344,7 +307,6 @@ def get_case_dir(case_id: str, create_if_missing: bool = False) -> Path:
                 p.mkdir(parents=True, exist_ok=True)
             return p
 
-    # 3b. Match with normalized spaces/underscores/hyphens
     cid_norm = cid_lower.replace("_", " ").replace("-", " ")
     for k, v in _CUSTOM_CASE_DIRS.items():
         k_norm = k.strip().lower().replace("_", " ").replace("-", " ")
@@ -354,27 +316,21 @@ def get_case_dir(case_id: str, create_if_missing: bool = False) -> Path:
                 custom_dir.mkdir(parents=True, exist_ok=True)
             return custom_dir
 
-    # 4. Check external desktop cases (read-only fallback, never overwrites registered custom locations)
     desktop_case = Path.home() / "Desktop" / "cases" / cid_clean
     if (desktop_case / "case.duckdb").exists():
         return desktop_case.resolve()
 
-    # 5. Default fallback to CASES_DIR / case_id (external directory, never BASE_DIR / "cases")
     case_dir = (CASES_DIR / cid_clean).resolve()
     if create_if_missing:
         case_dir.mkdir(parents=True, exist_ok=True)
     return case_dir
 
 
-# Server settings
 API_HOST: str = os.getenv("WFT_HOST", "127.0.0.1")
 API_PORT: int = int(os.getenv("WFT_PORT", "8765"))
 
 
 def get_ez_tools_dirs() -> List[Path]:
-    """
-    Return ordered list of directories where Eric Zimmerman tools may reside.
-    """
     configured = _get_path_setting("WFT_EZTOOLS_DIR", "EZTools")
     candidates = [
         configured,
@@ -389,9 +345,6 @@ def get_ez_tools_dirs() -> List[Path]:
 
 
 def get_regripper_dirs() -> List[Path]:
-    """
-    Return ordered list of directories where RegRipper tools reside.
-    """
     configured = _get_path_setting("WFT_REGRIPPER_DIR", "RegRipper4.0")
     candidates = [
         configured,
@@ -406,129 +359,29 @@ def get_regripper_dirs() -> List[Path]:
     return unique
 
 
-# ---------------------------------------------------------------------------
-# Eric Zimmerman CLI Tools Specification & Environment Key Mappings
-# ---------------------------------------------------------------------------
 EZ_BINARIES_SPEC: List[Dict[str, str]] = [
-    {
-        "key": "ez_rla",
-        "env_var": "WFT_EZ_RLA_EXE",
-        "binary": "rla.exe",
-        "name": "rla.exe (Registry Transaction Replay)",
-        "description": "Replays uncommitted dirty registry transaction logs (.LOG1/.LOG2)",
-    },
-    {
-        "key": "ez_pecmd",
-        "env_var": "WFT_EZ_PECMD_EXE",
-        "binary": "PECmd.exe",
-        "name": "PECmd.exe (Prefetch Parser)",
-        "description": "Parses Windows Prefetch files (.pf) for program execution artifacts",
-    },
-    {
-        "key": "ez_mftecmd",
-        "env_var": "WFT_EZ_MFTECMD_EXE",
-        "binary": "MFTECmd.exe",
-        "name": "MFTECmd.exe ($MFT & $J)",
-        "description": "Parses NTFS $MFT, $J (USN Journal), and $LogFile file system metadata",
-    },
-    {
-        "key": "ez_evtxecmd",
-        "env_var": "WFT_EZ_EVTXECMD_EXE",
-        "binary": "EvtxECmd.exe",
-        "name": "EvtxECmd.exe (Event Logs)",
-        "description": "Parses Windows EVTX event logs with event map definitions",
-    },
-    {
-        "key": "ez_recmd",
-        "env_var": "WFT_EZ_RECMD_EXE",
-        "binary": "RECmd.exe",
-        "name": "RECmd.exe (Registry Batch)",
-        "description": "Batch extracts key/value registry artifacts using RECmd batch scripts",
-    },
-    {
-        "key": "ez_lecmd",
-        "env_var": "WFT_EZ_LECMD_EXE",
-        "binary": "LECmd.exe",
-        "name": "LECmd.exe (LNK Shortcuts)",
-        "description": "Parses Windows Shell LNK shortcut files for target paths and serials",
-    },
-    {
-        "key": "ez_jlecmd",
-        "env_var": "WFT_EZ_JLECMD_EXE",
-        "binary": "JLECmd.exe",
-        "name": "JLECmd.exe (Jump Lists)",
-        "description": "Parses AutomaticDestinations and CustomDestinations Jump Lists",
-    },
-    {
-        "key": "ez_amcache",
-        "env_var": "WFT_EZ_AMCACHE_EXE",
-        "binary": "AmcacheParser.exe",
-        "name": "AmcacheParser.exe (Amcache)",
-        "description": "Parses Amcache.hve for SHA-1 hashes and unassociated executable entries",
-    },
-    {
-        "key": "ez_shimcache",
-        "env_var": "WFT_EZ_SHIMCACHE_EXE",
-        "binary": "AppCompatCacheParser.exe",
-        "name": "AppCompatCacheParser.exe (Shimcache)",
-        "description": "Parses Application Compatibility Cache from SYSTEM hive",
-    },
-    {
-        "key": "ez_sbecmd",
-        "env_var": "WFT_EZ_SBECMD_EXE",
-        "binary": "SBECmd.exe",
-        "name": "SBECmd.exe (ShellBags)",
-        "description": "Parses ShellBags for folder access history across NTUSER.DAT & UsrClass.dat",
-    },
-    {
-        "key": "ez_srumecmd",
-        "env_var": "WFT_EZ_SRUMECMD_EXE",
-        "binary": "SrumECmd.exe",
-        "name": "SrumECmd.exe (SRUM)",
-        "description": "Parses System Resource Usage Monitor (SRUDB.dat) database",
-    },
-    {
-        "key": "ez_wxtcmd",
-        "env_var": "WFT_EZ_WXTCMD_EXE",
-        "binary": "WxTCmd.exe",
-        "name": "WxTCmd.exe (Windows Timeline)",
-        "description": "Parses Windows 10/11 Timeline (ActivitiesCache.db) database",
-    },
-    {
-        "key": "ez_sqlecmd",
-        "env_var": "WFT_EZ_SQLECMD_EXE",
-        "binary": "SQLECmd.exe",
-        "name": "SQLECmd.exe (SQLite Extractor)",
-        "description": "Parses SQLite databases with pre-built maps for forensics",
-    },
-    {
-        "key": "ez_rbcmd",
-        "env_var": "WFT_EZ_RBCMD_EXE",
-        "binary": "RBCmd.exe",
-        "name": "RBCmd.exe (Recycle Bin)",
-        "description": "Parses $Recycle.Bin $I index and metadata files",
-    },
-    {
-        "key": "ez_recentfilecache",
-        "env_var": "WFT_EZ_RECENTFILECACHE_EXE",
-        "binary": "RecentFileCacheParser.exe",
-        "name": "RecentFileCacheParser.exe (RecentFileCache)",
-        "description": "Parses RecentFileCache.bcf from legacy Windows systems",
-    },
-    {
-        "key": "ez_sumecmd",
-        "env_var": "WFT_EZ_SUMECMD_EXE",
-        "binary": "SumECmd.exe",
-        "name": "SumECmd.exe (User Access Logging)",
-        "description": "Parses Microsoft User Access Logging (UAL) database (Current.mdb)",
-    },
+    {"key": "ez_rla", "env_var": "WFT_EZ_RLA_EXE", "binary": "rla.exe", "name": "rla.exe (Registry Transaction Replay)", "description": "Replays uncommitted dirty registry transaction logs (.LOG1/.LOG2)"},
+    {"key": "ez_pecmd", "env_var": "WFT_EZ_PECMD_EXE", "binary": "PECmd.exe", "name": "PECmd.exe (Prefetch Parser)", "description": "Parses Windows Prefetch files (.pf) for program execution artifacts"},
+    {"key": "ez_mftecmd", "env_var": "WFT_EZ_MFTECMD_EXE", "binary": "MFTECmd.exe", "name": "MFTECmd.exe ($MFT & $J)", "description": "Parses NTFS $MFT, $J (USN Journal), and $LogFile file system metadata"},
+    {"key": "ez_evtxecmd", "env_var": "WFT_EZ_EVTXECMD_EXE", "binary": "EvtxECmd.exe", "name": "EvtxECmd.exe (Event Logs)", "description": "Parses Windows EVTX event logs with event map definitions"},
+    {"key": "ez_recmd", "env_var": "WFT_EZ_RECMD_EXE", "binary": "RECmd.exe", "name": "RECmd.exe (Registry Batch)", "description": "Batch extracts key/value registry artifacts using RECmd batch scripts"},
+    {"key": "ez_lecmd", "env_var": "WFT_EZ_LECMD_EXE", "binary": "LECmd.exe", "name": "LECmd.exe (LNK Shortcuts)", "description": "Parses Windows Shell LNK shortcut files for target paths and serials"},
+    {"key": "ez_jlecmd", "env_var": "WFT_EZ_JLECMD_EXE", "binary": "JLECmd.exe", "name": "JLECmd.exe (Jump Lists)", "description": "Parses AutomaticDestinations and CustomDestinations Jump Lists"},
+    {"key": "ez_amcache", "env_var": "WFT_EZ_AMCACHE_EXE", "binary": "AmcacheParser.exe", "name": "AmcacheParser.exe (Amcache)", "description": "Parses Amcache.hve for SHA-1 hashes and unassociated executable entries"},
+    {"key": "ez_shimcache", "env_var": "WFT_EZ_SHIMCACHE_EXE", "binary": "AppCompatCacheParser.exe", "name": "AppCompatCacheParser.exe (Shimcache)", "description": "Parses Application Compatibility Cache from SYSTEM hive"},
+    {"key": "ez_sbecmd", "env_var": "WFT_EZ_SBECMD_EXE", "binary": "SBECmd.exe", "name": "SBECmd.exe (ShellBags)", "description": "Parses ShellBags for folder access history across NTUSER.DAT & UsrClass.dat"},
+    {"key": "ez_srumecmd", "env_var": "WFT_EZ_SRUMECMD_EXE", "binary": "SrumECmd.exe", "name": "SrumECmd.exe (SRUM)", "description": "Parses System Resource Usage Monitor (SRUDB.dat) database"},
+    {"key": "ez_wxtcmd", "env_var": "WFT_EZ_WXTCMD_EXE", "binary": "WxTCmd.exe", "name": "WxTCmd.exe (Windows Timeline)", "description": "Parses Windows 10/11 Timeline (ActivitiesCache.db) database"},
+    {"key": "ez_sqlecmd", "env_var": "WFT_EZ_SQLECMD_EXE", "binary": "SQLECmd.exe", "name": "SQLECmd.exe (SQLite Extractor)", "description": "Parses SQLite databases with pre-built maps for forensics"},
+    {"key": "ez_rbcmd", "env_var": "WFT_EZ_RBCMD_EXE", "binary": "RBCmd.exe", "name": "RBCmd.exe (Recycle Bin)", "description": "Parses $Recycle.Bin $I index and metadata files"},
+    {"key": "ez_recentfilecache", "env_var": "WFT_EZ_RECENTFILECACHE_EXE", "binary": "RecentFileCacheParser.exe", "name": "RecentFileCacheParser.exe (RecentFileCache)", "description": "Parses RecentFileCache.bcf from legacy Windows systems"},
+    {"key": "ez_sumecmd", "env_var": "WFT_EZ_SUMECMD_EXE", "binary": "SumECmd.exe", "name": "SumECmd.exe (User Access Logging)", "description": "Parses Microsoft User Access Logging (UAL) database (Current.mdb)"},
 ]
 
 EZ_BINARY_TO_ENV: Dict[str, str] = {
     item["binary"].lower(): item["env_var"] for item in EZ_BINARIES_SPEC
 }
 
-# Map short UI keys, filenames, and environment variables to canonical env variable names
 KEY_TO_ENV_MAP: Dict[str, str] = {
     "ez_tools": "WFT_EZTOOLS_DIR",
     "regripper": "WFT_REGRIPPER_EXE",
@@ -548,17 +401,8 @@ for _item in EZ_BINARIES_SPEC:
 
 
 def find_regripper_binary(exe_name: str = "rip.exe") -> Path:
-    """
-    Search for RegRipper CLI binary (rip.exe).
-    Priority 1: WFT_REGRIPPER_EXE override in tool_paths.json or os.environ.
-    Priority 2: Recursive search in get_regripper_dirs().
-    Priority 3: System PATH search.
-    """
     _load_persisted_tool_paths()
-    custom_val = (
-        _CUSTOM_TOOL_PATHS.get("WFT_REGRIPPER_EXE")
-        or os.getenv("WFT_REGRIPPER_EXE")
-    )
+    custom_val = _CUSTOM_TOOL_PATHS.get("WFT_REGRIPPER_EXE") or os.getenv("WFT_REGRIPPER_EXE")
     if custom_val and custom_val.strip():
         p = Path(custom_val.strip())
         resolved = p.resolve() if p.is_absolute() else (BASE_DIR / p).resolve()
@@ -591,14 +435,6 @@ def find_regripper_binary(exe_name: str = "rip.exe") -> Path:
 
 
 def find_ez_binary(exe_name: str) -> Path:
-    """
-    Search for an Eric Zimmerman executable using 3-tier resolution:
-      Priority 1: Individual .env override key (e.g. os.environ.get("WFT_EZ_PECMD_EXE"))
-                  or custom tool path persisted in tool_paths.json.
-      Priority 2: Recursive search inside WFT_EZTOOLS_DIR, tools/ez_tools/, and EZTools/.
-      Priority 3: System PATH search via shutil.which(exe_name).
-    Raises FileNotFoundError if binary cannot be found across all 3 tiers.
-    """
     normalized_name = exe_name.strip()
     if not normalized_name.lower().endswith(".exe"):
         normalized_name += ".exe"
@@ -606,20 +442,15 @@ def find_ez_binary(exe_name: str) -> Path:
 
     _load_persisted_tool_paths()
 
-    # Priority 1: Check individual .env / custom setting override
     env_var_key = EZ_BINARY_TO_ENV.get(target_lower)
     if env_var_key:
-        custom_override = (
-            _CUSTOM_TOOL_PATHS.get(env_var_key)
-            or os.getenv(env_var_key)
-        )
+        custom_override = _CUSTOM_TOOL_PATHS.get(env_var_key) or os.getenv(env_var_key)
         if custom_override and custom_override.strip():
             candidate = Path(custom_override.strip())
             resolved = candidate.resolve() if candidate.is_absolute() else (BASE_DIR / candidate).resolve()
             if resolved.is_file():
                 return resolved
 
-    # Priority 2: Recursive search in EZ tools directories (WFT_EZTOOLS_DIR, tools/ez_tools, EZTools)
     search_dirs = get_ez_tools_dirs()
     for search_root in search_dirs:
         if search_root.is_dir() and search_root.resolve() not in (Path("/"), Path("C:\\")):
@@ -627,7 +458,6 @@ def find_ez_binary(exe_name: str) -> Path:
                 if candidate.name.lower() == target_lower:
                     return candidate.resolve()
 
-    # Priority 3: System PATH search
     which_hit = shutil.which(normalized_name)
     if which_hit:
         p = Path(which_hit).resolve()
@@ -643,10 +473,6 @@ def find_ez_binary(exe_name: str) -> Path:
 
 
 def find_ez_file(filename: str) -> Path:
-    """
-    Search recursively inside EZ tools directories for a support file (such as Kroll_Batch.reb).
-    Raises FileNotFoundError if file cannot be found.
-    """
     target_lower = filename.strip().lower()
     search_dirs = get_ez_tools_dirs()
     for search_root in search_dirs:
@@ -662,22 +488,14 @@ def find_ez_file(filename: str) -> Path:
 
 
 def find_stinger_binary() -> Optional[Path]:
-    """
-    Search for Trellix Stinger CLI binary (stinger64.exe or stinger32.exe).
-    Returns resolved path or None if not found.
-    """
     _load_persisted_tool_paths()
-    custom_val = (
-        _CUSTOM_TOOL_PATHS.get("WFT_STINGER_EXE")
-        or os.getenv("WFT_STINGER_EXE")
-    )
+    custom_val = _CUSTOM_TOOL_PATHS.get("WFT_STINGER_EXE") or os.getenv("WFT_STINGER_EXE")
     if custom_val and custom_val.strip():
         p = Path(custom_val.strip())
         resolved = p.resolve() if p.is_absolute() else (BASE_DIR / p).resolve()
         if resolved.is_file():
             return resolved
 
-    # Common discovery candidates
     candidates = [
         BASE_DIR / "stinger64.exe",
         BASE_DIR / "stinger32.exe",
@@ -699,14 +517,8 @@ def find_stinger_binary() -> Optional[Path]:
 
 
 def find_hindsight_binary() -> Optional[Path]:
-    """
-    Search for Hindsight executable or python entry point.
-    """
     _load_persisted_tool_paths()
-    custom_val = (
-        _CUSTOM_TOOL_PATHS.get("WFT_HINDSIGHT_EXE")
-        or os.getenv("WFT_HINDSIGHT_EXE")
-    )
+    custom_val = _CUSTOM_TOOL_PATHS.get("WFT_HINDSIGHT_EXE") or os.getenv("WFT_HINDSIGHT_EXE")
     if custom_val and custom_val.strip():
         p = Path(custom_val.strip())
         resolved = p.resolve() if p.is_absolute() else (BASE_DIR / p).resolve()
@@ -723,7 +535,6 @@ def find_hindsight_binary() -> Optional[Path]:
         if c.is_file():
             return c.resolve()
 
-    # Check which on PATH
     which_hindsight = shutil.which("hindsight.exe") or shutil.which("hindsight")
     if which_hindsight:
         return Path(which_hindsight).resolve()
@@ -732,16 +543,9 @@ def find_hindsight_binary() -> Optional[Path]:
 
 
 def get_tool_paths_status() -> Dict[str, Dict[str, Any]]:
-    """
-    Returns the resolved path and verification status (FOUND / MISSING)
-    for all master tools (EZTools, RegRipper, Hindsight, Trellix Stinger)
-    and all 15 individual Eric Zimmerman CLI binaries.
-    WFT_RULES_DIR and WFT_CASES_DIR are strictly excluded.
-    """
     _load_persisted_tool_paths()
     result: Dict[str, Dict[str, Any]] = {}
 
-    # 1. EZTools Master Directory
     ez_dirs = get_ez_tools_dirs()
     ez_found = False
     ez_path_str = str(ez_dirs[0])
@@ -750,10 +554,7 @@ def get_tool_paths_status() -> Dict[str, Dict[str, Any]]:
             ez_found = True
             ez_path_str = str(d)
             break
-    configured_ez = (
-        _CUSTOM_TOOL_PATHS.get("WFT_EZTOOLS_DIR")
-        or os.getenv("WFT_EZTOOLS_DIR", "./EZTools")
-    )
+    configured_ez = _CUSTOM_TOOL_PATHS.get("WFT_EZTOOLS_DIR") or os.getenv("WFT_EZTOOLS_DIR", "./EZTools")
     result["ez_tools"] = {
         "name": "Eric Zimmerman Tools Directory",
         "env_var": "WFT_EZTOOLS_DIR",
@@ -765,7 +566,6 @@ def get_tool_paths_status() -> Dict[str, Dict[str, Any]]:
         "category": "main",
     }
 
-    # 2. RegRipper
     rr_binary: Optional[Path] = None
     try:
         rr_binary = find_regripper_binary()
@@ -788,7 +588,6 @@ def get_tool_paths_status() -> Dict[str, Dict[str, Any]]:
         "category": "main",
     }
 
-    # 3. Hindsight (pyhindsight & hindsight.exe)
     pyhindsight_installed = False
     hindsight_ver = "unknown"
     try:
@@ -800,10 +599,7 @@ def get_tool_paths_status() -> Dict[str, Dict[str, Any]]:
 
     hs_binary = find_hindsight_binary()
     hs_status = "FOUND" if (pyhindsight_installed or hs_binary is not None) else "MISSING"
-    configured_hs = (
-        _CUSTOM_TOOL_PATHS.get("WFT_HINDSIGHT_EXE")
-        or os.getenv("WFT_HINDSIGHT_EXE", "./hindsight-main/hindsight.py")
-    )
+    configured_hs = _CUSTOM_TOOL_PATHS.get("WFT_HINDSIGHT_EXE") or os.getenv("WFT_HINDSIGHT_EXE", "./hindsight-main/hindsight.py")
     result["hindsight"] = {
         "name": "Hindsight (pyhindsight)",
         "env_var": "WFT_HINDSIGHT_EXE",
@@ -816,13 +612,9 @@ def get_tool_paths_status() -> Dict[str, Dict[str, Any]]:
         "category": "main",
     }
 
-    # 4. Trellix Stinger
     stinger_bin = find_stinger_binary()
     stinger_status = "FOUND" if (stinger_bin and stinger_bin.is_file()) else "HEURISTICS READY"
-    configured_stinger = (
-        _CUSTOM_TOOL_PATHS.get("WFT_STINGER_EXE")
-        or os.getenv("WFT_STINGER_EXE", "./stinger32.exe")
-    )
+    configured_stinger = _CUSTOM_TOOL_PATHS.get("WFT_STINGER_EXE") or os.getenv("WFT_STINGER_EXE", "./stinger32.exe")
     result["stinger"] = {
         "name": "Trellix Stinger / PE Threat Scanner",
         "env_var": "WFT_STINGER_EXE",
@@ -834,7 +626,6 @@ def get_tool_paths_status() -> Dict[str, Dict[str, Any]]:
         "category": "main",
     }
 
-    # 5. Individual Eric Zimmerman CLI Binaries
     for item in EZ_BINARIES_SPEC:
         k = item["key"]
         env_var = item["env_var"]
@@ -845,10 +636,7 @@ def get_tool_paths_status() -> Dict[str, Dict[str, Any]]:
         except Exception:
             pass
 
-        configured_val = (
-            _CUSTOM_TOOL_PATHS.get(env_var)
-            or os.getenv(env_var, "")
-        )
+        configured_val = _CUSTOM_TOOL_PATHS.get(env_var) or os.getenv(env_var, "")
         result[k] = {
             "name": item["name"],
             "env_var": env_var,
@@ -865,9 +653,6 @@ def get_tool_paths_status() -> Dict[str, Dict[str, Any]]:
 
 
 def reload_config_in_memory() -> None:
-    """
-    Reloads all configuration variables in memory from the root .env and persisted paths.
-    """
     global CASES_DIR, RULES_DIR, DEFAULT_YARA_FILE, CUSTOM_LOCATIONS_FILE, API_HOST, API_PORT
     load_root_env()
     _load_persisted_tool_paths()
@@ -880,14 +665,6 @@ def reload_config_in_memory() -> None:
 
 
 def save_tool_paths(new_paths: Dict[str, str]) -> Dict[str, Dict[str, Any]]:
-    """
-    Persist custom tool paths:
-    1. Writes all updated keys/paths directly into root .env file without duplicate lines.
-    2. Updates os.environ for every key in-place.
-    3. Updates cases/tool_paths.json.
-    4. Reloads backend.config variables in memory.
-    Returns the refreshed get_tool_paths_status().
-    """
     global _CUSTOM_TOOL_PATHS
     _load_persisted_tool_paths()
 
@@ -924,7 +701,6 @@ def save_tool_paths(new_paths: Dict[str, str]) -> Dict[str, Dict[str, Any]]:
             os.environ.pop(canonical_env, None)
             clean_updates[canonical_env] = ""
 
-    # Save to cases/tool_paths.json
     TOOL_PATHS_FILE.parent.mkdir(parents=True, exist_ok=True)
     try:
         with open(TOOL_PATHS_FILE, "w", encoding="utf-8") as f:
@@ -932,7 +708,6 @@ def save_tool_paths(new_paths: Dict[str, str]) -> Dict[str, Dict[str, Any]]:
     except Exception as ex:
         print(f"[config] Warning writing tool_paths.json: {ex}")
 
-    # Idempotently update root .env file without duplicating lines
     env_file = BASE_DIR / ".env"
     existing_lines: List[str] = []
     if env_file.exists():
@@ -953,16 +728,13 @@ def save_tool_paths(new_paths: Dict[str, str]) -> Dict[str, Dict[str, Any]]:
                     if val:
                         new_lines.append(f"{k}={val}")
                     seen_keys.add(k)
-                # Any duplicate lines of this key in .env are dropped
                 continue
             elif k in seen_keys:
-                # Pre-existing duplicate line of another key is dropped
                 continue
             else:
                 seen_keys.add(k)
         new_lines.append(line)
 
-    # Append any brand new keys that were not already in .env
     for k, v in clean_updates.items():
         if k not in seen_keys and v:
             new_lines.append(f"{k}={v}")
@@ -973,14 +745,10 @@ def save_tool_paths(new_paths: Dict[str, str]) -> Dict[str, Dict[str, Any]]:
     except Exception as ex:
         print(f"[config] Warning writing .env: {ex}")
 
-    # Reload variables in-memory
     reload_config_in_memory()
     return get_tool_paths_status()
 
 
-# ---------------------------------------------------------------------------
-# Ultra-Fast 3-Stage Full-Disk Forensic Tool Scanner (Find-AllForensicToolsFast)
-# ---------------------------------------------------------------------------
 ALL_18_FORENSIC_TOOLS: List[str] = [
     "rla.exe", "PECmd.exe", "MFTECmd.exe", "EvtxECmd.exe", "RECmd.exe",
     "LECmd.exe", "JLECmd.exe", "AmcacheParser.exe", "AppCompatCacheParser.exe",
@@ -1017,15 +785,6 @@ def find_all_forensic_tools_fast(
     project_root: Optional[Path] = None,
     target_exes: Optional[List[str]] = None,
 ) -> Dict[str, str]:
-    """
-    Ultra-fast 3-stage full-disk scanner (Find-AllForensicToolsFast):
-    1. Stage 1: Checks System PATH, project local folders (tools, EZTools, RegRipper4.0, hindsight-main, root),
-       and standard Python Scripts folders in ~5ms.
-    2. Stage 2: Queries the live Windows Search Index (Windows.db/Windows.edb via ADODB CollatorDSO COM query) in ~20ms.
-    3. Stage 3: Single-pass .NET/os.scandir tree walker across all ready fixed drives (skipping OS noise directories
-       like C:\\Windows, $Recycle.Bin, System Volume Information, node_modules, .git) in ~1s.
-    Returns: Mapping of canonical exe name -> resolved absolute file path.
-    """
     if project_root is None:
         project_root = BASE_DIR
     if target_exes is None:
@@ -1035,15 +794,14 @@ def find_all_forensic_tools_fast(
     results: Dict[str, str] = {}
     remaining: Dict[str, str] = {t.lower(): t for t in target_exes}
 
-    # Discover python scripts directories for tools like hindsight.exe
     python_script_dirs: List[Path] = []
     try:
         import sysconfig
         s_path = sysconfig.get_path("scripts")
         if s_path and os.path.isdir(s_path):
             python_script_dirs.append(Path(s_path).resolve())
-    except Exception as ex:
-        print(f"[scanner] Note checking sysconfig scripts: {ex}")
+    except Exception:
+        pass
 
     try:
         import site
@@ -1052,10 +810,9 @@ def find_all_forensic_tools_fast(
             u_scripts = Path(u_site).parent / "Scripts"
             if u_scripts.is_dir():
                 python_script_dirs.append(u_scripts.resolve())
-    except Exception as ex:
-        print(f"[scanner] Note checking site user scripts: {ex}")
+    except Exception:
+        pass
 
-    # Standard Windows Python AppData paths
     local_app_data = os.getenv("LOCALAPPDATA")
     if local_app_data:
         py_win_pkg = Path(local_app_data) / "Packages"
@@ -1068,9 +825,6 @@ def find_all_forensic_tools_fast(
                         if s_dir.is_dir() and s_dir not in python_script_dirs:
                             python_script_dirs.append(s_dir.resolve())
 
-    # -------------------------------------------------------------------------
-    # STAGE 1: Check System PATH & Project Priority Directories (~5ms)
-    # -------------------------------------------------------------------------
     local_priority_dirs: List[Path] = [
         (project_root / "tools").resolve(),
         (project_root / "EZTools").resolve(),
@@ -1082,14 +836,12 @@ def find_all_forensic_tools_fast(
 
     existing_priority_dirs = [d for d in local_priority_dirs if d.is_dir()]
 
-    # 1.1 Check system PATH
     for flow, orig in list(remaining.items()):
         which_path = shutil.which(orig)
         if which_path and os.path.isfile(which_path):
             results[orig] = str(Path(which_path).resolve())
             del remaining[flow]
 
-    # 1.2 Check priority local folders
     for pdir in existing_priority_dirs:
         if not remaining:
             break
@@ -1106,18 +858,12 @@ def find_all_forensic_tools_fast(
                             break
                 if not remaining:
                     break
-        except Exception as ex:
-            print(f"[scanner] Notice inspecting priority dir {pdir}: {ex}")
+        except Exception:
+            pass
 
     if not remaining:
-        elapsed = (time.perf_counter() - t0) * 1000
-        print(f"[scanner] Stage 1 priority folder scan completed in {elapsed:.1f} ms. Found all {len(results)} tools.")
         return results
 
-    # -------------------------------------------------------------------------
-    # STAGE 2: Query Windows Search Index (~20ms)
-    # -------------------------------------------------------------------------
-    t2_start = time.perf_counter()
     if os.name == "nt" and remaining:
         try:
             import win32com.client
@@ -1137,24 +883,17 @@ def find_all_forensic_tools_fast(
                     del remaining[flow]
                 rs.MoveNext()
             conn.Close()
-        except Exception as ex:
-            print(f"[scanner] Stage 2 Windows Search query notice: {ex}")
+        except Exception:
+            pass
 
     if not remaining:
-        elapsed = (time.perf_counter() - t0) * 1000
-        print(f"[scanner] Stage 2 Windows Search completed in {elapsed:.1f} ms. Found all {len(results)} tools.")
         return results
 
-    # -------------------------------------------------------------------------
-    # STAGE 3: Single-Pass Parallel/Optimized Tree Walker Across Fixed Drives (~1s)
-    # -------------------------------------------------------------------------
-    t3_start = time.perf_counter()
     skip_dirs: Set[str] = {
         "windows", "$recycle.bin", "system volume information", "recovery",
         "node_modules", ".git", ".venv", "__pycache__", "package cache"
     }
 
-    # Discover fixed ready drives on Windows (excluding Google Drive virtual drive)
     fixed_drives: List[str] = []
     if os.name == "nt":
         try:
@@ -1164,18 +903,16 @@ def find_all_forensic_tools_fast(
                 if bitmask & (1 << letter_code):
                     drive_letter = f"{chr(65 + letter_code)}:\\"
                     drive_type = kernel32.GetDriveTypeW(drive_letter)
-                    # DRIVE_FIXED is 3
                     if drive_type == 3:
                         vol_buf = ctypes.create_unicode_buffer(261)
                         fs_buf = ctypes.create_unicode_buffer(261)
-                        res = kernel32.GetVolumeInformationW(
+                        kernel32.GetVolumeInformationW(
                             drive_letter, vol_buf, 261, None, None, None, fs_buf, 261
                         )
                         vol_name = vol_buf.value.lower()
                         if "google drive" not in vol_name:
                             fixed_drives.append(drive_letter)
-        except Exception as ex:
-            print(f"[scanner] Notice discovering fixed drives via win32: {ex}")
+        except Exception:
             fixed_drives = ["C:\\"]
     else:
         fixed_drives = ["/"]
@@ -1213,11 +950,6 @@ def find_all_forensic_tools_fast(
 
 
 def scan_and_sync_tool_paths(apply_to_env: bool = True) -> Dict[str, Any]:
-    """
-    Executes the ultra-fast 3-stage full-disk scanner, maps all discovered binaries
-    to their canonical environment variables, writes to .env in-place if apply_to_env is True,
-    and returns refreshed tool status and timing metrics.
-    """
     t0 = time.perf_counter()
     discovered = find_all_forensic_tools_fast()
     elapsed_ms = round((time.perf_counter() - t0) * 1000, 2)
@@ -1237,7 +969,6 @@ def scan_and_sync_tool_paths(apply_to_env: bool = True) -> Dict[str, Any]:
                 parent_p = Path(fpath).parent
                 paths_to_save["WFT_REGRIPPER_DIR"] = str(parent_p)
 
-    # Fallbacks for Trellix Stinger if 64-bit wasn't found but 32-bit exists
     if "WFT_STINGER_EXE" not in paths_to_save:
         for stinger_cand in ["stinger64.exe", "stinger32.exe", "stinger.exe"]:
             p = BASE_DIR / stinger_cand
@@ -1245,13 +976,11 @@ def scan_and_sync_tool_paths(apply_to_env: bool = True) -> Dict[str, Any]:
                 paths_to_save["WFT_STINGER_EXE"] = str(p.resolve())
                 break
 
-    # Fallbacks for Hindsight if executable wasn't found but script exists
     if "WFT_HINDSIGHT_EXE" not in paths_to_save:
         hs_script = BASE_DIR / "hindsight-main" / "hindsight.py"
         if hs_script.is_file():
             paths_to_save["WFT_HINDSIGHT_EXE"] = str(hs_script.resolve())
 
-    # Resolve master WFT_EZTOOLS_DIR
     project_ez = (BASE_DIR / "EZTools").resolve()
     if project_ez.is_dir():
         paths_to_save["WFT_EZTOOLS_DIR"] = str(project_ez)
@@ -1273,32 +1002,20 @@ def scan_and_sync_tool_paths(apply_to_env: bool = True) -> Dict[str, Any]:
 
 
 def get_case_db_path(case_id: str) -> Path:
-    """
-    Get the full resolved path to case.duckdb for a given case_id.
-    """
     return (get_case_dir(case_id) / "case.duckdb").resolve()
 
 
 def get_case_staging_dir(case_id: str) -> Path:
-    """
-    Get the staging directory where raw evidence artifacts are placed.
-    """
     staging_dir = (get_case_dir(case_id) / "staging").resolve()
     staging_dir.mkdir(parents=True, exist_ok=True)
     return staging_dir
 
 
 def get_case_csv_out_dir(case_id: str) -> Path:
-    """
-    Get the output directory where EZ tools and parsers output CSV files.
-    """
     csv_out_dir = (get_case_dir(case_id) / "csv_out").resolve()
     csv_out_dir.mkdir(parents=True, exist_ok=True)
     return csv_out_dir
 
 
 def get_case_log_file(case_id: str) -> Path:
-    """
-    Get the processing.log file path for audit logs.
-    """
     return (get_case_dir(case_id) / "processing.log").resolve()

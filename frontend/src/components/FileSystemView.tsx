@@ -1067,7 +1067,7 @@ export const FileSystemView: React.FC<FileSystemViewProps> = ({ caseId }) => {
                     <span>Rendering text content preview...</span>
                   </div>
                 ) : textContent ? (
-                  <pre className="whitespace-pre-wrap break-all text-xs text-[#0f172a] dark:text-[#f8fafc] select-text">
+                  <pre className="whitespace-pre-wrap break-words text-xs text-[#0f172a] dark:text-[#f8fafc] select-text">
                     {textContent}
                   </pre>
                 ) : (
@@ -1124,7 +1124,7 @@ export const FileSystemView: React.FC<FileSystemViewProps> = ({ caseId }) => {
                           <span className="w-8 text-slate-400 text-right select-none shrink-0 font-normal">
                             {idx + 1}
                           </span>
-                          <span className="text-[#0f172a] dark:text-[#f8fafc] break-all select-text">
+                          <span className="text-[#0f172a] dark:text-[#f8fafc] break-words select-text">
                             {str}
                           </span>
                         </div>
@@ -1280,7 +1280,7 @@ export const FileSystemView: React.FC<FileSystemViewProps> = ({ caseId }) => {
                       Record & File Identification
                     </span>
 
-                    <div className="grid grid-cols-2 gap-2 font-mono text-[11px]">
+                    <div className="grid grid-cols-2 content-start auto-rows-max items-start gap-2 font-mono text-[11px]">
                       <div className="p-1.5 rounded bg-[#f8fafc] dark:bg-[#0f172a] border border-[#cbd5e1] dark:border-[#334155]">
                         <span className="text-[10px] font-sans text-slate-400 block font-semibold">
                           MFT Record Number
@@ -1326,7 +1326,7 @@ export const FileSystemView: React.FC<FileSystemViewProps> = ({ caseId }) => {
                       <span className="text-[10px] font-sans text-slate-400 block font-semibold">
                         Full Evidence Path
                       </span>
-                      <p className="break-all select-all text-[#0f172a] dark:text-[#f8fafc]">
+                      <p className="break-words select-all text-[#0f172a] dark:text-[#f8fafc]">
                         {selectedFile.full_path}
                       </p>
                     </div>
@@ -1336,7 +1336,7 @@ export const FileSystemView: React.FC<FileSystemViewProps> = ({ caseId }) => {
                         <span className="text-[10px] font-sans text-slate-400 block font-semibold">
                           Extracted Staging Path
                         </span>
-                        <p className="break-all select-all text-emerald-700 dark:text-emerald-400">
+                        <p className="break-words select-all text-emerald-700 dark:text-emerald-400">
                           {selectedFile.staged_file_path}
                         </p>
                       </div>

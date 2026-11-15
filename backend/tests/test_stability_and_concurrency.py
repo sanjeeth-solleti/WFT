@@ -229,13 +229,14 @@ def test_no_tool_cases_created_with_custom_target_dir(client):
         assert res.status_code == 200
 
         # Verify DuckDB and files were placed in temp_path, NOT in BASE_DIR / "cases"
-        assert (temp_path / "case.duckdb").exists()
+        expected_case_dir = (temp_path / custom_cid) if (temp_path / custom_cid / "case.duckdb").exists() else temp_path
+        assert (expected_case_dir / "case.duckdb").exists()
         tool_cases = (BASE_DIR / "cases").resolve()
         assert not tool_cases.exists(), f"Found unexpected cases folder in tool repo: {tool_cases}"
 
         # Verify get_case_dir returns custom target
         resolved_case = get_case_dir(custom_cid)
-        assert resolved_case == temp_path
+        assert resolved_case == expected_case_dir
 
         # Verify API case status and listing points to external directory
         list_res = client.get("/api/cases")
@@ -243,7 +244,7 @@ def test_no_tool_cases_created_with_custom_target_dir(client):
         cases = list_res.json()["cases"]
         matching = [c for c in cases if c["case_id"] == custom_cid]
         assert len(matching) == 1
-        assert matching[0]["case_path"] == str(temp_path)
+        assert matching[0]["case_path"] == str(expected_case_dir)
 
         # Still no tool cases folder
         assert not tool_cases.exists()

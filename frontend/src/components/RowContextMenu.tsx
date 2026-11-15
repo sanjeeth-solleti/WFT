@@ -456,7 +456,7 @@ export const RowContextMenu: React.FC<RowContextMenuProps> = ({
         )}
       </div>
 
-      <div className="grid grid-cols-2 gap-1 px-2 py-1">
+      <div className="grid grid-cols-2 content-start auto-rows-max items-start gap-1 px-2 py-1">
         {FORENSIC_TAGS.map((tag) => {
           const isTaggedWithThis = existingBookmark?.tag_name === tag.id;
           return (

@@ -110,6 +110,18 @@ export const TopNavBar: React.FC<TopNavBarProps> = ({
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
+  // Deduplicate cases by case_id / case_path so 1 case never shows up 3 times
+  const uniqueCases = React.useMemo(() => {
+    const seen = new Set<string>();
+    return cases.filter((c) => {
+      const key = (c.case_path || c.case_id).toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }, [cases]);
+
+  // Console / Logs removed from dropdown menu and moved to dedicated top-bar button
   const VIEW_ITEMS: {
     id: TabType;
     label: string;
@@ -172,22 +184,16 @@ export const TopNavBar: React.FC<TopNavBarProps> = ({
       badgeColor: 'bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-300 border-slate-300 dark:border-slate-600',
       description: 'Unified super-timeline chronological explorer',
     },
-    {
-      id: 'process',
-      label: 'Console / Logs',
-      icon: Terminal,
-      description: 'Real-time processing audit & job console',
-    },
   ];
 
-  const activeView = VIEW_ITEMS.find((v) => v.id === activeTab) || VIEW_ITEMS[0];
-  const ActiveIcon = activeView.icon;
+  const activeView = VIEW_ITEMS.find((v) => v.id === activeTab) || VIEW_ITEMS[1];
+  const ActiveIcon = activeTab === 'process' ? Terminal : activeView.icon;
+  const activeLabel = activeTab === 'process' ? 'Execution Logs' : activeView.label;
 
   return (
     <header className="h-11 bg-white dark:bg-[#1e293b] border-b border-[#cbd5e1] dark:border-[#334155] px-3 flex items-center justify-between gap-2 select-none z-30 shadow-xs font-sans w-full min-w-0 shrink-0">
       {/* Brand & Case Selector */}
       <div className="flex items-center gap-2.5 shrink-0 min-w-0">
-        {/* Brand */}
         <div className="flex items-center gap-2 pr-2.5 border-r border-[#cbd5e1] dark:border-[#334155] shrink-0" title="Windows Forensic Toolkit (WFT)">
           <div className="w-8 h-6 rounded bg-[#0284c7] dark:bg-[#0369a1] flex items-center justify-center text-white font-black tracking-wider text-[10px] border border-[#0369a1] dark:border-[#0284c7] shrink-0">
             WFT
@@ -209,12 +215,12 @@ export const TopNavBar: React.FC<TopNavBarProps> = ({
               aria-label="Active Evidence Case"
               value={currentCaseId}
               onChange={(e) => onSelectCase(e.target.value)}
-              className="bg-white dark:bg-[#0f172a] border border-[#cbd5e1] dark:border-[#334155] hover:border-slate-400 focus:border-[#0284c7] text-[#0f172a] dark:text-[#f8fafc] text-xs rounded pl-7 pr-6 py-1 focus:outline-none focus:ring-1 focus:ring-[#0284c7] font-mono transition-colors shadow-2xs max-w-[170px] truncate"
+              className="bg-white dark:bg-[#0f172a] border border-[#cbd5e1] dark:border-[#334155] hover:border-slate-400 focus:border-[#0284c7] text-[#0f172a] dark:text-[#f8fafc] text-xs rounded pl-7 pr-6 py-1 focus:outline-none focus:ring-1 focus:ring-[#0284c7] font-mono transition-colors shadow-2xs max-w-[190px] truncate"
             >
-              {cases.length === 0 ? (
+              {uniqueCases.length === 0 ? (
                 <option value="">No Cases</option>
               ) : (
-                cases.map((c) => (
+                uniqueCases.map((c) => (
                   <option key={c.case_id} value={c.case_id}>
                     {c.case_id} ({c.total_artifact_rows.toLocaleString()} rows)
                   </option>
@@ -223,7 +229,6 @@ export const TopNavBar: React.FC<TopNavBarProps> = ({
             </select>
           </div>
 
-          {/* Delete Case (1-Click Red Trash Icon Button) */}
           {currentCaseId && (
             <button
               onClick={handleDeleteCase}
@@ -277,7 +282,7 @@ export const TopNavBar: React.FC<TopNavBarProps> = ({
         </div>
       </div>
 
-      {/* View Selector Dropdown (Prevents any horizontal overflow or clipping) */}
+      {/* View Selector Dropdown (Clean Forensic Views Only — No Console/Logs Clutter) */}
       <div className="relative shrink-0" ref={dropdownRef}>
         <button
           onClick={() => setIsDropdownOpen((prev) => !prev)}
@@ -291,8 +296,8 @@ export const TopNavBar: React.FC<TopNavBarProps> = ({
           aria-expanded={isDropdownOpen}
         >
           <ActiveIcon className="w-4 h-4 text-[#0284c7] dark:text-[#38bdf8] shrink-0" />
-          <span className="font-bold text-xs tracking-tight">{activeView.label}</span>
-          {activeView.badge !== undefined && activeView.badge > 0 && (
+          <span className="font-bold text-xs tracking-tight">{activeLabel}</span>
+          {activeTab !== 'process' && activeView.badge !== undefined && activeView.badge > 0 && (
             <span
               className={`px-1.5 py-0.2 text-[10px] rounded font-mono font-bold border ${activeView.badgeColor}`}
             >
@@ -306,7 +311,6 @@ export const TopNavBar: React.FC<TopNavBarProps> = ({
           />
         </button>
 
-        {/* Dropdown Menu */}
         {isDropdownOpen && (
           <div className="absolute left-0 mt-1 w-72 bg-white dark:bg-[#1e293b] border border-[#cbd5e1] dark:border-[#334155] rounded-lg shadow-xl z-50 overflow-hidden py-1 animate-in fade-in duration-150">
             <div className="px-3 py-1.5 border-b border-[#cbd5e1] dark:border-[#334155] bg-[#f8fafc] dark:bg-[#0f172a]">
@@ -366,9 +370,8 @@ export const TopNavBar: React.FC<TopNavBarProps> = ({
         )}
       </div>
 
-      {/* Right Controls: Stats + Theme Switcher (Locked with shrink-0 ml-auto) */}
+      {/* Right Controls: Dedicated Execution Logs Toggle + Theme Switcher */}
       <div className="shrink-0 ml-auto flex items-center gap-2">
-        {/* Quick Stats Badges: visible on large screens */}
         <div className="hidden 2xl:flex items-center gap-2 pr-2 border-r border-[#cbd5e1] dark:border-[#334155] text-xs text-slate-500 dark:text-slate-400 font-mono">
           <div className="flex items-center gap-1" title="Total Evidence Rows">
             <Database className="w-3 h-3 text-[#0284c7] dark:text-[#38bdf8]" />
@@ -378,7 +381,19 @@ export const TopNavBar: React.FC<TopNavBarProps> = ({
           </div>
         </div>
 
-        {/* Theme Toggle Button: Always visible on every screen */}
+        <button
+          onClick={() => onChangeTab(activeTab === 'process' ? 'artifacts' : 'process')}
+          className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-semibold border shadow-2xs transition-colors cursor-pointer shrink-0 ${
+            activeTab === 'process'
+              ? 'bg-[#0284c7] text-white border-[#0369a1]'
+              : 'bg-white hover:bg-slate-50 dark:bg-[#0f172a] dark:hover:bg-[#334155] text-[#0f172a] dark:text-[#f8fafc] border-[#cbd5e1] dark:border-[#334155]'
+          }`}
+          title="View Pipeline Execution Logs"
+        >
+          <Terminal className="w-3.5 h-3.5 shrink-0" />
+          <span>Logs</span>
+        </button>
+
         <button
           onClick={onToggleTheme}
           className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-[#f1f5f9] hover:bg-slate-200 dark:bg-[#0f172a] dark:hover:bg-[#334155] text-[#0f172a] dark:text-[#f8fafc] text-xs font-semibold border border-[#cbd5e1] dark:border-[#334155] shadow-2xs transition-colors cursor-pointer shrink-0"

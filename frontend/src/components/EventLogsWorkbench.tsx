@@ -748,7 +748,7 @@ export const EventLogsWorkbench: React.FC<EventLogsWorkbenchProps> = ({ caseId }
                       return (
                         <div key={key} className="p-1.5 rounded bg-[#f8fafc] dark:bg-[#0f172a] border border-[#cbd5e1] dark:border-[#334155]">
                           <span className="text-[10px] font-bold text-slate-400 block">{key}</span>
-                          <span className="text-[11px] break-all select-all">{String(val)}</span>
+                          <span className="text-[11px] break-words select-all">{String(val)}</span>
                         </div>
                       );
                     })}
@@ -761,7 +761,7 @@ export const EventLogsWorkbench: React.FC<EventLogsWorkbenchProps> = ({ caseId }
                     <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">
                       Raw XML / Event Payload
                     </span>
-                    <pre className="p-2 bg-[#f8fafc] dark:bg-[#0f172a] rounded text-[10px] font-mono whitespace-pre-wrap break-all max-h-56 overflow-y-auto border border-[#cbd5e1] dark:border-[#334155]">
+                    <pre className="p-2 bg-[#f8fafc] dark:bg-[#0f172a] rounded text-[10px] font-mono whitespace-pre-wrap break-words max-h-56 overflow-y-auto border border-[#cbd5e1] dark:border-[#334155]">
                       {selectedRow.Payload}
                     </pre>
                   </div>
