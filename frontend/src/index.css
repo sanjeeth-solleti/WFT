@@ -411,3 +411,22 @@ table th, table td {
 .wft-splitter-v:hover, .wft-splitter-v:active {
   background: #0284c7 !important;
 }
+
+
+/* Classic Forensic Grid Borders & Cell Separation */
+.ag-theme-quartz .ag-cell, .ag-theme-alpine .ag-cell {
+  border-right: 1px solid #cbd5e1 !important;
+  border-bottom: 1px solid #cbd5e1 !important;
+}
+.dark .ag-theme-quartz .ag-cell, .dark .ag-theme-alpine .ag-cell {
+  border-right: 1px solid #334155 !important;
+  border-bottom: 1px solid #334155 !important;
+}
+table th, table td {
+  border-right: 1px solid #cbd5e1;
+  border-bottom: 1px solid #cbd5e1;
+}
+.dark table th, .dark table td {
+  border-right: 1px solid #334155;
+  border-bottom: 1px solid #334155;
+}

@@ -320,6 +320,10 @@ export const ArtifactGrid: React.FC<ArtifactGridProps> = ({
     setColumnFilters({});
   }, []);
 
+  const handleClearFiltersPreservingBookmarks = useCallback(() => {
+    setColumnFilters({});
+  }, []);
+
   // Construct AG Grid Single-Page Infinite Row Model Datasource
   // This virtualizes all 98,904+ rows into a single continuous scrollable grid with NO page buttons
   const datasource: IDatasource = useMemo(() => {
@@ -641,7 +645,7 @@ export const ArtifactGrid: React.FC<ArtifactGridProps> = ({
           </div>
 
           <button
-            onClick={handleClearAllColumnFilters}
+            onClick={handleClearFiltersPreservingBookmarks}
             className="flex items-center gap-1 text-xs text-[#991b1b] dark:text-red-400 hover:underline font-semibold cursor-pointer"
           >
             <RotateCcw className="w-3 h-3" />

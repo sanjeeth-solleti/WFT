@@ -85,3 +85,4 @@ test_*.txt
 Thumbs.db
 Desktop.ini
 .DS_Store
+*.mp4

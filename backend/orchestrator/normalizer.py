@@ -2362,37 +2362,8 @@ class TimelineNormalizer:
 
         self._clear_table_normalizations(table_name)
 
-        # 1. Timeline SQL
-        timeline_sql = f"""
-        INSERT INTO master_timeline (
-            timeline_id,
-            timestamp_utc,
-            timestamp_type,
-            category,
-            artifact_name,
-            primary_entity,
-            secondary_entity,
-            summary,
-            source_table,
-            source_row_id,
-            source_file
-        )
-        SELECT
-            nextval('seq_timeline_id'),
-            TRY_CAST("{scanned_at_col}" AS TIMESTAMP),
-            'YARA Match',
-            'MALWARE & YARA',
-            'YARA-X Matches',
-            "{file_name_col}",
-            "{rule_name_col}",
-            {summary_expr},
-            '{table_name}',
-            "{row_id_col}",
-            "{file_path_col}"
-        FROM "{table_name}"
-        WHERE "{scanned_at_col}" IS NOT NULL;
-        """
-        self.conn.execute(timeline_sql)
+        # 1. Timeline SQL: Excluded from master_timeline because scanned_at is forensic tool execution time,
+        # not a historical event on the evidence system. This keeps the super-timeline pure.
 
         # 2. Entity Connections: YARA_RULE
         yara_sql = f"""
@@ -2540,37 +2511,8 @@ class TimelineNormalizer:
 
         self._clear_table_normalizations(table_name)
 
-        # 1. Timeline SQL
-        timeline_sql = f"""
-        INSERT INTO master_timeline (
-            timeline_id,
-            timestamp_utc,
-            timestamp_type,
-            category,
-            artifact_name,
-            primary_entity,
-            secondary_entity,
-            summary,
-            source_table,
-            source_row_id,
-            source_file
-        )
-        SELECT
-            nextval('seq_timeline_id'),
-            TRY_CAST("{scanned_at_col}" AS TIMESTAMP),
-            'OCR Extracted',
-            'Media & OCR',
-            'RapidOCR Extracted Text',
-            "{file_name_col}",
-            COALESCE("{dim_col}", 'Image'),
-            'OCR text extracted from ' || "{file_name_col}" || ' (Conf: ' || CAST(ROUND(COALESCE("{conf_col}", 0.0), 2) AS VARCHAR) || '): ' || SUBSTR(COALESCE("{text_col}", ''), 1, 100),
-            '{table_name}',
-            "{row_id_col}",
-            "{file_path_col}"
-        FROM "{table_name}"
-        WHERE "{scanned_at_col}" IS NOT NULL;
-        """
-        self.conn.execute(timeline_sql)
+        # 1. Timeline SQL: Excluded from master_timeline because processed_at is forensic tool execution time,
+        # not a historical event on the evidence system. This keeps the super-timeline pure.
 
         # 2. Entity Connections: FILE_NAME
         fn_sql = f"""
@@ -4342,6 +4284,16 @@ class TimelineNormalizer:
                         total_ent += e_cnt
                 except Exception as table_err:
                     print(f"[Normalizer] Warning: Failed normalizing table '{tbl}': {table_err}")
+
+            # Ensure examiner scan artifacts (YARA/OCR scan timestamps) never pollute master_timeline
+            try:
+                cursor.execute("""
+                    DELETE FROM master_timeline
+                    WHERE source_table IN ('artifact_yara_hits', 'artifact_ocr_results', 'file_enrichment')
+                       OR timestamp_type IN ('YARA Match', 'OCR Extracted');
+                """)
+            except Exception:
+                pass
 
             try:
                 self._create_refined_views(cursor)
