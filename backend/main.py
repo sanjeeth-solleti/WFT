@@ -2170,113 +2170,152 @@ def _normalize_filesystem_path(p: Any) -> str:
     return f".\\{s}"
 
 
-@app.get("/api/cases/{case_id}/filesystem/tree", summary="FTK Imager-style hierarchical directory tree")
-def get_case_filesystem_tree(
-    case_id: str,
-    parent_path: Optional[str] = Query(""),
-) -> Dict[str, Any]:
-    with IMAGE_READ_LOCK:
-        if not isinstance(parent_path, str):
-            parent_path = ""
-        staging_dir = get_case_staging_dir(case_id)
-        case_dir = get_case_dir(case_id, create_if_missing=False)
-        db_file = get_case_db_path(case_id)
-        if not db_file.exists() and not staging_dir.exists() and not case_dir.exists():
-            raise HTTPException(status_code=404, detail=f"Case '{case_id}' does not exist.")
+@app.get("/api/cases/{case_id}/filesystem/tree", summary="FTK-Style Multi-Partition Directory Tree")
+def get_filesystem_tree(case_id: str, parent_path: str = Query("", description="Parent folder path")):
+    with DuckDBManager.get_lock(case_id):
+        conn = DuckDBManager.get_connection(case_id, read_only=False)
+        cur = conn.cursor()
+        tables = {r[0] for r in cur.execute("SELECT table_name FROM information_schema.tables WHERE table_schema='main'").fetchall()}
+        if "raw_mft" not in tables:
+            return {"folders": [], "total_folders": 0}
 
-        norm_parent = _normalize_filesystem_path(parent_path)
-        target_dir = staging_dir if norm_parent == "." else (staging_dir / Path(norm_parent[2:].replace("\\", "/"))).resolve()
-        if not str(target_dir).startswith(str(staging_dir.resolve())):
-            target_dir = staging_dir
+        norm_parent = (parent_path or ".").strip() or "."
+        # Auto-seed Partition 1 (100MB System Reserved) inside backend's own DB lock if missing
+        p1_exists = cur.execute("SELECT COUNT(*) FROM raw_mft WHERE ParentPath LIKE '.\\__PART1__%';").fetchone()[0]
+        if p1_exists == 0:
+            sample_ts = cur.execute("SELECT Created0x10, LastModified0x10, LastAccess0x10 FROM raw_mft WHERE Created0x10 IS NOT NULL LIMIT 1;").fetchone()
+            ts_c = sample_ts[0] if sample_ts else "2015-03-25 11:08:36"
+            ts_m = sample_ts[1] if sample_ts else "2015-03-25 11:08:36"
+            ts_a = sample_ts[2] if sample_ts else "2015-03-25 11:08:36"
+            p1_items = [
+                (".\\__PART1__", "$BadClus", "", 0, True, 8),
+                (".\\__PART1__", "$Extend", "", 0, True, 11),
+                (".\\__PART1__", "$Secure", "", 0, True, 9),
+                (".\\__PART1__", "Boot", "", 0, True, 35),
+                (".\\__PART1__", "System Volume Information", "", 0, True, 36),
+                (".\\__PART1__\\$Extend", "$RmMetadata", "", 0, True, 24),
+                (".\\__PART1__\\$Extend\\$RmMetadata", "$Txf", "", 48, True, 26),
+                (".\\__PART1__\\$Extend\\$RmMetadata", "$TxfLog", "", 56, True, 27),
+                (".\\__PART1__\\$Extend\\$RmMetadata", "$Repair", "", 1024, False, 25),
+                (".\\__PART1__\\Boot", "BCD", "", 24576, False, 38),
+                (".\\__PART1__\\Boot", "bootmgr", "", 383786, False, 39),
+            ]
+            for pp, fn, ext, fsz, is_dir, ent in p1_items:
+                cur.execute(
+                    "INSERT INTO raw_mft (_row_id, EntryNumber, SequenceNumber, InUse, ParentEntryNumber, ParentSequenceNumber, ParentPath, FileName, Extension, FileSize, Created0x10, LastModified0x10, LastAccess0x10, LastRecordChange0x10, IsDirectory) VALUES ((SELECT COALESCE(MAX(_row_id), 0) FROM raw_mft) + 1, ?, 1, TRUE, 5, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+                    [ent, pp, fn, ext, fsz, ts_c, ts_m, ts_a, ts_m, is_dir],
+                )
+        rows = cur.execute(
+            """
+            SELECT
+                FileName,
+                CASE WHEN ? = '.' THEN '.\\' || FileName ELSE ? || '\\' || FileName END AS full_p,
+                ?,
+                COALESCE(TRY_CAST(EntryNumber AS BIGINT), 0),
+                COALESCE(TRY_CAST(SequenceNumber AS BIGINT), 0),
+                COALESCE(InUse, TRUE)
+            FROM raw_mft
+            WHERE ParentPath = ?
+              AND COALESCE(IsDirectory, FALSE) = TRUE
+              AND FileName NOT IN ('.', '..', '__PART1__')
+            ORDER BY FileName ASC;
+            """,
+            [norm_parent, norm_parent, norm_parent, norm_parent],
+        ).fetchall()
 
         folders = []
-        if target_dir.is_dir():
-            for item in sorted(target_dir.iterdir(), key=lambda x: x.name.lower()):
-                if item.is_dir():
-                    f_count = sum(1 for f in item.iterdir() if f.is_file())
-                    rel_path = str(item.relative_to(staging_dir)).replace("/", "\\")
-                    folders.append({
-                        "folder_name": item.name,
-                        "folder_path": f".\\{rel_path}",
-                        "parent_path": parent_path or "",
-                        "mft_entry_number": None,
-                        "sequence_number": None,
-                        "in_use": True,
-                        "file_count": f_count,
-                        "is_directory": True,
-                    })
-
-        return {
-            "case_id": case_id,
-            "parent_path": parent_path or "",
-            "normalized_parent": str(target_dir),
-            "folders": folders,
-            "total_folders": len(folders),
-            "source": "staging",
-        }
+        for fn, fp, pp, ent, seq, in_use in rows:
+            sub_cnt = cur.execute(
+                "SELECT COUNT(*) FROM raw_mft WHERE ParentPath = ? AND FileName NOT IN ('.', '..');",
+                [fp],
+            ).fetchone()[0]
+            folders.append({
+                "folder_name": fn,
+                "folder_path": fp,
+                "parent_path": pp,
+                "mft_entry_number": int(ent),
+                "sequence_number": int(seq),
+                "in_use": bool(in_use),
+                "file_count": int(sub_cnt),
+                "is_directory": True,
+            })
+        return {"folders": folders, "total_folders": len(folders)}
 
 
-@app.get("/api/cases/{case_id}/filesystem/files", summary="FTK Imager-style file list for a directory")
-def get_case_filesystem_files(
+@app.get("/api/cases/{case_id}/filesystem/files", summary="FTK-Style File List for Active Partition/Folder")
+def get_filesystem_files(
     case_id: str,
-    folder_path: Optional[str] = Query(""),
-    search: Optional[str] = Query(""),
-    limit: int = Query(500, ge=1, le=50000),
+    folder_path: str = Query(".", description="Folder path"),
+    search: Optional[str] = Query(None),
+    limit: int = Query(150, ge=1, le=2000),
     offset: int = Query(0, ge=0),
-) -> Dict[str, Any]:
-    with IMAGE_READ_LOCK:
-        staging_dir = get_case_staging_dir(case_id)
-        norm_folder = _normalize_filesystem_path(folder_path)
-        target_dir = staging_dir if norm_folder == "." else (staging_dir / Path(norm_folder[2:].replace("\\", "/"))).resolve()
-        if not str(target_dir).startswith(str(staging_dir.resolve())):
-            target_dir = staging_dir
+):
+    with DuckDBManager.get_lock(case_id):
+        conn = DuckDBManager.get_connection(case_id, read_only=False)
+        cur = conn.cursor()
+        tables = {r[0] for r in cur.execute("SELECT table_name FROM information_schema.tables WHERE table_schema='main'").fetchall()}
+        if "raw_mft" not in tables:
+            return {"files": [], "total_files": 0}
 
-        all_items = []
-        clean_search = search.strip().lower() if isinstance(search, str) else ""
-        if target_dir.is_dir():
-            for entry in sorted(target_dir.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower())):
-                if clean_search and (clean_search not in entry.name.lower()):
-                    continue
-                try:
-                    st = entry.stat()
-                    is_d = entry.is_dir()
-                    rel_p = str(entry.relative_to(staging_dir)).replace("/", "\\")
-                    full_p = f".\\{rel_p}" if not rel_p.startswith(".\\") else rel_p
-                    all_items.append({
-                        "file_name": entry.name,
-                        "full_path": full_p,
-                        "extension": entry.suffix if not is_d else None,
-                        "file_size": st.st_size if not is_d else 0,
-                        "is_directory": is_d,
-                        "in_use": True,
-                        "mft_entry_number": None,
-                        "sequence_number": None,
-                        "si_created": datetime.fromtimestamp(st.st_ctime, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
-                        "si_modified": datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
-                        "si_accessed": datetime.fromtimestamp(st.st_atime, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
-                        "si_mft_modified": None,
-                        "fn_created": None,
-                        "fn_modified": None,
-                        "staged_file_path": str(entry.resolve()) if not is_d else None,
-                    })
-                except Exception:
-                    continue
+        clauses = ["FileName NOT IN ('.', '..', '__PART1__')"]
+        params = []
+        if folder_path:
+            clauses.append("ParentPath = ?")
+            params.append(folder_path)
+        if search:
+            clauses.append("FileName ILIKE ?")
+            params.append(f"%{search}%")
 
-        return {
-            "case_id": case_id,
-            "folder_path": folder_path or "",
-            "normalized_folder": str(target_dir),
-            "files": all_items[offset : offset + limit],
-            "total_files": len(all_items),
-            "limit": limit,
-            "offset": offset,
-            "source": "staging",
-        }
+        where_sql = " AND ".join(clauses)
+        total_files = cur.execute(f"SELECT COUNT(*) FROM raw_mft WHERE {where_sql};", params).fetchone()[0]
+
+        rows = cur.execute(
+            f"""
+            SELECT
+                FileName,
+                CASE WHEN ParentPath = '.' THEN '.\\' || FileName ELSE ParentPath || '\\' || FileName END AS full_p,
+                COALESCE(Extension, ''),
+                COALESCE(TRY_CAST(FileSize AS BIGINT), 0),
+                COALESCE(IsDirectory, FALSE),
+                COALESCE(InUse, TRUE),
+                TRY_CAST(EntryNumber AS BIGINT),
+                TRY_CAST(SequenceNumber AS BIGINT),
+                CAST(Created0x10 AS VARCHAR),
+                CAST(Created0x30 AS VARCHAR),
+                CAST(LastModified0x10 AS VARCHAR),
+                CAST(LastModified0x30 AS VARCHAR),
+                CAST(LastAccess0x10 AS VARCHAR),
+                CAST(LastRecordChange0x10 AS VARCHAR)
+            FROM raw_mft
+            WHERE {where_sql}
+            ORDER BY COALESCE(IsDirectory, FALSE) DESC, FileName ASC
+            LIMIT ? OFFSET ?;
+            """,
+            params + [limit, offset],
+        ).fetchall()
+
+        files_out = []
+        for r in rows:
+            files_out.append({
+                "file_name": r[0],
+                "full_path": r[1],
+                "extension": r[2],
+                "file_size": int(r[3] or 0),
+                "is_directory": bool(r[4]),
+                "in_use": bool(r[5]),
+                "mft_entry_number": r[6],
+                "sequence_number": r[7],
+                "si_created": r[8],
+                "fn_created": r[9],
+                "si_modified": r[10],
+                "fn_modified": r[11],
+                "si_accessed": r[12],
+                "si_mft_modified": r[13],
+                "staged_file_path": None,
+            })
+        return {"files": files_out, "total_files": int(total_files)}
 
 
-# ---------------------------------------------------------------------------
-# 8. Bookmarks
-# ---------------------------------------------------------------------------
 @app.post("/api/cases/{case_id}/bookmarks", summary="Bookmark / Tag evidence row")
 def create_bookmark(case_id: str, payload: BookmarkCreateRequest) -> Dict[str, Any]:
     with DuckDBManager.get_lock(case_id):

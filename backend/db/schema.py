@@ -216,196 +216,6 @@ MASTER_ARTIFACT_CATALOG: List[Dict[str, Any]] = [
     # -------------------------------------------------------------------------
     # 1. REFINED RESULTS
     # -------------------------------------------------------------------------
-    {
-        "artifact_id": "refined_google_searches",
-        "category": "REFINED RESULTS",
-        "display_name": "Google Searches",
-        "table_name": "view_refined_google_searches",
-        "source_tool": "RefinedResults",
-        "ddl": """CREATE OR REPLACE VIEW view_refined_google_searches AS
-            SELECT row_number() OVER () AS _row_id,
-                   regexp_extract(url, '[?&]q=([^&]+)', 1) AS search_query,
-                   url, title, visit_time, browser, source_file
-            FROM (
-                SELECT url, title, visit_time, 'Edge' AS browser, source_file FROM parsed_edge_history
-                WHERE url ILIKE '%google.%/search%' OR url ILIKE '%google.%?q=%'
-                UNION ALL
-                SELECT url, title, visit_time, 'Chrome' AS browser, source_file FROM parsed_chrome_history
-                WHERE url ILIKE '%google.%/search%' OR url ILIKE '%google.%?q=%'
-                UNION ALL
-                SELECT url, title, visit_time, 'Brave' AS browser, source_file FROM parsed_brave_history
-                WHERE url ILIKE '%google.%/search%' OR url ILIKE '%google.%?q=%'
-                UNION ALL
-                SELECT url, title, visit_time, 'Firefox' AS browser, source_file FROM parsed_firefox_history
-                WHERE url ILIKE '%google.%/search%' OR url ILIKE '%google.%?q=%'
-            ) g_sub
-            WHERE search_query IS NOT NULL AND length(search_query) > 0;"""
-    },
-    {
-        "artifact_id": "refined_search_queries",
-        "category": "REFINED RESULTS",
-        "display_name": "Parsed Search Queries",
-        "table_name": "view_refined_search_queries",
-        "source_tool": "RefinedResults",
-        "ddl": """CREATE OR REPLACE VIEW view_refined_search_queries AS
-            SELECT row_number() OVER () AS _row_id,
-                   CASE
-                       WHEN url ILIKE '%google.%' THEN 'Google'
-                       WHEN url ILIKE '%bing.com%' THEN 'Bing'
-                       WHEN url ILIKE '%duckduckgo.com%' THEN 'DuckDuckGo'
-                       WHEN url ILIKE '%yahoo.com%' THEN 'Yahoo'
-                       ELSE 'Other Search'
-                   END AS search_engine,
-                   COALESCE(
-                       NULLIF(regexp_extract(url, '[?&]q=([^&]+)', 1), ''),
-                       NULLIF(regexp_extract(url, '[?&]p=([^&]+)', 1), ''),
-                       regexp_extract(url, '[?&]query=([^&]+)', 1)
-                   ) AS search_query,
-                   url, title, visit_time, browser, source_file
-            FROM (
-                SELECT url, title, visit_time, 'Edge' AS browser, source_file FROM parsed_edge_history
-                WHERE url ILIKE '%search%' OR url ILIKE '%?q=%' OR url ILIKE '%&q=%'
-                UNION ALL
-                SELECT url, title, visit_time, 'Chrome' AS browser, source_file FROM parsed_chrome_history
-                WHERE url ILIKE '%search%' OR url ILIKE '%?q=%' OR url ILIKE '%&q=%'
-                UNION ALL
-                SELECT url, title, visit_time, 'Brave' AS browser, source_file FROM parsed_brave_history
-                WHERE url ILIKE '%search%' OR url ILIKE '%?q=%' OR url ILIKE '%&q=%'
-                UNION ALL
-                SELECT url, title, visit_time, 'Firefox' AS browser, source_file FROM parsed_firefox_history
-                WHERE url ILIKE '%search%' OR url ILIKE '%?q=%' OR url ILIKE '%&q=%'
-            ) s_sub
-            WHERE search_query IS NOT NULL AND length(search_query) > 0;"""
-    },
-    {
-        "artifact_id": "refined_users",
-        "category": "REFINED RESULTS",
-        "display_name": "Identifiers & User Accounts",
-        "table_name": "view_refined_users",
-        "source_tool": "RefinedResults",
-        "ddl": """CREATE OR REPLACE VIEW view_refined_users AS
-            SELECT row_number() OVER () AS _row_id,
-                   user_identifier,
-                   source_artifact,
-                   COUNT(*) AS occurrences,
-                   MIN(timestamp_utc) AS first_observed,
-                   MAX(timestamp_utc) AS last_observed
-            FROM (
-                SELECT CAST(UserName AS VARCHAR) AS user_identifier, 'Security & System Event Logs' AS source_artifact, TRY_CAST(TimeCreated AS TIMESTAMP) AS timestamp_utc
-                FROM raw_evtx WHERE UserName IS NOT NULL AND TRIM(CAST(UserName AS VARCHAR)) NOT IN ('', '-', 'SYSTEM', 'LOCAL SERVICE', 'NETWORK SERVICE', 'N/A')
-                UNION ALL
-                SELECT CAST(username AS VARCHAR) AS user_identifier, 'PowerShell Console Host History' AS source_artifact, CAST(NULL AS TIMESTAMP) AS timestamp_utc
-                FROM parsed_powershell_history WHERE username IS NOT NULL AND TRIM(CAST(username AS VARCHAR)) != ''
-                UNION ALL
-                SELECT CAST(UserId AS VARCHAR) AS user_identifier, 'SRUM Application Resource Usage' AS source_artifact, TRY_CAST(Timestamp AS TIMESTAMP) AS timestamp_utc
-                FROM raw_srum_app WHERE UserId IS NOT NULL AND TRIM(CAST(UserId AS VARCHAR)) NOT IN ('', '0')
-                UNION ALL
-                SELECT CAST(username_value AS VARCHAR) AS user_identifier, 'Edge Logins' AS source_artifact, TRY_CAST(date_created AS TIMESTAMP) AS timestamp_utc
-                FROM parsed_edge_logins WHERE username_value IS NOT NULL AND TRIM(CAST(username_value AS VARCHAR)) != ''
-                UNION ALL
-                SELECT CAST(username_value AS VARCHAR) AS user_identifier, 'Chrome Logins' AS source_artifact, TRY_CAST(date_created AS TIMESTAMP) AS timestamp_utc
-                FROM parsed_chrome_logins WHERE username_value IS NOT NULL AND TRIM(CAST(username_value AS VARCHAR)) != ''
-                UNION ALL
-                SELECT CAST(sender AS VARCHAR) AS user_identifier, 'Microsoft Teams Messages' AS source_artifact, TRY_CAST(timestamp_utc AS TIMESTAMP) AS timestamp_utc
-                FROM parsed_teams_messages WHERE sender IS NOT NULL AND TRIM(CAST(sender AS VARCHAR)) != ''
-            ) u_sub
-            WHERE user_identifier IS NOT NULL AND length(trim(user_identifier)) > 0
-            GROUP BY user_identifier, source_artifact
-            ORDER BY occurrences DESC;"""
-    },
-    {
-        "artifact_id": "refined_cloud_urls",
-        "category": "REFINED RESULTS",
-        "display_name": "Cloud Services URLs",
-        "table_name": "view_refined_cloud_urls",
-        "source_tool": "RefinedResults",
-        "ddl": """CREATE OR REPLACE VIEW view_refined_cloud_urls AS
-            SELECT row_number() OVER () AS _row_id, url, title, visit_time, browser, source_file
-            FROM (
-                SELECT url, title, visit_time, 'Edge' AS browser, source_file FROM parsed_edge_history
-                WHERE url ILIKE '%drive.google.com%' OR url ILIKE '%onedrive.live.com%' OR url ILIKE '%dropbox.com%' OR url ILIKE '%box.com%' OR url ILIKE '%sharepoint.com%'
-                UNION ALL
-                SELECT url, title, visit_time, 'Chrome' AS browser, source_file FROM parsed_chrome_history
-                WHERE url ILIKE '%drive.google.com%' OR url ILIKE '%onedrive.live.com%' OR url ILIKE '%dropbox.com%' OR url ILIKE '%box.com%' OR url ILIKE '%sharepoint.com%'
-                UNION ALL
-                SELECT url, title, visit_time, 'Brave' AS browser, source_file FROM parsed_brave_history
-                WHERE url ILIKE '%drive.google.com%' OR url ILIKE '%onedrive.live.com%' OR url ILIKE '%dropbox.com%' OR url ILIKE '%box.com%' OR url ILIKE '%sharepoint.com%'
-                UNION ALL
-                SELECT url, title, visit_time, 'Firefox' AS browser, source_file FROM parsed_firefox_history
-                WHERE url ILIKE '%drive.google.com%' OR url ILIKE '%onedrive.live.com%' OR url ILIKE '%dropbox.com%' OR url ILIKE '%box.com%' OR url ILIKE '%sharepoint.com%'
-            ) c_sub;"""
-    },
-    {
-        "artifact_id": "refined_social_urls",
-        "category": "REFINED RESULTS",
-        "display_name": "Social Media URLs",
-        "table_name": "view_refined_social_urls",
-        "source_tool": "RefinedResults",
-        "ddl": """CREATE OR REPLACE VIEW view_refined_social_urls AS
-            SELECT row_number() OVER () AS _row_id, url, title, visit_time, browser, source_file
-            FROM (
-                SELECT url, title, visit_time, 'Edge' AS browser, source_file FROM parsed_edge_history
-                WHERE url ILIKE '%facebook.com%' OR url ILIKE '%twitter.com%' OR url ILIKE '%x.com%' OR url ILIKE '%linkedin.com%' OR url ILIKE '%instagram.com%' OR url ILIKE '%reddit.com%' OR url ILIKE '%tiktok.com%'
-                UNION ALL
-                SELECT url, title, visit_time, 'Chrome' AS browser, source_file FROM parsed_chrome_history
-                WHERE url ILIKE '%facebook.com%' OR url ILIKE '%twitter.com%' OR url ILIKE '%x.com%' OR url ILIKE '%linkedin.com%' OR url ILIKE '%instagram.com%' OR url ILIKE '%reddit.com%' OR url ILIKE '%tiktok.com%'
-                UNION ALL
-                SELECT url, title, visit_time, 'Brave' AS browser, source_file FROM parsed_brave_history
-                WHERE url ILIKE '%facebook.com%' OR url ILIKE '%twitter.com%' OR url ILIKE '%x.com%' OR url ILIKE '%linkedin.com%' OR url ILIKE '%instagram.com%' OR url ILIKE '%reddit.com%' OR url ILIKE '%tiktok.com%'
-                UNION ALL
-                SELECT url, title, visit_time, 'Firefox' AS browser, source_file FROM parsed_firefox_history
-                WHERE url ILIKE '%facebook.com%' OR url ILIKE '%twitter.com%' OR url ILIKE '%x.com%' OR url ILIKE '%linkedin.com%' OR url ILIKE '%instagram.com%' OR url ILIKE '%reddit.com%' OR url ILIKE '%tiktok.com%'
-            ) s_sub;"""
-    },
-    {
-        "artifact_id": "refined_domains",
-        "category": "REFINED RESULTS",
-        "display_name": "Top Domains & URLs",
-        "table_name": "view_refined_domains",
-        "source_tool": "RefinedResults",
-        "ddl": """CREATE OR REPLACE VIEW view_refined_domains AS
-            SELECT row_number() OVER () AS _row_id,
-                   domain,
-                   COUNT(*) AS event_count,
-                   COUNT(DISTINCT source_artifact) AS distinct_artifacts_count,
-                   MIN(timestamp_utc) AS first_seen,
-                   MAX(timestamp_utc) AS last_seen,
-                   string_agg(DISTINCT source_artifact, ', ') AS observed_in_artifacts
-            FROM (
-                SELECT regexp_extract(url, 'https?://([^/:]+)', 1) AS domain, 'Edge Web History' AS source_artifact, TRY_CAST(visit_time AS TIMESTAMP) AS timestamp_utc
-                FROM parsed_edge_history WHERE url IS NOT NULL AND length(url) > 0
-                UNION ALL
-                SELECT regexp_extract(url, 'https?://([^/:]+)', 1) AS domain, 'Chrome Web History' AS source_artifact, TRY_CAST(visit_time AS TIMESTAMP) AS timestamp_utc
-                FROM parsed_chrome_history WHERE url IS NOT NULL AND length(url) > 0
-                UNION ALL
-                SELECT regexp_extract(url, 'https?://([^/:]+)', 1) AS domain, 'Brave Web History' AS source_artifact, TRY_CAST(visit_time AS TIMESTAMP) AS timestamp_utc
-                FROM parsed_brave_history WHERE url IS NOT NULL AND length(url) > 0
-                UNION ALL
-                SELECT regexp_extract(url, 'https?://([^/:]+)', 1) AS domain, 'Firefox Web History' AS source_artifact, TRY_CAST(visit_time AS TIMESTAMP) AS timestamp_utc
-                FROM parsed_firefox_history WHERE url IS NOT NULL AND length(url) > 0
-                UNION ALL
-                SELECT regexp_extract(COALESCE(tab_url, site_url), 'https?://([^/:]+)', 1) AS domain, 'Edge Downloads' AS source_artifact, TRY_CAST(start_time AS TIMESTAMP) AS timestamp_utc
-                FROM parsed_edge_downloads WHERE COALESCE(tab_url, site_url) IS NOT NULL AND length(COALESCE(tab_url, site_url)) > 0
-                UNION ALL
-                SELECT regexp_extract(COALESCE(tab_url, site_url), 'https?://([^/:]+)', 1) AS domain, 'Chrome Downloads' AS source_artifact, TRY_CAST(start_time AS TIMESTAMP) AS timestamp_utc
-                FROM parsed_chrome_downloads WHERE COALESCE(tab_url, site_url) IS NOT NULL AND length(COALESCE(tab_url, site_url)) > 0
-            ) d_sub
-            WHERE domain IS NOT NULL AND length(trim(domain)) > 0
-            GROUP BY domain
-            ORDER BY event_count DESC;"""
-    },
-    {
-        "artifact_id": "refined_keyword_hits",
-        "category": "REFINED RESULTS",
-        "display_name": "Keyword Hits",
-        "table_name": "view_keyword_hits",
-        "source_tool": "KeywordScanner",
-        "ddl": """CREATE OR REPLACE VIEW view_keyword_hits AS
-            SELECT row_number() OVER () AS _row_id,
-                   keyword_id, keyword, is_regex, source_file, hit_count, created_at
-            FROM case_keywords WHERE hit_count > 0;"""
-    },
-
     # -------------------------------------------------------------------------
     # 2. WEB RELATED (Split per browser: Chrome, Edge, Brave, Firefox)
     # -------------------------------------------------------------------------
@@ -1924,6 +1734,33 @@ def sync_granular_artifacts(conn: duckdb.DuckDBPyConnection, case_id: Optional[s
 
 
 def sync_artifact_registry_counts(conn: duckdb.DuckDBPyConnection, case_id: Optional[str] = None) -> int:
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM artifact_registry WHERE LOWER(category) = 'refined results' OR artifact_id LIKE 'refined_%' OR table_name LIKE 'view_refined_%';")
+    try:
+        tables_now = {r[0] for r in cursor.execute("SELECT table_name FROM information_schema.tables WHERE table_schema='main';").fetchall()}
+        if "parsed_keyword_hits" in tables_now:
+            cursor.execute("""
+                CREATE OR REPLACE VIEW view_keyword_hits AS
+                SELECT _row_id, keyword, artifact_name, source_table, source_row_id, matched_snippet, source_file, detected_at
+                FROM parsed_keyword_hits
+                ORDER BY _row_id ASC;
+            """)
+            kw_cnt = cursor.execute("SELECT COUNT(*) FROM parsed_keyword_hits;").fetchone()[0]
+            cursor.execute(
+                """
+                INSERT INTO artifact_registry (
+                    artifact_id, category, display_name, table_name, source_tool, row_count
+                ) VALUES ('keyword_hits', 'KEYWORD HITS', 'Keyword Hits', 'view_keyword_hits', 'KeywordScanner', ?)
+                ON CONFLICT (artifact_id) DO UPDATE SET
+                    category = 'KEYWORD HITS',
+                    display_name = 'Keyword Hits',
+                    table_name = 'view_keyword_hits',
+                    row_count = EXCLUDED.row_count;
+                """,
+                [kw_cnt],
+            )
+    except Exception:
+        pass
     """
     Synchronizes virtual views, granular tables, and live DuckDB row counts into artifact_registry.
     Ensures artifact_registry accurately reflects real rows in case.duckdb across all 10 canonical categories.

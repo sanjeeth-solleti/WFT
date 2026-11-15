@@ -659,14 +659,14 @@ export const apiClient = {
 
   // Keyword Lists Management
   listKeywords(caseId: string): Promise<CaseKeywordsResponse> {
-    return request<CaseKeywordsResponse>(`/api/cases/${encodeURIComponent(caseId)}/keywords`);
+    return request<CaseKeywordsResponse>(`/api/cases/${encodeURIComponent(caseId && caseId.trim() ? caseId.trim() : 'pending_wizard_case')}/keywords`);
   },
 
   addKeywords(
     caseId: string,
     payload: { keywords: string[]; source_file?: string; is_regex?: boolean }
   ): Promise<CaseKeywordsResponse> {
-    return request<CaseKeywordsResponse>(`/api/cases/${encodeURIComponent(caseId)}/keywords`, {
+    return request<CaseKeywordsResponse>(`/api/cases/${encodeURIComponent(caseId && caseId.trim() ? caseId.trim() : 'pending_wizard_case')}/keywords`, {
       method: 'POST',
       body: JSON.stringify({
         keywords: payload.keywords,
@@ -679,7 +679,7 @@ export const apiClient = {
   async uploadKeywordsFile(caseId: string, file: File): Promise<CaseKeywordsResponse> {
     const formData = new FormData();
     formData.append('file', file);
-    const res = await fetch(`${API_BASE}/api/cases/${encodeURIComponent(caseId)}/keywords/upload`, {
+    const res = await fetch(`${API_BASE}/api/cases/${encodeURIComponent(caseId && caseId.trim() ? caseId.trim() : 'pending_wizard_case')}/keywords/upload`, {
       method: 'POST',
       body: formData,
     });
@@ -700,7 +700,7 @@ export const apiClient = {
     const formData = new FormData();
     formData.append('content', content);
     formData.append('source_name', sourceName);
-    const res = await fetch(`${API_BASE}/api/cases/${encodeURIComponent(caseId)}/keywords/upload`, {
+    const res = await fetch(`${API_BASE}/api/cases/${encodeURIComponent(caseId && caseId.trim() ? caseId.trim() : 'pending_wizard_case')}/keywords/upload`, {
       method: 'POST',
       body: formData,
     });
@@ -722,7 +722,7 @@ export const apiClient = {
     keywordId: string
   ): Promise<{ status: string; case_id: string; keyword_id: string }> {
     return request<{ status: string; case_id: string; keyword_id: string }>(
-      `/api/cases/${encodeURIComponent(caseId)}/keywords/${encodeURIComponent(keywordId)}`,
+      `/api/cases/${encodeURIComponent(caseId && caseId.trim() ? caseId.trim() : 'pending_wizard_case')}/keywords/${encodeURIComponent(keywordId)}`,
       {
         method: 'DELETE',
       }

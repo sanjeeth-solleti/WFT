@@ -367,8 +367,16 @@ def scan_keywords_for_case(case_id: str, conn: Optional[duckdb.DuckDBPyConnectio
                 "SELECT table_name FROM information_schema.tables WHERE table_schema = 'main';"
             ).fetchall()
         }
-        if "case_keywords" not in tables:
-            return 0
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS case_keywords (
+                keyword_id VARCHAR PRIMARY KEY,
+                keyword VARCHAR NOT NULL,
+                is_regex BOOLEAN DEFAULT FALSE,
+                category VARCHAR DEFAULT 'General',
+                hit_count BIGINT DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
 
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS parsed_keyword_hits (
@@ -405,7 +413,7 @@ def scan_keywords_for_case(case_id: str, conn: Optional[duckdb.DuckDBPyConnectio
             "SELECT keyword_id, keyword, is_regex FROM case_keywords;"
         ).fetchall()
         if not keywords_rows:
-            cursor.execute("UPDATE artifact_registry SET row_count = 0 WHERE artifact_id = 'refined_keyword_hits';")
+            cursor.execute("UPDATE artifact_registry SET row_count = 0 WHERE artifact_id = 'keyword_hits';")
             return 0
 
         all_base_tables = [
@@ -507,12 +515,13 @@ def scan_keywords_for_case(case_id: str, conn: Optional[duckdb.DuckDBPyConnectio
             cursor.execute(
                 """
                 INSERT INTO artifact_registry (
-                    artifact_id, category, display_name, table_name, source_tool, row_count, last_updated
-                ) VALUES ('refined_keyword_hits', 'REFINED RESULTS', 'Keyword Hits', 'view_keyword_hits', 'KeywordScanner', ?, CURRENT_TIMESTAMP)
+                    artifact_id, category, display_name, table_name, source_tool, row_count
+                ) VALUES ('keyword_hits', 'KEYWORD HITS', 'Keyword Hits', 'view_keyword_hits', 'KeywordScanner', ?)
                 ON CONFLICT (artifact_id) DO UPDATE SET
-                    row_count = EXCLUDED.row_count,
+                    category = 'KEYWORD HITS',
+                    display_name = 'Keyword Hits',
                     table_name = 'view_keyword_hits',
-                    last_updated = CURRENT_TIMESTAMP;
+                    row_count = EXCLUDED.row_count;
                 """,
                 [total_hit_rows],
             )
