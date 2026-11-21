@@ -1214,7 +1214,7 @@ class EmailParser(BaseParser):
                 # Also inspect MAPI client submit time if available
                 submit_dt: Optional[datetime] = None
                 try:
-                    props = getattr(msg, " mainProperties", None) or getattr(msg, "mainProperties", None)
+                    props = getattr(msg, "mainProperties", None)
                     if props and 0x0039 in props:
                         raw_sub = getattr(props[0x0039], "value", None)
                         if isinstance(raw_sub, datetime):

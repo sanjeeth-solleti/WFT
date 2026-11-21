@@ -1114,7 +1114,7 @@ class BulkExtractorRunner:
     def run(
         self,
         source_path: Union[str, Path],
-        max_workers: int = 16,
+        max_workers: int = 25,
         enable_carving: bool = False,
     ) -> Dict[str, Any]:
         """
@@ -1188,7 +1188,7 @@ class BulkExtractorRunner:
                 "message": err_msg,
             }
 
-        raw_workers = 16 if max_workers is None else int(max_workers)
+        raw_workers = 25 if max_workers is None else int(max_workers)
         clamped_workers = max(1, min(32, raw_workers))
 
         if self.out_dir.exists():

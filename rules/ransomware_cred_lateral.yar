@@ -3,6 +3,28 @@
     Detects Mimikatz, Rubeus, BloodHound, VSS wiping, Ransomware notes, PsExec/Impacket, Chisel, Ligolo-ng, and Ngrok
 */
 
+private rule _wft_rcl_is_pe {
+    condition:
+        uint16(0) == 0x5A4D and
+        filesize > 0x40 and
+        uint32(0x3C) < filesize - 4 and
+        uint32(uint32(0x3C)) == 0x00004550
+}
+
+private rule _wft_rcl_is_script_target {
+    condition:
+        uint16(0) != 0x5A4D and
+        not (uint32(0) == 0x0000004C and uint32(4) == 0x00021401) and
+        uint32(0) != 0x46666C45 and // EVTX
+        uint32(0) != 0x66676572 and // Registry hive (regf)
+        uint32(0) != 0x694C5153 and // SQLite
+        uint16(0) != 0x4B50 and     // ZIP/DOCX/JAR
+        uint32(0) != 0xE011CFD0 and // OLE2
+        uint32(0) != 0x46445025 and // PDF
+        uint32(0) != 0x464C457F and // ELF
+        uint16(0) != 0x8B1F         // GZIP
+}
+
 rule CredDump_Mimikatz_Nanodump_LSASS {
     meta:
         description = "Detects Mimikatz binaries/scripts, DCSync, Nanodump, and LSASS credential harvesting"
@@ -25,12 +47,12 @@ rule CredDump_Mimikatz_Nanodump_LSASS {
         $ps_pebytes = "PEBytes" ascii wide nocase
     condition:
         (
-            uint16(0) == 0x5A4D and uint32(0x3C) < filesize and uint32(uint32(0x3C)) == 0x00004550 and
-            filesize < 25MB and 2 of ($m1, $m2, $m3, $m4, $m5, $m6, $m7, $m8, $m9, $m10)
+            _wft_rcl_is_pe and filesize < 25MB and
+            2 of ($m1,$m2, $m3,$m4, $m5,$m6, $m7,$m8, $m9,$m10)
         ) or (
-            uint16(0) != 0x5A4D and uint32(0) != 0x00021401 and filesize < 10MB and (
-                ($m11 and ($ps_pebytes or any of ($m1, $m2, $m3, $m4, $m5, $m6))) or
-                2 of ($m1, $m2, $m3, $m4, $m5, $m6)
+            _wft_rcl_is_script_target and filesize < 10MB and (
+                ($m11 and ($ps_pebytes or any of ($m1,$m2, $m3,$m4, $m5,$m6))) or
+                2 of ($m1,$m2, $m3,$m4, $m5,$m6)
             )
         )
 }
@@ -53,11 +75,11 @@ rule CredDump_Kerberoasting_Rubeus {
         $nowrap = "/nowrap" ascii wide nocase
     condition:
         (
-            uint16(0) == 0x5A4D and uint32(0x3C) < filesize and uint32(uint32(0x3C)) == 0x00004550 and
-            filesize < 20MB and $r1 and 2 of ($r3, $r4, $r5, $r6, $r7)
+            _wft_rcl_is_pe and filesize < 20MB and
+            $r1 and 2 of ($r3, $r4,$r5, $r6,$r7)
         ) or (
-            uint16(0) != 0x5A4D and uint32(0) != 0x00021401 and filesize < 2MB and
-            $r2 and ($r6 or $r7 or ($r4 and $nowrap))
+            _wft_rcl_is_script_target and filesize < 2MB and
+            $r2 and ($r6 or$r7 or ($r4 and$nowrap))
         )
 }
 
@@ -83,11 +105,11 @@ rule CredDump_ProcDump_Comsvcs_SAM_Dump {
         $ntds = "ntdsutil" ascii wide nocase
         $ntds_ifm = "\"ac i ntds\" \"ifm\"" ascii wide nocase
     condition:
-        uint16(0) != 0x5A4D and uint32(0) != 0x00021401 and filesize < 2MB and (
-            ($rundll and ($c1 or $c2 or $c3) and $full) or
-            ($p1 or $p2 or $p3) or
-            ($reg1 and ($reg2 or $reg3)) or
-            ($ntds and $ntds_ifm)
+        _wft_rcl_is_script_target and filesize < 2MB and (
+            ($rundll and ($c1 or$c2 or $c3) and$full) or
+            ($p1 or $p2 or$p3) or
+            ($reg1 and ($reg2 or$reg3)) or
+            ($ntds and$ntds_ifm)
         )
 }
 
@@ -105,10 +127,9 @@ rule Recon_BloodHound_SharpHound {
         $b5 = "BloodHound.Common" ascii wide nocase
     condition:
         (
-            uint16(0) == 0x5A4D and uint32(0x3C) < filesize and uint32(uint32(0x3C)) == 0x00004550 and
-            filesize < 25MB and $b4 and $b5
+            _wft_rcl_is_pe and filesize < 25MB and $b4 and$b5
         ) or (
-            uint16(0) != 0x5A4D and uint32(0) != 0x00021401 and filesize < 15MB and $b2 and $b3
+            _wft_rcl_is_script_target and filesize < 15MB and $b2 and$b3
         )
 }
 
@@ -128,7 +149,7 @@ rule Ransomware_ShadowCopy_VSS_Wipe {
         $v6 = "wbadmin delete catalog -quiet" ascii wide nocase
         $v7 = "Get-WmiObject Win32_Shadowcopy | ForEach-Object {$_.Delete()}" ascii wide nocase
     condition:
-        uint16(0) != 0x5A4D and uint32(0) != 0x00021401 and filesize < 2MB and 2 of ($v*)
+        _wft_rcl_is_script_target and filesize < 2MB and 2 of ($v*)
 }
 
 rule Ransomware_LockBit_BlackCat_And_RansomNotes {
@@ -149,8 +170,8 @@ rule Ransomware_LockBit_BlackCat_And_RansomNotes {
         $tor = "Tor Browser" ascii wide nocase
         $decrypt_id = "personal ID" ascii wide nocase
     condition:
-        uint16(0) != 0x5A4D and uint32(0) != 0x00021401 and filesize < 200KB and
-        2 of ($n1, $n2, $n4, $n5, $l1, $b1) and $t2 and ($tor or $decrypt_id)
+        _wft_rcl_is_script_target and filesize < 200KB and
+        2 of ($n1, $n2,$n4, $n5,$l1, $b1) and$t2 and ($tor or$decrypt_id)
 }
 
 rule Lateral_Movement_PsExec_Impacket_WMI {
@@ -169,9 +190,9 @@ rule Lateral_Movement_PsExec_Impacket_WMI {
         $admin_share = "\\\\ADMIN$\\" ascii wide nocase
         $ps_exec = "powershell.exe -nop -w hidden" ascii wide nocase
     condition:
-        uint16(0) != 0x5A4D and uint32(0) != 0x00021401 and filesize < 2MB and (
-            ($i1 and $i2 and $redir) or
-            ($w1 and $w2 and ($admin_share or $ps_exec))
+        _wft_rcl_is_script_target and filesize < 2MB and (
+            ($i1 and $i2 and$redir) or
+            ($w1 and$w2 and ($admin_share or$ps_exec))
         )
 }
 
@@ -191,10 +212,9 @@ rule Tunnel_Chisel_Ligolo_FRP_Ngrok {
         $f1 = "github.com/fatedier/frp" ascii wide
         $f_flag = "remote_port" ascii wide
     condition:
-        uint16(0) == 0x5A4D and uint32(0x3C) < filesize and uint32(uint32(0x3C)) == 0x00004550 and
-        filesize < 35MB and $go_buildid and (
-            ($c1 and $c_flag) or
-            ($l1 and $l_flag) or
-            ($f1 and $f_flag)
+        _wft_rcl_is_pe and filesize < 35MB and $go_buildid and (
+            ($c1 and$c_flag) or
+            ($l1 and$l_flag) or
+            ($f1 and$f_flag)
         )
 }

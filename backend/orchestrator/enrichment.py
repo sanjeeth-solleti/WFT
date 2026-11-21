@@ -16,7 +16,9 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
+import tempfile
 import threading
 import time
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
@@ -54,6 +56,7 @@ def _get_rapidocr_cls() -> Optional[Any]:
         except ImportError:
             RapidOCR = None
     return RapidOCR
+
 
 try:
     import pefile
@@ -291,7 +294,6 @@ def parse_stinger_report_content(content: str) -> List[Dict[str, str]]:
                             )
 
     # 2. Scan normalized plain-text lines for Stinger <PRE> / text report detections
-
     lines = [ln.rstrip("\r") for ln in norm.splitlines()]
     last_candidate_path: Optional[str] = None
 
@@ -409,14 +411,41 @@ class FileEnrichmentEngine:
     }
 
     _NON_YARA_BINARY_EXTENSIONS: Set[str] = {
-        ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tiff", ".tif", ".ico",
-        ".mp4", ".mp3", ".wav", ".webm", ".ogg", ".avi", ".mov",
-        ".duckdb", ".wal", ".evtx", ".sqlite", ".sqlite3", ".db",
+        ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tiff", ".tif", ".ico", ".svg",
+        ".mp4", ".mp3", ".wav", ".webm", ".ogg", ".avi", ".mov", ".mkv", ".flac",
+        ".duckdb", ".wal", ".evtx", ".etl", ".sqlite", ".sqlite3", ".db", ".db-wal", ".db-shm",
+        ".pf", ".dat", ".edb", ".hve", ".regtrans-ms", ".blf", ".log1", ".log2",
+        ".mui", ".cat", ".nls", ".ttf", ".otf", ".woff", ".woff2", ".eot",
+        ".pak", ".asar", ".vdm", ".css", ".map",
     }
     _EXCLUDED_WALK_DIRS: Set[str] = {
         "stinger_reports", "stinger_logs", "bulk_extractor_out", "__pycache__", ".git",
         "clean_hives", "carved_thumbnails",
     }
+    _YARA_SKIP_STAGING_ROOTS: Set[str] = {
+        "registry", "mft", "usnjrnl", "logs", "evtx", "eventlogs",
+        "srum", "wbem", "prefetch", "amcache", "shimcache",
+        "shellbags", "jumplists", "thumbcache",
+    }
+    _YARA_SKIP_PATH_FRAGMENTS: Tuple[str, ...] = (
+        "\\windows defender\\definition updates\\",
+        "\\windows defender\\scans\\",
+        "\\windows defender\\quarantine\\",
+        "\\windows\\winsxs\\backup\\",
+        "\\windows\\winsxs\\manifests\\",
+        "\\cache\\cache_data\\",
+        "\\code cache\\",
+        "\\gpucache\\",
+    )
+    _BINARY_CONTAINER_MAGICS: Tuple[bytes, ...] = (
+        b"ElfFile\x00",          # EVTX
+        b"regf",                 # Registry hive
+        b"SQLite format 3\x00",  # SQLite
+        b"MAM\x04",              # Win10/11 compressed Prefetch
+        b"SCCA",                 # Prefetch
+        b"\x1f\x8b",             # GZIP
+        b"%PDF-",                # PDF
+    )
 
     def _log(self, message: str, level: str = "INFO") -> None:
         print(f"[{level}] [FileEnrichmentEngine] {message}")
@@ -426,7 +455,7 @@ class FileEnrichmentEngine:
         case_id: str,
         staging_dir: Optional[Union[str, Path]] = None,
         rules_path: Optional[Union[str, Path]] = None,
-        max_workers: int = 16,
+        max_workers: int = 25,
     ) -> None:
         self.case_id = case_id
         self.staging_dir = (
@@ -438,7 +467,7 @@ class FileEnrichmentEngine:
             Path(rules_path).resolve() if rules_path is not None else None
         )
         self.rules_path: Path = self._explicit_rules_path or DEFAULT_YARA_FILE
-        default_workers = min(16, os.cpu_count() or 8)
+        default_workers = 25
         raw_workers = default_workers if max_workers is None else int(max_workers)
         self.max_workers: int = max(1, min(32, raw_workers if raw_workers > 0 else default_workers))
         self._ocr_engine: Optional[Any] = None
@@ -884,14 +913,46 @@ class FileEnrichmentEngine:
         raw_entries.sort(key=lambda item: (item[0], str(item[1]).lower()))
         return [(p, logical) for _, p, logical in raw_entries]
 
-    def _is_yara_candidate(self, file_path: Path, data: bytes) -> bool:
+    def _is_yara_candidate(self, file_path: Path, data: bytes, logical_path: str = "") -> bool:
+        if not data:
+            return False
+
+        # Skip Defender signature updates, WinSxS manifests, and browser cache blobs
+        low_logical = logical_path.replace("/", "\\").lower()
+        if any(frag in low_logical for frag in self._YARA_SKIP_PATH_FRAGMENTS):
+            return False
+
+        # Skip forensic OS metadata staging roots (Registry, MFT, EVTX, Prefetch, SRUM, etc.)
+        try:
+            rel_parts = file_path.resolve().relative_to(self.staging_dir).parts
+            if rel_parts and rel_parts[0].lower() in self._YARA_SKIP_STAGING_ROOTS:
+                return False
+        except ValueError:
+            pass
+
         ext = file_path.suffix.lower()
-        if ext in self.YARA_EXTENSIONS:
-            return True
+        if ext in self._NON_YARA_BINARY_EXTENSIONS:
+            return False
+
+        # Always scan PEs (MZ header) and LNK files
         if len(data) >= 2 and data[:2] == b"MZ":
             return True
-        if ext not in self._NON_YARA_BINARY_EXTENSIONS and len(data) <= 2 * 1024 * 1024:
+        if len(data) >= 8 and data[:8] == b"\x4c\x00\x00\x00\x01\x14\x02\x00":
             return True
+
+        # Reject known binary forensic containers by magic bytes
+        if any(data.startswith(magic) for magic in self._BINARY_CONTAINER_MAGICS):
+            return False
+
+        if ext in self.YARA_EXTENSIONS:
+            return True
+
+        # Only scan extensionless files if small and mostly printable text (e.g. scripts/configs)
+        if ext == "" and len(data) <= 512 * 1024:
+            sample = data[:4096]
+            if b"\x00" not in sample:
+                return True
+
         return False
 
     def compile_yara_rules(self) -> Any:
@@ -998,11 +1059,22 @@ class FileEnrichmentEngine:
 
         compiled_rules = self.compile_yara_rules()
         thread_local = threading.local()
+        sha_cache_lock = threading.Lock()
+        # Cache YARA scan outcomes per SHA-256 to avoid rescanning duplicate WinSxS/VSS copies
+        sha_yara_cache: Dict[str, Tuple[List[str], List[Dict[str, Any]], List[Tuple[Any, ...]]]] = {}
 
         def _get_thread_scanner() -> Any:
             scanner = getattr(thread_local, "scanner", None)
             if scanner is None:
                 scanner = yara_x.Scanner(compiled_rules)
+                try:
+                    scanner.set_timeout(15)
+                except Exception:
+                    pass
+                try:
+                    scanner.max_matches_per_pattern(50)
+                except Exception:
+                    pass
                 thread_local.scanner = scanner
             return scanner
 
@@ -1021,87 +1093,115 @@ class FileEnrichmentEngine:
             matched_rule_names: List[str] = []
             file_offsets_list: List[Dict[str, Any]] = []
 
-            if self._is_yara_candidate(file_path, data) and file_size > 0:
-                scanner = _get_thread_scanner()
-                scan_results = scanner.scan(data)
-                matching_rules = list(scan_results.matching_rules)
+            if self._is_yara_candidate(file_path, data, logical_path) and file_size > 0:
+                with sha_cache_lock:
+                    cached = sha_yara_cache.get(sha256)
 
-                for rule in matching_rules:
-                    rule_name = rule.identifier
-                    rule_ns = rule.namespace or "default"
-                    matched_rule_names.append(rule_name)
+                if cached is not None:
+                    matched_rule_names, file_offsets_list, cached_rule_tuples = cached
+                else:
+                    matched_rule_names = []
+                    file_offsets_list = []
+                    cached_rule_tuples: List[Tuple[Any, ...]] = []
+                    scanner = _get_thread_scanner()
+                    try:
+                        scan_results = scanner.scan(data)
+                        matching_rules = list(scan_results.matching_rules)
+                    except Exception as scan_err:
+                        self._log(
+                            f"Warning: YARA-X scan skipped on {file_path.name} ({scan_err})",
+                            level="WARNING",
+                        )
+                        matching_rules = []
 
-                    meta_dict = dict(rule.metadata) if hasattr(rule, "metadata") else {}
-                    severity = str(meta_dict.get("severity", "High"))
-                    cat = str(meta_dict.get("category", "Malware & YARA"))
-                    desc = str(meta_dict.get("description", f"Rule {rule_name} matched"))
-                    mitre = str(meta_dict.get("mitre_attack", ""))
+                    for rule in matching_rules:
+                        rule_name = rule.identifier
+                        rule_ns = rule.namespace or "default"
+                        matched_rule_names.append(rule_name)
 
-                    emitted_for_rule = False
-                    for pattern in rule.patterns:
-                        pat_matches = list(pattern.matches)
-                        if not pat_matches:
-                            continue
-                        pat_id = pattern.identifier
-                        for match in pat_matches:
-                            emitted_for_rule = True
-                            offset = int(match.offset)
-                            length = int(match.length)
-                            match_hex = data[offset : offset + min(length, 256)].hex()
+                        meta_dict = dict(rule.metadata) if hasattr(rule, "metadata") else {}
+                        severity = str(meta_dict.get("severity", "High"))
+                        cat = str(meta_dict.get("category", "Malware & YARA"))
+                        desc = str(meta_dict.get("description", f"Rule {rule_name} matched"))
+                        mitre = str(meta_dict.get("mitre_attack", ""))
 
-                            file_offsets_list.append(
-                                {
-                                    "rule": rule_name,
-                                    "identifier": pat_id,
-                                    "offset": offset,
-                                    "length": length,
-                                    "data_hex": match_hex,
-                                    "severity": severity,
-                                    "category": cat,
-                                    "description": desc,
-                                    "mitre_attack": mitre,
-                                }
-                            )
-                            yara_hit_rows.append(
-                                [
-                                    logical_path,
-                                    file_path.name,
-                                    ext,
-                                    file_size,
-                                    sha256,
-                                    rule_name,
-                                    rule_ns,
-                                    pat_id,
-                                    offset,
-                                    length,
-                                    match_hex,
-                                    severity,
-                                    cat,
-                                    desc,
-                                    mitre,
-                                ]
-                            )
+                        primary_pat_id = "condition"
+                        primary_offset = 0
+                        primary_length = 0
+                        primary_hex = ""
+                        total_rule_matches = 0
+                        rule_offsets_recorded = 0
 
-                    if not emitted_for_rule:
-                        yara_hit_rows.append(
-                            [
-                                logical_path,
-                                file_path.name,
-                                ext,
-                                file_size,
-                                sha256,
+                        for pattern in rule.patterns:
+                            pat_matches = list(pattern.matches)
+                            if not pat_matches:
+                                continue
+                            pat_id = pattern.identifier
+                            for match in pat_matches:
+                                total_rule_matches += 1
+                                offset = int(match.offset)
+                                length = int(match.length)
+                                if total_rule_matches == 1:
+                                    primary_pat_id = pat_id
+                                    primary_offset = offset
+                                    primary_length = length
+                                    primary_hex = data[offset : offset + min(length, 256)].hex()
+                                if rule_offsets_recorded < 25:
+                                    rule_offsets_recorded += 1
+                                    match_hex = data[offset : offset + min(length, 128)].hex()
+                                    file_offsets_list.append(
+                                        {
+                                            "rule": rule_name,
+                                            "identifier": pat_id,
+                                            "offset": offset,
+                                            "length": length,
+                                            "data_hex": match_hex,
+                                            "severity": severity,
+                                            "category": cat,
+                                            "description": desc,
+                                            "mitre_attack": mitre,
+                                        }
+                                    )
+
+                        desc_with_count = (
+                            f"{desc} ({total_rule_matches} pattern matches)"
+                            if total_rule_matches > 1
+                            else desc
+                        )
+                        cached_rule_tuples.append(
+                            (
                                 rule_name,
                                 rule_ns,
-                                "condition",
-                                0,
-                                0,
-                                "",
+                                primary_pat_id,
+                                primary_offset,
+                                primary_length,
+                                primary_hex,
                                 severity,
                                 cat,
-                                desc,
+                                desc_with_count,
                                 mitre,
-                            ]
+                            )
                         )
+
+                    with sha_cache_lock:
+                        sha_yara_cache[sha256] = (
+                            matched_rule_names,
+                            file_offsets_list,
+                            cached_rule_tuples,
+                        )
+
+                # Emit exactly ONE row per (file, rule) to prevent offset row explosion
+                for rule_tuple in cached_rule_tuples:
+                    yara_hit_rows.append(
+                        [
+                            logical_path,
+                            file_path.name,
+                            ext,
+                            file_size,
+                            sha256,
+                            *rule_tuple,
+                        ]
+                    )
 
             json_rules = json.dumps(sorted(set(matched_rule_names))) if matched_rule_names else None
             json_offsets = json.dumps(file_offsets_list) if file_offsets_list else None
@@ -1122,7 +1222,7 @@ class FileEnrichmentEngine:
         with ThreadPoolExecutor(max_workers=max(1, min(workers, 6))) as pool:
             worker_results = list(pool.map(_scan_single_file, scan_items))
 
-        # Deduplicate identical staged copies (e.g. UserFiles/<u >/foo.ps1 vs flat Enrichment/foo.ps1)
+        # Deduplicate identical staged copies (e.g. UserFiles/<u>/foo.ps1 vs flat Enrichment/foo.ps1)
         seen_logical: Set[Tuple[str, str]] = set()
         seen_rich_sha_name: Set[Tuple[str, str]] = set()
         enrichment_rows: List[List[Any]] = []
@@ -1749,7 +1849,6 @@ class FileEnrichmentEngine:
                     shutil.rmtree(stinger_mirror_dir, ignore_errors=True)
 
         # 2. Parallel Multi-Indicator PE & Script Heuristics
-
         def _eval_heuristics(item: Tuple[Path, str]) -> Optional[Tuple[str, str, str, List[List[Any]]]]:
             file_path, logical_path = item
             ext = file_path.suffix.lower()

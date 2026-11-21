@@ -161,7 +161,7 @@ def _run_seeder_cli() -> None:
             ("source_path", r"E:\Forensics\WKSTN-FIN-09.E01"),
             ("source_type", "Disk Image (E01)"),
             ("sha256", sample_sha),
-            ("max_workers", "16"),
+            ("max_workers", "25"),
             ("enable_vss", "true"),
             ("enable_data_carving", "true"),
             ("enable_bulk_extractor", "true"),
@@ -869,9 +869,9 @@ def test_process_wizard_initial_options_presets_keywords_and_tool_paths(
         cb = page.get_by_test_id(f"artifact-checkbox-{heavy_id}")
         assert cb.count() == 1
 
-    # Verify max_workers defaults to 16 and updates cleanly within 1..32
+    # Verify max_workers defaults to 25 and updates cleanly within 1..32
     workers_input = page.get_by_test_id("max-workers-input")
-    assert workers_input.input_value() == "16"
+    assert workers_input.input_value() == "25"
     workers_input.fill("24")
     assert page.get_by_text("24 Workers").is_visible()
 

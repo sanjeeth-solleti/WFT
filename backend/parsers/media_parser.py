@@ -1029,8 +1029,11 @@ class MediaParser(BaseParser):
                                 return None
                             if isinstance(val, datetime):
                                 return _to_naive_utc(val)
-                            dt_v = datetime.fromisoformat(str(val).strip().replace("Z", "+00:00"))
-                            return _to_naive_utc(dt_v)
+                            try:
+                                dt_v = datetime.fromisoformat(str(val).strip().replace("Z", "+00:00"))
+                                return _to_naive_utc(dt_v)
+                            except ValueError:
+                                return None
         except Exception:
             pass
 

@@ -1,19 +1,33 @@
 /*
-    WFT Enterprise DFIR Suite - Advanced Threats, BYOVD Drivers, Syscall Loaders, RMM Abuse & Exfiltration
+    WFT Enterprise DFIR Suite - Advanced Threats, BYOVD Drivers, Syscall Loaders & Exfiltration
     File: rules/advanced_threats_evasion_exfil.yar
-    Zero-false-positive rules covering:
-      1. BYOVD (Bring Your Own Vulnerable Driver) EDR killers (RTCore64, gdrv, Zemana, mhyprot2, AuKill)
-      2. Direct Syscall / Hell's Gate / SysWhispers & NTDLL Unhooking Loaders
-      3. Process Hollowing & APC Injection Shellcode Loaders
-      4. Weaponized LNK Shortcuts & Office VBA Macro AutoExec Droppers
-      5. Data Exfiltration Tools (Rclone config/binary, MegaCmd, WinSCP automation scripts)
-      6. Cryptocurrency Miners (XMRig / Stratum Monero pools)
-      7. Unauthorized RMM & RAT Portable Clients (NetSupport, MeshAgent, RustDesk, ScreenConnect)
 */
+
+private rule _wft_adv_is_pe {
+    condition:
+        uint16(0) == 0x5A4D and
+        filesize > 0x40 and
+        uint32(0x3C) < filesize - 4 and
+        uint32(uint32(0x3C)) == 0x00004550
+}
+
+private rule _wft_adv_is_non_binary_container {
+    condition:
+        uint16(0) != 0x5A4D and                                      // PE
+        not (uint32(0) == 0x0000004C and uint32(4) == 0x00021401) and // LNK
+        uint32(0) != 0x46666C45 and                                  // EVTX (ElfFile)
+        uint32(0) != 0x66676572 and                                  // Registry hive (regf)
+        uint32(0) != 0x694C5153 and                                  // SQLite
+        uint16(0) != 0x4B50 and                                      // ZIP/DOCX/JAR
+        uint32(0) != 0xE011CFD0 and                                  // OLE2
+        uint32(0) != 0x46445025 and                                  // PDF
+        uint32(0) != 0x464C457F and                                  // ELF
+        uint16(0) != 0x8B1F                                          // GZIP
+}
 
 rule BYOVD_Vulnerable_Driver_EDR_Killer {
     meta:
-        description = "Detects Bring Your Own Vulnerable Driver (BYOVD) kernel drivers and EDR killer tools (AuKill, Terminator, Backstab)"
+        description = "Detects Bring Your Own Vulnerable Driver (BYOVD) EDR killer loaders and known abused kernel drivers"
         author = "WFT Enterprise DFIR Suite"
         severity = "Critical"
         mitre_attack = "T1068"
@@ -23,27 +37,37 @@ rule BYOVD_Vulnerable_Driver_EDR_Killer {
         $ms_os1 = { 4D 00 69 00 63 00 72 00 6F 00 73 00 6F 00 66 00 74 00 AE 00 20 00 57 00 69 00 6E 00 64 00 6F 00 77 00 73 00 AE 00 20 00 4F 00 70 00 65 00 72 00 61 00 74 00 69 00 6E 00 67 00 20 00 53 00 79 00 73 00 74 00 65 00 6D 00 }
         $ms_os2 = "Microsoft Windows Operating System" wide
         $dev1 = "\\\\.\\RTCore64" ascii wide nocase
-        $dev2 = "\\\\.\\GIO" ascii wide
+        $dev2 = "\\\\.\\GIO" ascii wide fullword
         $dev3 = "\\\\.\\ZemanaAntiMalware" ascii wide nocase
         $dev4 = "\\\\.\\mhyprot2" ascii wide nocase
         $dev5 = "\\\\.\\DBUtil_2_3" ascii wide nocase
         $dev6 = "\\\\.\\aswSP_Avar" ascii wide nocase
         $ioctl = "DeviceIoControl" ascii wide
+        $priv1 = "SeDebugPrivilege" ascii wide
+        $priv2 = "SeLoadDriverPrivilege" ascii wide
+        $edr1 = "MsMpEng.exe" ascii wide nocase
+        $edr2 = "CSFalconService.exe" ascii wide nocase
+        $edr3 = "SentinelAgent.exe" ascii wide nocase
+        $edr4 = "PPL" ascii wide fullword
         $k1 = "AuKill" ascii wide
         $k2 = "Backstab" ascii wide
         $k3 = "ZwTerminateProcess" ascii wide
         $k4 = "MmMapIoSpace" ascii wide
+        $drv1 = "IoCreateDevice" ascii wide
     condition:
-        uint16(0) == 0x5A4D and uint32(0x3C) < filesize and uint32(uint32(0x3C)) == 0x00004550 and
-        filesize < 15MB and not ($ms_corp and ($ms_os1 or $ms_os2)) and (
-            (any of ($dev*) and ($ioctl or $k3 or $k4)) or
-            (($k1 or $k2) and $ioctl and $k3)
+        _wft_adv_is_pe and filesize < 10MB and not ($ms_corp and ($ms_os1 or $ms_os2)) and (
+            // Known vulnerable driver binary itself (kernel-mode)
+            (any of ($dev1, $dev3, $dev4, $dev5, $dev6) and $drv1 and ($k3 or $k4)) or
+            // User-mode EDR killer abusing a vulnerable driver
+            (any of ($dev*) and $ioctl and (any of ($priv*) or any of ($edr*) or $k3)) or
+            // Named EDR killers
+            (($k1 or $k2) and $ioctl and ($k3 or any of ($priv*)))
         )
 }
 
 rule Evasion_SysWhispers_Direct_Syscalls_And_Unhooking {
     meta:
-        description = "Detects SysWhispers2/3 direct syscall stubs, Hell's Gate SSN resolution, and KnownDlls NTDLL unhooking"
+        description = "Detects SysWhispers2/3 direct syscall stubs and KnownDlls NTDLL unhooking loaders"
         author = "WFT Enterprise DFIR Suite"
         severity = "Critical"
         mitre_attack = "T1055"
@@ -57,23 +81,23 @@ rule Evasion_SysWhispers_Direct_Syscalls_And_Unhooking {
         $sw3 = "SW2_PopulateSyscallList" ascii wide
         $sw4 = "SW3_PopulateSyscallList" ascii wide
         $unhook1 = "\\KnownDlls\\ntdll.dll" ascii wide nocase
-        $unhook2 = "NtMapViewOfSection" ascii wide
-        $unhook3 = "VirtualProtect" ascii wide
+        $unhook2 = "NtOpenSection" ascii wide
+        $unhook3 = "NtMapViewOfSection" ascii wide
+        $unhook4 = "VirtualProtect" ascii wide
         $api1 = "NtAllocateVirtualMemory" ascii wide
         $api2 = "NtWriteVirtualMemory" ascii wide
         $api3 = "NtCreateThreadEx" ascii wide
         $api4 = "NtProtectVirtualMemory" ascii wide
     condition:
-        uint16(0) == 0x5A4D and uint32(0x3C) < filesize and uint32(uint32(0x3C)) == 0x00004550 and
-        filesize < 20MB and not ($ms_corp and ($ms_os1 or $ms_os2)) and (
+        _wft_adv_is_pe and filesize < 10MB and not ($ms_corp and ($ms_os1 or $ms_os2)) and (
             2 of ($sw*) or
-            ($unhook1 and $unhook2 and $unhook3 and 3 of ($api*))
+            (filesize < 5MB and $unhook1 and $unhook2 and $unhook3 and $unhook4 and 3 of ($api*))
         )
 }
 
 rule Loader_Process_Hollowing_And_APC_Injection {
     meta:
-        description = "Detects Process Hollowing (NtUnmapViewOfSection + WriteProcessMemory + SetThreadContext) and EarlyBird APC injection"
+        description = "Detects Process Hollowing (NtUnmapViewOfSection + WriteProcessMemory + Get/SetThreadContext) and EarlyBird APC injection"
         author = "WFT Enterprise DFIR Suite"
         severity = "High"
         mitre_attack = "T1055.012"
@@ -82,23 +106,34 @@ rule Loader_Process_Hollowing_And_APC_Injection {
         $ms_corp = "Microsoft Corporation" wide
         $ms_os1 = { 4D 00 69 00 63 00 72 00 6F 00 73 00 6F 00 66 00 74 00 AE 00 20 00 57 00 69 00 6E 00 64 00 6F 00 77 00 73 00 AE 00 20 00 4F 00 70 00 65 00 72 00 61 00 74 00 69 00 6E 00 67 00 20 00 53 00 79 00 73 00 74 00 65 00 6D 00 }
         $ms_os2 = "Microsoft Windows Operating System" wide
-        $dotnet = "_CorExeMain" ascii
-        $dotnet_dll = "_CorDllMain" ascii
+        $excl1 = "_CorExeMain" ascii
+        $excl2 = "_CorDllMain" ascii
+        $excl3 = "cygwin1.dll" ascii nocase
+        $excl4 = "msys-2.0.dll" ascii nocase
+        $excl5 = "Go build ID:" ascii
+        $excl6 = "PyInstaller" ascii
+        $excl7 = "Inno Setup" ascii wide
+        $excl8 = "NullsoftInst" ascii
         $h1 = "CreateProcessA" ascii wide
         $h2 = "CreateProcessW" ascii wide
         $h3 = "NtUnmapViewOfSection" ascii wide
         $h4 = "ZwUnmapViewOfSection" ascii wide
         $h5 = "VirtualAllocEx" ascii wide
         $h6 = "WriteProcessMemory" ascii wide
-        $h7 = "SetThreadContext" ascii wide
-        $h8 = "Wow64SetThreadContext" ascii wide
-        $h9 = "ResumeThread" ascii wide
-        $apc2 = "NtQueueApcThread" ascii wide
+        $h7 = "GetThreadContext" ascii wide
+        $h8 = "Wow64GetThreadContext" ascii wide
+        $h9 = "SetThreadContext" ascii wide
+        $h10 = "Wow64SetThreadContext" ascii wide
+        $h11 = "ResumeThread" ascii wide
+        $h12 = "ReadProcessMemory" ascii wide
+        $apc1 = "NtQueueApcThread" ascii wide
+        $apc2 = "NtTestAlert" ascii wide
     condition:
-        uint16(0) == 0x5A4D and uint32(0x3C) < filesize and uint32(uint32(0x3C)) == 0x00004550 and
-        filesize < 10MB and not ($ms_corp and ($ms_os1 or $ms_os2)) and not $dotnet and not $dotnet_dll and (
-            (($h1 or $h2) and ($h3 or $h4) and $h5 and $h6 and ($h7 or $h8) and $h9) or
-            (($h1 or $h2) and $h5 and $h6 and $apc2 and $h9)
+        _wft_adv_is_pe and filesize < 3MB and
+        not ($ms_corp and ($ms_os1 or $ms_os2)) and
+        not any of ($excl*) and (
+            (($h1 or $h2) and ($h3 or $h4) and $h5 and $h6 and $h12 and ($h7 or $h8) and ($h9 or $h10) and $h11) or
+            (($h1 or $h2) and $h5 and $h6 and $apc1 and $apc2 and $h11)
         )
 }
 
@@ -135,27 +170,31 @@ rule InitialAccess_Weaponized_LNK_Shortcut {
 
 rule InitialAccess_Office_Macro_AutoExec_Dropper {
     meta:
-        description = "Detects OLE2 Office documents (.doc, .xls) containing AutoOpen/Document_Open VBA macros with shell/network execution"
+        description = "Detects OLE2 Office documents (.doc, .xls) containing AutoOpen/Document_Open VBA macros with shell/network dropper behavior"
         author = "WFT Enterprise DFIR Suite"
         severity = "High"
         mitre_attack = "T1566.001"
         category = "Initial Access"
     strings:
-        $vba = "VBA" ascii wide
+        $vba1 = "_VBA_PROJECT" ascii wide
+        $vba2 = "Attribut" ascii
         $a1 = "AutoOpen" ascii wide nocase
         $a2 = "Document_Open" ascii wide nocase
         $a3 = "Workbook_Open" ascii wide nocase
         $a4 = "Auto_Open" ascii wide nocase
-        $x1 = "WScript.Shell" ascii wide nocase
-        $x2 = "Shell(" ascii wide nocase
-        $x3 = "CreateObject(" ascii wide nocase
-        $x4 = "XMLHTTP" ascii wide nocase
-        $x5 = "Adodb.Stream" ascii wide nocase
-        $x6 = "URLDownloadToFileA" ascii wide nocase
-        $x7 = "powershell" ascii wide nocase
+        $s1 = "WScript.Shell" ascii wide nocase
+        $s2 = "Shell(" ascii wide nocase
+        $s3 = "CreateObject(" ascii wide nocase
+        $net1 = "XMLHTTP" ascii wide nocase
+        $net2 = "Adodb.Stream" ascii wide nocase
+        $net3 = "URLDownloadToFileA" ascii wide nocase
+        $net4 = "powershell" ascii wide nocase
+        $net5 = "cmd.exe" ascii wide nocase
+        $net6 = "mshta" ascii wide nocase
+        $net7 = "certutil" ascii wide nocase
     condition:
         uint32(0) == 0xE011CFD0 and filesize < 20MB and
-        $vba and any of ($a*) and 2 of ($x*)
+        ($vba1 or $vba2) and any of ($a*) and any of ($s*) and any of ($net*)
 }
 
 rule Exfiltration_Rclone_And_Mega_Config_Or_Binary {
@@ -180,10 +219,9 @@ rule Exfiltration_Rclone_And_Mega_Config_Or_Binary {
         $arch = ".7z" ascii wide nocase
     condition:
         (
-            uint16(0) == 0x5A4D and uint32(0x3C) < filesize and uint32(uint32(0x3C)) == 0x00004550 and
-            filesize < 65MB and $r1 and $r_flag1 and $r_flag2
+            _wft_adv_is_pe and filesize < 65MB and $r1 and $r_flag1 and $r_flag2
         ) or (
-            uint16(0) != 0x5A4D and filesize < 1MB and (
+            _wft_adv_is_non_binary_container and filesize < 1MB and (
                 (($c1 or $c3) and $c_user and $c_pass) or
                 ($m1 and $m2 and ($r2 or $r3 or $arch))
             )
@@ -206,9 +244,8 @@ rule Impact_XMRig_Cryptominer {
         $cfg_donate = "\"donate-level\"" ascii wide
     condition:
         (
-            uint16(0) == 0x5A4D and uint32(0x3C) < filesize and uint32(uint32(0x3C)) == 0x00004550 and
-            filesize < 30MB and $x1 and ($x2 or $x3) and ($rx or $cfg_donate)
+            _wft_adv_is_pe and filesize < 30MB and $x1 and ($x2 or $x3) and ($rx or $cfg_donate)
         ) or (
-            uint16(0) != 0x5A4D and filesize < 1MB and ($x2 or $x3) and $cfg_pools and $cfg_donate
+            _wft_adv_is_non_binary_container and filesize < 1MB and ($x2 or $x3) and $cfg_pools and $cfg_donate
         )
 }

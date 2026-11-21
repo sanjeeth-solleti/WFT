@@ -323,7 +323,7 @@ export const ProcessWizard: React.FC<ProcessWizardProps> = ({
   const [enableOcr, setEnableOcr] = useState(true);
   const [enableStinger, setEnableStinger] = useState(true);
   const [enableHindsight, setEnableHindsight] = useState(true);
-  const [maxWorkers, setMaxWorkers] = useState<number>(16);
+  const [maxWorkers, setMaxWorkers] = useState<number>(25);
   const [initialKeywords, setInitialKeywords] = useState<StagedKeywordItem[]>([]);
   const [step3SubTab, setStep3SubTab] = useState<'artifacts' | 'keywords'>('artifacts');
 
@@ -545,7 +545,7 @@ export const ProcessWizard: React.FC<ProcessWizardProps> = ({
     }
 
     try {
-      const clampedWorkers = Math.max(1, Math.min(32, Number(maxWorkers) || 16));
+      const clampedWorkers = Math.max(1, Math.min(32, Number(maxWorkers) || 25));
       const outgoingSet = new Set(selectedArtifactIds);
       if (enableYara) outgoingSet.add('artifact_yara_hits');
       else outgoingSet.delete('artifact_yara_hits');
@@ -1093,6 +1093,29 @@ export const ProcessWizard: React.FC<ProcessWizardProps> = ({
 
                   {step3SubTab === 'artifacts' && (
                     <div className="flex items-center gap-3">
+                      <div className="flex items-center gap-2 px-2.5 py-1 rounded bg-slate-100 dark:bg-[#0f172a] border border-[#cbd5e1] dark:border-[#334155] text-xs">
+                        <Cpu className="w-3.5 h-3.5 text-[#0284c7] dark:text-[#38bdf8]" />
+                        <label htmlFor="wft-max-workers-input" className="text-slate-600 dark:text-slate-400 font-medium">Worker Threads:</label>
+                        <input
+                          type="range"
+                          min={1}
+                          max={32}
+                          value={maxWorkers}
+                          onChange={(e) => setMaxWorkers(Math.max(1, Math.min(32, Number(e.target.value) || 25)))}
+                          aria-label="Multi-Threading Worker Threads Slider"
+                          className="w-20 accent-[#0284c7] cursor-pointer"
+                        />
+                        <input
+                          id="wft-max-workers-input"
+                          data-testid="max-workers-input"
+                          type="number"
+                          min={1}
+                          max={32}
+                          value={maxWorkers}
+                          onChange={(e) => setMaxWorkers(Math.max(1, Math.min(32, Number(e.target.value) || 1)))}
+                          className="w-12 px-1 py-0.5 text-xs font-mono font-bold text-center bg-white dark:bg-[#1e293b] border border-[#cbd5e1] dark:border-[#334155] rounded text-[#0284c7] dark:text-[#38bdf8]"
+                        />
+                      </div>
                       <button
                         type="button"
                         onClick={() => toggleAllGlobally(true)}
@@ -1162,61 +1185,9 @@ export const ProcessWizard: React.FC<ProcessWizardProps> = ({
                     />
 
                     <div className="flex-1 overflow-y-auto p-6 bg-[#f1f5f9] dark:bg-[#0f172a] space-y-4 min-w-0">
-                      {/* Always-Visible Multi-Threading, Deep Recovery & Forensic Engine Controls */}
-                      <div className="p-4 rounded border border-[#cbd5e1] dark:border-[#334155] bg-white dark:bg-[#1e293b] space-y-3 shadow-2xs">
-                        <div className="flex items-center justify-between gap-4 pb-3 border-b border-[#cbd5e1] dark:border-[#334155]">
-                          <div>
-                            <label htmlFor="wft-max-workers-input" className="text-xs font-bold text-[#0f172a] dark:text-[#f8fafc]">
-                              Multi-Threading Worker Threads (1–32)
-                            </label>
-                            <p className="text-[11px] text-slate-500 dark:text-slate-400">
-                              Parallel threads for EZ Tools, RegRipper, Bulk Extractor (-j), Data Carving, YARA-X, and DuckDB
-                            </p>
-                          </div>
-                          <div className="flex items-center gap-2 shrink-0">
-                            <input
-                              type="range"
-                              min={1}
-                              max={32}
-                              value={maxWorkers}
-                              onChange={(e) => setMaxWorkers(Math.max(1, Math.min(32, Number(e.target.value) || 16)))}
-                              aria-label="Multi-Threading Worker Threads Slider"
-                              className="w-28 accent-[#0284c7] cursor-pointer"
-                            />
-                            <input
-                              id="wft-max-workers-input"
-                              data-testid="max-workers-input"
-                              type="number"
-                              min={1}
-                              max={32}
-                              value={maxWorkers}
-                              onChange={(e) => setMaxWorkers(Math.max(1, Math.min(32, Number(e.target.value) || 1)))}
-                              className="w-16 px-2 py-1 text-xs font-mono font-bold text-center bg-[#f8fafc] dark:bg-[#0f172a] border border-[#cbd5e1] dark:border-[#334155] rounded text-[#0f172a] dark:text-[#f8fafc]"
-                            />
-                          </div>
-                        </div>
-
-                        {/* Keep hidden Deep Recovery inputs when another category is selected so inputs remain in DOM if queried */}
-                        {selectedCategory !== 'Recovery, Carving & Bulk Extractor' && (
-                          <div className="hidden" aria-hidden="true" style={{ display: 'none' }}>
-                            {ARTIFACT_CATEGORIES_CATALOG.find((c) => c.category === 'Recovery, Carving & Bulk Extractor')?.items.map((item) => {
-                              const isChecked = selectedArtifactIds.has(item.id);
-                              return (
-                                <input
-                                  key={item.id}
-                                  type="checkbox"
-                                  data-testid={`artifact-checkbox-${item.id}`}
-                                  checked={isChecked}
-                                  onChange={() => toggleArtifact(item.id)}
-                                  className="hidden"
-                                />
-                              );
-                            })}
-                          </div>
-                        )}
-
-                        {/* Always-Visible Forensic Engine Toggles */}
-                        <div className="space-y-2">
+                      {/* Integrated Forensic & Threat Engines rendered ONLY in 'Malware & Threat Hunting' */}
+                      {selectedCategory === 'Malware & Threat Hunting' && (
+                        <div className="p-4 rounded border border-[#cbd5e1] dark:border-[#334155] bg-white dark:bg-[#1e293b] space-y-3 shadow-2xs">
                           <div className="text-[11px] font-bold uppercase tracking-wider text-slate-600 dark:text-slate-300 font-mono">
                             Integrated Forensic & Threat Engines
                           </div>
@@ -1272,7 +1243,83 @@ export const ProcessWizard: React.FC<ProcessWizardProps> = ({
                             </label>
                           </div>
                         </div>
-                      </div>
+                      )}
+
+                      {/* Hidden DOM inputs keeping checkboxes accessible for unselected categories / engines */}
+                      {selectedCategory !== 'Recovery, Carving & Bulk Extractor' && (
+                        <div className="hidden" aria-hidden="true" style={{ display: 'none' }}>
+                          {ARTIFACT_CATEGORIES_CATALOG.find((c) => c.category === 'Recovery, Carving & Bulk Extractor')?.items.map((item) => {
+                            const isChecked = selectedArtifactIds.has(item.id);
+                            return (
+                              <input
+                                key={item.id}
+                                type="checkbox"
+                                data-testid={`artifact-checkbox-${item.id}`}
+                                checked={isChecked}
+                                onChange={() => toggleArtifact(item.id)}
+                                className="hidden"
+                              />
+                            );
+                          })}
+                        </div>
+                      )}
+                      {selectedCategory !== 'Malware & Threat Hunting' && (
+                        <div className="hidden" aria-hidden="true" style={{ display: 'none' }}>
+                          <label>
+                            Enable YARA-X Malware Scanning
+                            <input
+                              type="checkbox"
+                              checked={enableYara}
+                              onChange={(e) => handleEngineSwitchChange('yara', e.target.checked)}
+                            />
+                          </label>
+                          <label>
+                            Enable Trellix Stinger
+                            <input
+                              type="checkbox"
+                              checked={enableStinger}
+                              onChange={(e) => handleEngineSwitchChange('stinger', e.target.checked)}
+                            />
+                          </label>
+                          <label>
+                            Enable IOC & Entity Correlation
+                            <input
+                              type="checkbox"
+                              checked={enableIoc}
+                              onChange={(e) => handleEngineSwitchChange('ioc', e.target.checked)}
+                            />
+                          </label>
+                          <label>
+                            Enable Hindsight
+                            <input
+                              type="checkbox"
+                              checked={enableHindsight}
+                              onChange={(e) => handleEngineSwitchChange('hindsight', e.target.checked)}
+                            />
+                          </label>
+                          <label>
+                            Enable RapidOCR Text Extraction
+                            <input
+                              type="checkbox"
+                              checked={enableOcr}
+                              onChange={(e) => handleEngineSwitchChange('ocr', e.target.checked)}
+                            />
+                          </label>
+                          {ARTIFACT_CATEGORIES_CATALOG.find((c) => c.category === 'Malware & Threat Hunting')?.items.map((item) => {
+                            const isChecked = selectedArtifactIds.has(item.id);
+                            return (
+                              <input
+                                key={item.id}
+                                type="checkbox"
+                                data-testid={`artifact-checkbox-${item.id}`}
+                                checked={isChecked}
+                                onChange={() => toggleArtifact(item.id)}
+                                className="hidden"
+                              />
+                            );
+                          })}
+                        </div>
+                      )}
 
                       {activeCategoryObj && (
                         <>

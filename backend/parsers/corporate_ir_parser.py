@@ -25,6 +25,7 @@ from typing import Any, Dict, Iterator, List, Optional, Set, Tuple
 from backend.parsers.base_parser import (
     BaseParser,
     copy_sqlite_with_wal,
+    safe_sqlite_text_factory,
     windows_filetime_to_datetime,
 )
 from backend.security import strip_unsafe_xml_entities
@@ -172,11 +173,14 @@ def _parse_any_timestamp(val: Any) -> Optional[datetime]:
         except ValueError:
             pass
 
-    s_dash = s.replace("/", "-")
+    s_dash = s.replace("/", "-").replace(".", "-")
     for fmt in (
         "%Y-%m-%d %H:%M:%S.%f",
         "%Y-%m-%d %H:%M:%S",
         "%Y-%m-%d",
+        "%d-%m-%Y %H:%M:%S",
+        "%d-%m-%Y %H:%M",
+        "%d-%m-%Y",
         "%a %b %d %H:%M:%S %Y",
         "%a %b %d %H:%M:%S %Y UTC",
     ):
@@ -1468,6 +1472,7 @@ class CorporateIRParser(BaseParser):
                 conn = None
                 try:
                     conn = sqlite3.connect(f"file:{temp_db.resolve().as_posix()}?mode=ro", uri=True)
+                    conn.text_factory = safe_sqlite_text_factory
                     conn.row_factory = sqlite3.Row
                     cursor = conn.cursor()
 
@@ -1633,6 +1638,7 @@ class CorporateIRParser(BaseParser):
                 conn = None
                 try:
                     conn = sqlite3.connect(f"file:{temp_db.resolve().as_posix()}?mode=ro", uri=True)
+                    conn.text_factory = safe_sqlite_text_factory
                     conn.row_factory = sqlite3.Row
                     cursor = conn.cursor()
 
@@ -1704,10 +1710,7 @@ class CorporateIRParser(BaseParser):
 
         counts["parsed_scheduled_tasks"] = self.parse_scheduled_tasks()
         counts["parsed_powershell_history"] = self.parse_powershell_history()
-        counts["parsed_rmm_logs_alias"] = 0  # removed before return
-        rmm_count = self.parse_rmm_logs()
-        del counts["parsed_rmm_logs_alias"]
-        counts["parsed_rmm_sessions"] = rmm_count
+        counts["parsed_rmm_sessions"] = self.parse_rmm_logs()
         counts["parsed_wpn_notifications"] = self.parse_wpn_database()
         counts.update(self.parse_universal_sqlite())
 

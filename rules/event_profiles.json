@@ -27,7 +27,7 @@
     "event_ids": [4768, 4769, 4770, 4771, 4624],
     "channels": ["Security"],
     "keywords": ["0x17", "RC4", "NtLmSsp", "LogonType 9", "NewCredentials"],
-    "sql": "Channel = 'Security' AND (TRY_CAST(EventId AS BIGINT) IN (4768, 4769, 4770, 4771) OR (TRY_CAST(EventId AS BIGINT) = 4624 AND regexp_matches(concat_ws(' ', *COLUMNS(lambda c: c ILIKE 'Payload%' OR c ILIKE 'MapDescription' OR c ILIKE 'ExecutableInfo' OR c ILIKE 'Channel')), 'NtLmSsp|Logon ?Type[^0-9]*9([^0-9]|$)', 'i')))"
+    "sql": "Channel = 'Security' AND (TRY_CAST(EventId AS BIGINT) IN (4768, 4769, 4770, 4771) OR (TRY_CAST(EventId AS BIGINT) = 4624 AND regexp_matches(concat_ws(' ', *COLUMNS(lambda c: c ILIKE 'Payload%' OR c ILIKE 'MapDescription' OR c ILIKE 'ExecutableInfo' OR c ILIKE 'Channel')), '(Logon ?Type[^0-9]*3([^0-9]|$).*NtLmSsp|NtLmSsp.*Logon ?Type[^0-9]*3([^0-9]|$)|Logon ?Type[^0-9]*9([^0-9]|$))', 'i')))"
   },
   {
     "id": "rdp_remote_access",

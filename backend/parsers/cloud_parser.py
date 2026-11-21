@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union
 
 from backend.db.engine import DuckDBManager
-from backend.parsers.base_parser import BaseParser, copy_sqlite_with_wal
+from backend.parsers.base_parser import BaseParser, copy_sqlite_with_wal, safe_sqlite_text_factory
 
 
 CLOUD_SCHEMA_DDL = """
@@ -513,6 +513,7 @@ class CloudParser(BaseParser):
         records: List[Dict[str, Any]] = []
 
         conn = sqlite3.connect(str(temp_db))
+        conn.text_factory = safe_sqlite_text_factory
         try:
             cursor = conn.cursor()
             tables = [
@@ -635,6 +636,7 @@ class CloudParser(BaseParser):
         records: List[Dict[str, Any]] = []
 
         conn = sqlite3.connect(str(temp_db))
+        conn.text_factory = safe_sqlite_text_factory
         try:
             cursor = conn.cursor()
             tables = [
@@ -911,6 +913,7 @@ class CloudParser(BaseParser):
         records: List[Dict[str, Any]] = []
 
         conn = sqlite3.connect(str(temp_db))
+        conn.text_factory = safe_sqlite_text_factory
         try:
             cursor = conn.cursor()
             table_map = {
@@ -1144,6 +1147,7 @@ class CloudParser(BaseParser):
         discovered_email: Optional[str] = known_account
 
         conn = sqlite3.connect(str(temp_db))
+        conn.text_factory = safe_sqlite_text_factory
         try:
             cursor = conn.cursor()
             tables = [

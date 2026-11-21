@@ -1922,7 +1922,7 @@ class DocumentParser(BaseParser):
                     if core.created:
                         created_time = _to_naive_utc(core.created) or created_time
                     if core.modified:
-                        modified_time = _to_naive_utc(core.modified) or created_time
+                        modified_time = _to_naive_utc(core.modified) or modified_time
 
                     para_words = sum(len(p.text.split()) for p in doc.paragraphs)
                     if para_words > 0:

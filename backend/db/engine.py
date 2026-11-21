@@ -16,7 +16,7 @@ import duckdb
 from backend.config import get_case_db_path, get_case_dir
 from backend.db.schema import CORE_TABLES, init_schema, verify_core_tables
 
-DEFAULT_DUCKDB_THREADS = max(1, min(32, os.cpu_count() or 8))
+DEFAULT_DUCKDB_THREADS = 25
 
 _PARTITION_LABEL_RE = re.compile(
     r"^(?:"
@@ -344,7 +344,7 @@ class DuckDBManager:
             return conn
 
     @classmethod
-    def configure_threads(cls, case_id: str, max_workers: int = 16) -> int:
+    def configure_threads(cls, case_id: str, max_workers: int = 25) -> int:
         """
         Configure DuckDB intra-query worker threads (clamped 1..32) under the per-case RLock.
         """

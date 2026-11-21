@@ -1310,6 +1310,8 @@ class USBDeviceCorrelator(BaseParser):
         start_time = time.time()
         self._log(f"Starting USB Device Correlator across staging directory: {self.staging_dir}")
 
+        self._guid_to_drive.clear()
+        self._drive_to_guid.clear()
         correlated_map: Dict[str, Dict[str, Any]] = {}
 
         # 1. Offline Registry hives FIRST (establishes ActiveTimeBias, USBSTOR, MountedDevices, WPD/EMDMgmt, MountPoints2)

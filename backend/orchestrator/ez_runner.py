@@ -181,7 +181,7 @@ class EZToolRunner:
         case_id: str,
         staging_dir: Optional[Path] = None,
         csv_out_dir: Optional[Path] = None,
-        max_workers: int = 16,
+        max_workers: int = 25,
     ) -> None:
         self.case_id = case_id
         if staging_dir is not None and Path(staging_dir).resolve().name.lower() == "staging":
@@ -199,7 +199,7 @@ class EZToolRunner:
         self.clean_hives_dir = (self.case_dir / "clean_hives").resolve()
         self.hindsight_out_dir = (self.case_dir / "hindsight_out").resolve()
         self.log_file = get_case_log_file(case_id).resolve()
-        self.max_workers = max(1, min(32, 16 if max_workers is None else int(max_workers)))
+        self.max_workers = max(1, min(32, 25 if max_workers is None else int(max_workers)))
         self._log_lock = threading.Lock()
 
         # Ensure base directories exist
@@ -3102,7 +3102,7 @@ class EZToolRunner:
 
     def run_all(
         self,
-        max_workers: int = 16,
+        max_workers: int = 25,
         enable_hindsight: bool = True,
         selected_artifacts: Optional[List[str]] = None,
     ) -> Dict[str, int]:

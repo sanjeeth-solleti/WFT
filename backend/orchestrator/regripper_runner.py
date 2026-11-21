@@ -133,7 +133,7 @@ class RegRipperRunner:
         case_id: str,
         case_dir: Optional[Union[str, Path]] = None,
         log_fn: Optional[Callable[[str, str], None]] = None,
-        max_workers: int = 16,
+        max_workers: int = 25,
         db_manager: Any = None,
     ):
         self.case_id = str(case_id).strip()
@@ -153,7 +153,7 @@ class RegRipperRunner:
             register_case_dir(self.case_id, self.case_dir)
 
         self.log_fn = log_fn or self._default_log
-        self.max_workers = max(1, min(16 if max_workers is None else int(max_workers), 32))
+        self.max_workers = max(1, min(25 if max_workers is None else int(max_workers), 32))
         self.regripper_out_dir = (self.case_dir / "regripper").resolve()
         self.regripper_out_dir.mkdir(parents=True, exist_ok=True)
         self.log_file = (self.case_dir / "processing.log").resolve()

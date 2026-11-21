@@ -36,7 +36,7 @@ from backend.orchestrator.normalizer import TimelineNormalizer
 from backend.orchestrator.regripper_runner import RegRipperRunner
 from backend.vfs.extractor import EvidenceExtractor
 
-DEFAULT_MAX_WORKERS: int = min(16, max(1, os.cpu_count() or 8))
+DEFAULT_MAX_WORKERS: int = 25
 
 # In-memory status tracker for live API queries
 PIPELINE_JOBS: Dict[str, Dict[str, Any]] = {}
@@ -1002,7 +1002,7 @@ class ProcessingPipeline:
                 res = _call_with_supported_kwargs(
                     self.runner.run_hindsight,
                     browsers_dir=self.staging_dir / "Browsers",
-                    max_workers=min(16, workers),
+                    max_workers=min(25, workers),
                 )
                 rows = _extract_row_count(res)
                 dur = int((time.time() - t0) * 1000)

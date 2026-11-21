@@ -1116,7 +1116,7 @@ def process_case(
             detail=f"Unsupported source_type '{request.source_type}'. Expected folder, directory, image, or live_triage.",
         )
 
-    default_workers = max(1, min(16, os.cpu_count() or 8))
+    default_workers = 25
     try:
         clamped_workers = max(1, min(32, int(request.max_workers))) if request.max_workers is not None else default_workers
     except (TypeError, ValueError):
@@ -2152,7 +2152,7 @@ def _extract_case_metadata_dict(
         except Exception:
             img_size_val = None
 
-    max_workers_val = max(1, min(16, os.cpu_count() or 8))
+    max_workers_val = 25
     if raw_meta.get("max_workers") is not None:
         try:
             max_workers_val = max(1, min(32, int(str(raw_meta["max_workers"]).strip())))

@@ -3,6 +3,20 @@
     Strictly requires web script markers (JSP, ASPX/ASP, PHP) + untrusted input + execution sinks
 */
 
+private rule _wft_web_is_script_target {
+    condition:
+        uint16(0) != 0x5A4D and
+        not (uint32(0) == 0x0000004C and uint32(4) == 0x00021401) and
+        uint32(0) != 0x46666C45 and // EVTX
+        uint32(0) != 0x66676572 and // Registry hive (regf)
+        uint32(0) != 0x694C5153 and // SQLite
+        uint16(0) != 0x4B50 and     // ZIP/DOCX/JAR
+        uint32(0) != 0xE011CFD0 and // OLE2
+        uint32(0) != 0x46445025 and // PDF
+        uint32(0) != 0x464C457F and // ELF
+        uint16(0) != 0x8B1F         // GZIP
+}
+
 rule Webshell_Java_JSP_Tomcat_Exec {
     meta:
         description = "Detects Java JSP/JSPX webshells executing system commands from HTTP request parameters"
@@ -19,7 +33,7 @@ rule Webshell_Java_JSP_Tomcat_Exec {
         $param2 = "request.getHeader(" ascii wide
         $param3 = "request.getInputStream(" ascii wide
     condition:
-        filesize < 1MB and uint16(0) != 0x5A4D and uint32(0) != 0x00021401 and
+        _wft_web_is_script_target and filesize < 1MB and
         any of ($jsp*) and any of ($exec*) and any of ($param*)
 }
 
@@ -37,7 +51,7 @@ rule Webshell_Java_JSP_Godzilla_Behinder {
         $d1 = "super.defineClass(" ascii wide
         $d2 = ".defineClass(" ascii wide
     condition:
-        filesize < 1MB and uint16(0) != 0x5A4D and uint32(0) != 0x00021401 and
+        _wft_web_is_script_target and filesize < 1MB and
         $jsp1 and ($c1 or $c2) and ($d1 or $d2)
 }
 
@@ -64,7 +78,7 @@ rule Webshell_ASP_NET_IIS {
         $req2 = "Request.QueryString[" ascii wide nocase
         $req3 = "Request.Item[" ascii wide nocase
     condition:
-        filesize < 1MB and uint16(0) != 0x5A4D and uint32(0) != 0x00021401 and
+        _wft_web_is_script_target and filesize < 1MB and
         any of ($asp*) and (
             any of ($eval*) or
             (($exec1 or $exec2) and any of ($shell*) and any of ($req*))
@@ -88,8 +102,8 @@ rule Webshell_ASPX_SharPyShell_Godzilla {
         $r1 = "Request.BinaryRead(" ascii wide
         $r2 = "Request.InputStream" ascii wide
     condition:
-        filesize < 1MB and uint16(0) != 0x5A4D and uint32(0) != 0x00021401 and
-        any of ($asp*) and ($c1 or $c2) and ($a1 or $a2) and ($r1 or $r2)
+        _wft_web_is_script_target and filesize < 1MB and
+        any of ($asp*) and ($c1 or$c2) and ($a1 or$a2) and ($r1 or$r2)
 }
 
 rule Webshell_PHP_Execution {
@@ -123,8 +137,8 @@ rule Webshell_PHP_Execution {
         $obf8 = "eval($_GET[" ascii wide nocase
         $obf9 = "assert($_POST[" ascii wide nocase
     condition:
-        filesize < 1MB and uint16(0) != 0x5A4D and uint32(0) != 0x00021401 and
-        ($php or $php_short) and (
+        _wft_web_is_script_target and filesize < 1MB and
+        ($php or$php_short) and (
             any of ($direct*) or
             any of ($obf*) or
             ($b64_in and any of ($e*))

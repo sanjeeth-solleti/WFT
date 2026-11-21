@@ -38,7 +38,7 @@ except ImportError:
     python_snappy = None  # type: ignore[assignment]
 
 from backend.db.engine import DuckDBManager
-from backend.parsers.base_parser import BaseParser, copy_sqlite_with_wal
+from backend.parsers.base_parser import BaseParser, copy_sqlite_with_wal, safe_sqlite_text_factory
 
 
 CHAT_SCHEMA_DDL = """
@@ -1158,6 +1158,7 @@ class ChatParser(BaseParser):
         records: List[Dict[str, Any]] = []
 
         conn = sqlite3.connect(str(temp_db))
+        conn.text_factory = safe_sqlite_text_factory
         try:
             cursor = conn.cursor()
             tables = [
@@ -1378,6 +1379,7 @@ class ChatParser(BaseParser):
         records: List[Dict[str, Any]] = []
 
         conn = sqlite3.connect(str(temp_db))
+        conn.text_factory = safe_sqlite_text_factory
         try:
             cursor = conn.cursor()
             table_map: Dict[str, str] = {
@@ -1427,7 +1429,7 @@ class ChatParser(BaseParser):
             n_col_map = {str(c[1]).lower(): str(c[1]) for c in cols_info}
 
             payload_col = self._pick_priority_col(n_col_map, ("payload", "data", "xml", "content"))
-            time_col = self._pick_priority_col(n_col_map, ("arrivaltime", "bootid", "timestamp", "createdtime", "time"))
+            time_col = self._pick_priority_col(n_col_map, ("arrivaltime", "timestamp", "createdtime", "time"))
             # Ensure ArrivalTime beats BootId
             if "arrivaltime" in n_col_map:
                 time_col = n_col_map["arrivaltime"]
