@@ -8056,10 +8056,24 @@ async def serve_frontend_spa(full_path: str, request: Request):
     if not cand_resolved.is_relative_to(dist_resolved):
         raise HTTPException(status_code=403, detail="Path traversal blocked")
     if full_path.strip("/") and cand_resolved.is_relative_to(dist_resolved) and cand_resolved.is_file():
-        return FileResponse(cand_resolved)
+        extra_headers = {}
+        if cand_resolved.suffix.lower() in (".html", ".htm", ".json"):
+            extra_headers = {
+                "Cache-Control": "no-cache, no-store, must-revalidate",
+                "Pragma": "no-cache",
+                "Expires": "0",
+            }
+        return FileResponse(cand_resolved, headers=extra_headers)
     index_file = dist_resolved / "index.html"
     if index_file.is_file():
-        return FileResponse(index_file)
+        return FileResponse(
+            index_file,
+            headers={
+                "Cache-Control": "no-cache, no-store, must-revalidate",
+                "Pragma": "no-cache",
+                "Expires": "0",
+            },
+        )
     raise HTTPException(status_code=404, detail="Frontend file not found")
 
 

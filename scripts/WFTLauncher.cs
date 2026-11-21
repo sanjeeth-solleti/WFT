@@ -779,13 +779,6 @@ namespace WFTLauncher
                 }
             }
 
-            // If backend is already running and user double-clicked WFT.exe, simply open desktop app window
-            if (!isHeadless && passthroughArgs.Count == 0 && IsTcpPortListening(targetPort))
-            {
-                LaunchDesktopApp(targetPort);
-                return 0;
-            }
-
             try
             {
                 launchPsi.EnvironmentVariables["WFT_LAUNCHED_FROM_EXE"] = "1";
