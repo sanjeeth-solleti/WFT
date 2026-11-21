@@ -69,7 +69,7 @@ export const ResizeHandle: React.FC<ResizeHandleProps> = ({
       {/* Global transparent drag shield to prevent child elements (AG Grid, iframes, canvas) from capturing mouse events */}
       {isDragging && (
         <div
-          className={`fixed inset-0 z-50 select-none pointer-events-auto ${
+          className={`fixed inset-0 z-[70] select-none pointer-events-auto ${
             isCol ? 'cursor-col-resize' : 'cursor-row-resize'
           }`}
           style={{ cursor: isCol ? 'col-resize' : 'row-resize' }}

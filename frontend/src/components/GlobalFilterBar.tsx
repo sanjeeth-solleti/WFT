@@ -28,6 +28,7 @@ export interface GlobalFilterState {
   };
   keywords: string[];
   tags: string[];
+  bookmarkedOnly?: boolean;
   search: string;
 }
 
@@ -38,6 +39,7 @@ interface GlobalFilterBarProps {
   onOpenKeywordManager: () => void;
   artifacts?: ArtifactItem[];
   totalAllRows?: number;
+  maxTimestampUtc?: string | null;
   onSelectRegRipperPlugin?: (pluginName: string) => void;
   selectedRegRipperPlugin?: string | null;
   onNavigateToRegRipper?: () => void;
@@ -145,6 +147,7 @@ export const GlobalFilterBar: React.FC<GlobalFilterBarProps> = ({
   onOpenKeywordManager,
   artifacts = [],
   totalAllRows = 0,
+  maxTimestampUtc,
   onSelectRegRipperPlugin,
   selectedRegRipperPlugin,
   onNavigateToRegRipper,
@@ -154,6 +157,59 @@ export const GlobalFilterBar: React.FC<GlobalFilterBarProps> = ({
   const [caseKeywords, setCaseKeywords] = useState<CaseKeyword[]>([]);
   const [isLoadingKeywords, setIsLoadingKeywords] = useState(false);
   const [artifactSearch, setArtifactSearch] = useState('');
+  const [resolvedMaxTs, setResolvedMaxTs] = useState<string | null>(maxTimestampUtc ?? null);
+  const [searchDraft, setSearchDraft] = useState<string>(filterState.search || '');
+  const searchDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const latestFilterRef = useRef<GlobalFilterState>(filterState);
+  latestFilterRef.current = filterState;
+
+  useEffect(() => {
+    setSearchDraft(filterState.search || '');
+  }, [filterState.search]);
+
+  useEffect(() => {
+    return () => {
+      if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (maxTimestampUtc) {
+      setResolvedMaxTs(maxTimestampUtc);
+      return;
+    }
+    if (!caseId) {
+      setResolvedMaxTs(null);
+      return;
+    }
+    let cancelled = false;
+    apiClient
+      .getTimelineStats(caseId)
+      .then((stats) => {
+        if (!cancelled && stats?.max_timestamp_utc) {
+          setResolvedMaxTs(stats.max_timestamp_utc);
+          return;
+        }
+        return apiClient.getCaseDashboard(caseId).then((dash) => {
+          if (!cancelled && dash?.max_timestamp_utc) {
+            setResolvedMaxTs(dash.max_timestamp_utc);
+          }
+        });
+      })
+      .catch(() => {
+        apiClient
+          .getMasterTimeline(caseId, { limit: 1 })
+          .then((tl) => {
+            if (!cancelled && tl?.timeline?.[0]?.timestamp_utc) {
+              setResolvedMaxTs(tl.timeline[0].timestamp_utc);
+            }
+          })
+          .catch(() => {});
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [caseId, maxTimestampUtc]);
 
   const [regripperPlugins, setRegripperPlugins] = useState<RegRipperPluginItem[]>([]);
   const [isLoadingRegripper, setIsLoadingRegripper] = useState<boolean>(false);
@@ -270,16 +326,20 @@ export const GlobalFilterBar: React.FC<GlobalFilterBarProps> = ({
     (filterState.dateRange.preset !== 'all' ? 1 : 0) +
     filterState.keywords.length +
     filterState.tags.length +
+    (filterState.bookmarkedOnly ? 1 : 0) +
     (filterState.search ? 1 : 0);
 
   // Clear Filters ONLY resets transient filter criteria — never resets active artifact table or persisted bookmarks
   const handleClearAll = () => {
+    if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
+    setSearchDraft('');
     onFilterChange({
       ...filterState,
       contentTypes: [],
       dateRange: { preset: 'all', startUtc: undefined, endUtc: undefined },
       keywords: [],
       tags: [],
+      bookmarkedOnly: false,
       search: '',
     });
     setCustomStart('');
@@ -333,22 +393,34 @@ export const GlobalFilterBar: React.FC<GlobalFilterBarProps> = ({
     onFilterChange({ ...filterState, tags: [] });
   };
 
+  const parseUtcTimestamp = (raw?: string | null): Date | null => {
+    if (!raw || !raw.trim()) return null;
+    const trimmed = raw.trim();
+    const iso = /Z|[+-]\d{2}:?\d{2}$/i.test(trimmed)
+      ? trimmed
+      : `${trimmed.replace(' ', 'T')}Z`;
+    const parsed = new Date(iso);
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
+  };
+
   const setDatePreset = (preset: string) => {
-    const now = new Date();
+    const parsedMax = parseUtcTimestamp(resolvedMaxTs);
+    const anchor = parsedMax || new Date();
     let start: string | undefined;
+    let end: string | undefined;
     if (preset === '24h') {
-      const d = new Date(now.getTime() - 24 * 3600 * 1000);
-      start = d.toISOString();
+      start = new Date(anchor.getTime() - 24 * 3600 * 1000).toISOString();
+      end = anchor.toISOString();
     } else if (preset === '7d') {
-      const d = new Date(now.getTime() - 7 * 24 * 3600 * 1000);
-      start = d.toISOString();
+      start = new Date(anchor.getTime() - 7 * 24 * 3600 * 1000).toISOString();
+      end = anchor.toISOString();
     } else if (preset === '30d') {
-      const d = new Date(now.getTime() - 30 * 24 * 3600 * 1000);
-      start = d.toISOString();
+      start = new Date(anchor.getTime() - 30 * 24 * 3600 * 1000).toISOString();
+      end = anchor.toISOString();
     }
     onFilterChange({
       ...filterState,
-      dateRange: { preset, startUtc: start, endUtc: undefined },
+      dateRange: { preset, startUtc: start, endUtc: end },
     });
     setActiveDropdown(null);
     setDropdownPos(null);
@@ -470,7 +542,7 @@ export const GlobalFilterBar: React.FC<GlobalFilterBarProps> = ({
           <button
             onClick={(e) => toggleDropdown('tags', e, 280)}
             className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-medium border transition-colors cursor-pointer ${
-              filterState.tags.length > 0
+              filterState.tags.length > 0 || filterState.bookmarkedOnly
                 ? 'bg-[#bae6fd] dark:bg-[#0c4a6e] border-[#0284c7] text-[#0369a1] dark:text-[#38bdf8] font-semibold'
                 : 'bg-white dark:bg-[#0f172a] hover:bg-slate-50 dark:hover:bg-[#334155] border-[#cbd5e1] dark:border-[#334155] text-[#0f172a] dark:text-[#f8fafc]'
             }`}
@@ -478,7 +550,9 @@ export const GlobalFilterBar: React.FC<GlobalFilterBarProps> = ({
             <Tag className="w-3 h-3 text-slate-500" />
             <span>
               Tags & Bookmarks
-              {filterState.tags.length > 0 ? ` (${filterState.tags.length})` : ''}
+              {filterState.tags.length + (filterState.bookmarkedOnly ? 1 : 0) > 0
+                ? ` (${filterState.tags.length + (filterState.bookmarkedOnly ? 1 : 0)})`
+                : ''}
             </span>
             <ChevronDown className="w-3 h-3 text-slate-400" />
           </button>
@@ -498,14 +572,31 @@ export const GlobalFilterBar: React.FC<GlobalFilterBarProps> = ({
           <Search className="w-3.5 h-3.5 absolute left-3 top-2.5 text-slate-400 pointer-events-none" />
           <input
             type="text"
-            value={filterState.search}
-            onChange={(e) => onFilterChange({ ...filterState, search: e.target.value })}
+            value={searchDraft}
+            onChange={(e) => {
+              const val = e.target.value;
+              setSearchDraft(val);
+              if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
+              searchDebounceRef.current = setTimeout(() => {
+                onFilterChange({ ...latestFilterRef.current, search: val });
+              }, 300);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
+                onFilterChange({ ...latestFilterRef.current, search: searchDraft });
+              }
+            }}
             placeholder="Global search evidence, hashes, paths..."
             className="w-full bg-[#f8fafc] dark:bg-[#0f172a] border border-[#cbd5e1] dark:border-[#334155] focus:border-[#0284c7] rounded pl-9 pr-7 py-1 text-xs text-[#0f172a] dark:text-[#f8fafc] placeholder-slate-400 focus:outline-none focus:ring-1 focus:ring-[#0284c7] font-sans shadow-2xs"
           />
-          {filterState.search && (
+          {(searchDraft || filterState.search) && (
             <button
-              onClick={() => onFilterChange({ ...filterState, search: '' })}
+              onClick={() => {
+                if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
+                setSearchDraft('');
+                onFilterChange({ ...latestFilterRef.current, search: '' });
+              }}
               className="absolute right-2.5 top-2 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 cursor-pointer"
               title="Clear search"
             >
@@ -800,8 +891,13 @@ export const GlobalFilterBar: React.FC<GlobalFilterBarProps> = ({
 
           {activeDropdown === 'date' && (
             <div className="w-72">
-              <div className="text-[11px] font-bold uppercase text-slate-500 px-2 py-1 border-b border-[#cbd5e1] dark:border-[#334155] mb-2">
+              <div className="text-[11px] font-bold uppercase text-slate-500 px-2 py-1 border-b border-[#cbd5e1] dark:border-[#334155] mb-1">
                 Chronological Scope
+              </div>
+              <div className="px-2 pb-1.5 text-[10px] font-mono text-slate-400 truncate" title={resolvedMaxTs || 'Wall-clock fallback'}>
+                {resolvedMaxTs
+                  ? `Anchored to case max: ${resolvedMaxTs.replace('T', ' ').slice(0, 19)} UTC`
+                  : 'Anchored to current UTC (no case timestamps)'}
               </div>
               <div className="space-y-1">
                 {[
@@ -969,13 +1065,34 @@ export const GlobalFilterBar: React.FC<GlobalFilterBarProps> = ({
                   </button>
                   <span className="text-slate-300 dark:text-slate-600">|</span>
                   <button
-                    onClick={handleClearTags}
+                    onClick={() =>
+                      onFilterChange({ ...filterState, tags: [], bookmarkedOnly: false })
+                    }
                     className="text-slate-500 hover:text-slate-700 dark:hover:text-slate-300 font-semibold cursor-pointer"
                   >
                     Clear
                   </button>
                 </div>
               </div>
+              <label
+                className={`flex items-center justify-between px-2 py-1.5 mb-1.5 rounded border cursor-pointer text-xs transition-colors ${
+                  filterState.bookmarkedOnly
+                    ? 'bg-[#bae6fd]/60 dark:bg-[#0c4a6e]/60 border-[#0284c7] font-bold text-[#0369a1] dark:text-[#38bdf8]'
+                    : 'bg-slate-50 dark:bg-[#0f172a] border-[#cbd5e1] dark:border-[#334155] hover:bg-slate-100 dark:hover:bg-[#334155]'
+                }`}
+              >
+                <span className="flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={Boolean(filterState.bookmarkedOnly)}
+                    onChange={(e) =>
+                      onFilterChange({ ...filterState, bookmarkedOnly: e.target.checked })
+                    }
+                    className="rounded border-[#cbd5e1] text-[#0284c7] cursor-pointer"
+                  />
+                  <span>Bookmarked Rows Only</span>
+                </span>
+              </label>
               <div className="space-y-1">
                 {TAG_OPTIONS.map((tag) => {
                   const isChecked = filterState.tags.includes(tag.id);

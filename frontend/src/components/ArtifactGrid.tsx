@@ -22,6 +22,7 @@ import {
   Image as ImageIcon,
   Film,
   Bookmark,
+  Network,
 } from 'lucide-react';
 import { apiClient, ArtifactItem } from '../api/client';
 import { ColumnFilterPopover } from './ColumnFilterPopover';
@@ -43,6 +44,7 @@ interface ArtifactGridProps {
     endUtc?: string;
   };
   tags?: string[];
+  bookmarkedOnly?: boolean;
 }
 
 function getSuggestedViewMode(artifact: ArtifactItem | null): ViewMode {
@@ -142,10 +144,12 @@ export const ArtifactGrid: React.FC<ArtifactGridProps> = ({
   caseId,
   selectedArtifact,
   onSelectRow,
+  onInspectEntity,
   globalSearch = '',
   externalKeywords = [],
   dateRange,
   tags = [],
+  bookmarkedOnly = false,
 }) => {
   const [columns, setColumns] = useState<string[]>([]);
   const [totalCount, setTotalCount] = useState<number>(0);
@@ -174,6 +178,10 @@ export const ArtifactGrid: React.FC<ArtifactGridProps> = ({
 
   const gridApiRef = useRef<GridApi | null>(null);
   const tableName = selectedArtifact?.table_name;
+  const currentTableKey = `${caseId || ''}:${tableName || ''}`;
+  const [loadedTableKey, setLoadedTableKey] = useState<string>('');
+  const activeTableKeyRef = useRef<string>(currentTableKey);
+  activeTableKeyRef.current = currentTableKey;
 
   const loadBookmarks = useCallback(async () => {
     if (!caseId) return;
@@ -191,7 +199,7 @@ export const ArtifactGrid: React.FC<ArtifactGridProps> = ({
 
   useEffect(() => {
     loadBookmarks();
-  }, [loadBookmarks]);
+  }, [loadBookmarks, bookmarkedOnly, tableName]);
 
   const handleToggleRowBookmark = useCallback(
     async (row: Record<string, unknown>) => {
@@ -226,23 +234,28 @@ export const ArtifactGrid: React.FC<ArtifactGridProps> = ({
   );
 
   useEffect(() => {
+    setContextMenu(null);
     if (selectedArtifact) {
       setViewMode(getSuggestedViewMode(selectedArtifact));
       setSelectedRowId(null);
       setColumnFilters({});
       setThumbnailRows([]);
     }
-  }, [selectedArtifact?.table_name]);
+  }, [caseId, selectedArtifact?.table_name]);
 
   useEffect(() => {
     let isCancelled = false;
+    const reqTableKey = `${caseId || ''}:${tableName || ''}`;
+    gridApiRef.current = null;
     if (!caseId || !tableName) {
       setColumns([]);
+      setLoadedTableKey('');
       setTotalCount(0);
       setFilteredCount(0);
       return;
     }
 
+    setColumns([]);
     setIsLoading(true);
     setError(null);
 
@@ -256,12 +269,14 @@ export const ArtifactGrid: React.FC<ArtifactGridProps> = ({
           setColumns(meta.columns || []);
           setTotalCount(meta.total_count);
           setFilteredCount(meta.filtered_count);
+          setLoadedTableKey(reqTableKey);
           setIsLoading(false);
         }
       })
       .catch((err) => {
         if (!isCancelled) {
           setError(err instanceof Error ? err.message : String(err));
+          setLoadedTableKey(reqTableKey);
           setIsLoading(false);
         }
       });
@@ -271,26 +286,69 @@ export const ArtifactGrid: React.FC<ArtifactGridProps> = ({
     };
   }, [caseId, tableName]);
 
+  const applyClientKeywordAndBookmarkFallback = useCallback(
+    (rowsList: Record<string, unknown>[]): Record<string, unknown>[] => {
+      let result = rowsList;
+      if (externalKeywords.length > 0 && result.length > 0) {
+        const trimmedKws = externalKeywords.map((k) => k.trim()).filter(Boolean);
+        if (trimmedKws.length > 0) {
+          const matchKwRow = (r: Record<string, unknown>): boolean => {
+            const rawHaystack = JSON.stringify(r);
+            const haystack = rawHaystack.toLowerCase();
+            return trimmedKws.some((kw) => {
+              if (haystack.includes(kw.toLowerCase())) return true;
+              try {
+                return new RegExp(kw, 'i').test(rawHaystack);
+              } catch {
+                return false;
+              }
+            });
+          };
+          if (result.some((r) => !matchKwRow(r))) {
+            result = result.filter(matchKwRow);
+          }
+        }
+      }
+      if (bookmarkedOnly && tableName && result.length > 0) {
+        const anyUnbookmarked = result.some((r) => {
+          const rowId = Number(r._row_id || r.timeline_id || 1);
+          return !bookmarkedKeys.has(`${tableName}:${rowId}`);
+        });
+        if (anyUnbookmarked) {
+          result = result.filter((r) => {
+            const rowId = Number(r._row_id || r.timeline_id || 1);
+            return bookmarkedKeys.has(`${tableName}:${rowId}`);
+          });
+        }
+      }
+      return result;
+    },
+    [externalKeywords, bookmarkedOnly, tableName, bookmarkedKeys]
+  );
+
   const fetchThumbnails = useCallback(
     async (reset: boolean = false) => {
       if (!caseId || !tableName) return;
+      const reqTableKey = `${caseId}:${tableName}`;
       setIsLoadingThumbnails(true);
       try {
         const offset = reset ? 0 : thumbnailRows.length;
-        let combinedSearch = globalSearch.trim();
-        if (externalKeywords.length > 0) {
-          combinedSearch = externalKeywords.join(' ');
-        }
+        const cleanSearch = globalSearch.trim();
 
         const res = await apiClient.getTableData(caseId, tableName, {
           limit: 80,
           offset,
-          search: combinedSearch || undefined,
+          search: cleanSearch || undefined,
+          keywords: externalKeywords.length > 0 ? externalKeywords : undefined,
           column_filters: Object.keys(columnFilters).length > 0 ? columnFilters : undefined,
           start_time: dateRange?.startUtc,
           end_time: dateRange?.endUtc,
+          date_from: dateRange?.startUtc,
+          date_to: dateRange?.endUtc,
           tags: tags.length > 0 ? tags : undefined,
+          bookmarked_only: bookmarkedOnly || undefined,
         });
+        if (activeTableKeyRef.current !== reqTableKey) return;
 
         // Deduplicate media rows by (file_name + sha256/file_size) so videos/pictures never show twice
         const deduplicateMedia = (rowsList: Record<string, unknown>[]) => {
@@ -303,32 +361,52 @@ export const ArtifactGrid: React.FC<ArtifactGridProps> = ({
           });
         };
 
+        const filteredRows = applyClientKeywordAndBookmarkFallback(res.rows);
+
         if (reset) {
-          const cleanRows = deduplicateMedia(res.rows);
+          const cleanRows = deduplicateMedia(filteredRows);
           setThumbnailRows(cleanRows);
           if (cleanRows.length > 0) {
             onSelectRow(cleanRows[0]);
             setSelectedRowId(cleanRows[0]._row_id);
+          } else {
+            onSelectRow(null);
+            setSelectedRowId(null);
           }
         } else {
-          setThumbnailRows((prev) => deduplicateMedia([...prev, ...res.rows]));
+          setThumbnailRows((prev) => deduplicateMedia([...prev, ...filteredRows]));
         }
         setTotalCount(res.total_count);
-        setFilteredCount(res.filtered_count);
+        setFilteredCount(
+          filteredRows.length !== res.rows.length ? filteredRows.length : res.filtered_count
+        );
       } catch (err) {
         console.error('[ArtifactGrid] Error fetching thumbnails:', err);
       } finally {
         setIsLoadingThumbnails(false);
       }
     },
-    [caseId, tableName, globalSearch, externalKeywords, columnFilters, dateRange?.startUtc, dateRange?.endUtc, tags, thumbnailRows.length, onSelectRow]
+    [
+      caseId,
+      tableName,
+      globalSearch,
+      externalKeywords,
+      columnFilters,
+      dateRange?.startUtc,
+      dateRange?.endUtc,
+      tags,
+      bookmarkedOnly,
+      applyClientKeywordAndBookmarkFallback,
+      thumbnailRows.length,
+      onSelectRow,
+    ]
   );
 
   useEffect(() => {
     if (viewMode === 'thumbnail') {
       fetchThumbnails(true);
     }
-  }, [viewMode, tableName, globalSearch, externalKeywords, columnFilters, dateRange?.startUtc, dateRange?.endUtc, tags]);
+  }, [caseId, viewMode, tableName, globalSearch, externalKeywords, columnFilters, dateRange?.startUtc, dateRange?.endUtc, tags, bookmarkedOnly]);
 
   const handleThumbnailScroll = (e: React.UIEvent<HTMLDivElement>) => {
     const target = e.currentTarget;
@@ -379,6 +457,7 @@ export const ArtifactGrid: React.FC<ArtifactGridProps> = ({
       };
     }
 
+    const reqTableKey = `${caseId}:${tableName}`;
     return {
       getRows: async (params: IGetRowsParams) => {
         try {
@@ -393,34 +472,55 @@ export const ArtifactGrid: React.FC<ArtifactGridProps> = ({
             sortDir = (sortModel[0].sort?.toUpperCase() === 'DESC' ? 'DESC' : 'ASC') as 'ASC' | 'DESC';
           }
 
-          let combinedSearch = globalSearch.trim();
-          if (externalKeywords.length > 0) {
-            combinedSearch = externalKeywords.join(' ');
-          }
+          const cleanSearch = globalSearch.trim();
 
           const res = await apiClient.getTableData(caseId, tableName, {
             limit,
             offset,
             sort_col: sortCol,
             sort_dir: sortDir,
-            search: combinedSearch || undefined,
+            search: cleanSearch || undefined,
+            keywords: externalKeywords.length > 0 ? externalKeywords : undefined,
             column_filters: Object.keys(columnFilters).length > 0 ? columnFilters : undefined,
             start_time: dateRange?.startUtc,
             end_time: dateRange?.endUtc,
+            date_from: dateRange?.startUtc,
+            date_to: dateRange?.endUtc,
             tags: tags.length > 0 ? tags : undefined,
+            bookmarked_only: bookmarkedOnly || undefined,
           });
+          if (activeTableKeyRef.current !== reqTableKey) {
+            params.failCallback();
+            return;
+          }
 
-          params.successCallback(res.rows, res.filtered_count);
+          const effectiveRows = applyClientKeywordAndBookmarkFallback(res.rows);
+          const effectiveFilteredCount =
+            effectiveRows.length !== res.rows.length ? effectiveRows.length : res.filtered_count;
+
+          params.successCallback(effectiveRows, effectiveFilteredCount);
           setTotalCount(res.total_count);
-          setFilteredCount(res.filtered_count);
+          setFilteredCount(effectiveFilteredCount);
 
-          if (startRow === 0 && res.rows.length > 0) {
-            setSelectedRowId((prev: unknown) => {
-              if (prev === null) {
-                onSelectRow(res.rows[0]);
-                return res.rows[0]._row_id;
+          if (startRow === 0) {
+            requestAnimationFrame(() => {
+              if (activeTableKeyRef.current !== reqTableKey) return;
+              if (effectiveRows.length === 0) {
+                setSelectedRowId(null);
+                onSelectRow(null);
+                return;
               }
-              return prev;
+              setSelectedRowId((prev: unknown) => {
+                const stillVisible =
+                  prev !== null &&
+                  effectiveRows.some((r) => (r._row_id ?? r.timeline_id) === prev);
+                if (!stillVisible) {
+                  const firstId = effectiveRows[0]._row_id ?? effectiveRows[0].timeline_id ?? null;
+                  onSelectRow(effectiveRows[0]);
+                  return firstId;
+                }
+                return prev;
+              });
             });
           }
         } catch (err: unknown) {
@@ -438,6 +538,8 @@ export const ArtifactGrid: React.FC<ArtifactGridProps> = ({
     dateRange?.startUtc,
     dateRange?.endUtc,
     tags,
+    bookmarkedOnly,
+    applyClientKeywordAndBookmarkFallback,
     onSelectRow,
   ]);
 
@@ -555,12 +657,32 @@ export const ArtifactGrid: React.FC<ArtifactGridProps> = ({
             return <span className="text-slate-400 italic text-[11px] font-mono">—</span>;
           }
           const strVal = String(val);
+          const isEntityCol =
+            Boolean(onInspectEntity) &&
+            strVal.trim().length >= 2 &&
+            strVal.trim().length <= 200 &&
+            /(user|account|host|computer|domain|ip|addr|src|dst|hash|sha256|md5|process|executable|exe|file_name|target|subject|primary_entity|entity_value)/i.test(
+              colName
+            );
 
           return (
-            <div className="flex items-center justify-between w-full max-w-full min-w-0 overflow-hidden text-xs font-mono">
+            <div className="flex items-center justify-between w-full max-w-full min-w-0 overflow-hidden text-xs font-mono group">
               <span className="truncate pr-1 select-text min-w-0 flex-1" title={strVal}>
                 {strVal}
               </span>
+              {isEntityCol && onInspectEntity && (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onInspectEntity(strVal.trim());
+                  }}
+                  className="p-0.5 rounded opacity-0 group-hover:opacity-100 hover:bg-sky-100 dark:hover:bg-sky-900/50 text-[#0284c7] dark:text-[#38bdf8] shrink-0 cursor-pointer"
+                  title={`Inspect "${strVal}" in Connections Graph`}
+                >
+                  <Network className="w-3 h-3" />
+                </button>
+              )}
             </div>
           );
         },
@@ -568,7 +690,7 @@ export const ArtifactGrid: React.FC<ArtifactGridProps> = ({
     });
 
     return [bookmarkCol, ...dynamicCols];
-  }, [columns, columnFilters, handleTriggerFilter, bookmarkedKeys, tableName, handleToggleRowBookmark]);
+  }, [columns, columnFilters, handleTriggerFilter, bookmarkedKeys, tableName, handleToggleRowBookmark, onInspectEntity]);
 
   const onRowSelected = useCallback(
     (event: RowSelectedEvent) => {
@@ -722,7 +844,7 @@ export const ArtifactGrid: React.FC<ArtifactGridProps> = ({
       )}
 
       <div className="flex-1 overflow-hidden relative">
-        {isLoading && columns.length === 0 && (
+        {(isLoading || (Boolean(selectedArtifact) && loadedTableKey !== currentTableKey)) && columns.length === 0 && (
           <div className="absolute inset-0 bg-white/70 dark:bg-[#0f172a]/70 z-10 flex flex-col items-center justify-center gap-2">
             <div className="w-6 h-6 border-2 border-[#0284c7] border-t-transparent rounded-full animate-spin" />
             <span className="text-xs font-mono text-slate-600 dark:text-slate-400">
@@ -747,8 +869,10 @@ export const ArtifactGrid: React.FC<ArtifactGridProps> = ({
             </p>
           </div>
         ) : viewMode === 'column' ? (
-          <div className="w-full h-full ag-theme-quartz">
-            <AgGridReact
+          loadedTableKey === currentTableKey ? (
+            <div className="w-full h-full ag-theme-quartz">
+              <AgGridReact
+                key={currentTableKey}
               rowModelType="infinite"
               datasource={datasource}
               cacheBlockSize={250}
@@ -783,8 +907,9 @@ export const ArtifactGrid: React.FC<ArtifactGridProps> = ({
               animateRows={false}
               suppressCellFocus={true}
               enableCellTextSelection={true}
-            />
-          </div>
+              />
+            </div>
+          ) : null
         ) : (
           /* Fixed: content-start items-start auto-rows-max prevents cards from stretching vertically! */
           <div
@@ -935,7 +1060,9 @@ export const ArtifactGrid: React.FC<ArtifactGridProps> = ({
           row={contextMenu.row}
           tableName={tableName}
           cellValue={contextMenu.cellValue}
+          onBookmarkUpdated={handleRefresh}
           onExportTableCsv={handleExportGridCsv}
+          onInspectEntity={onInspectEntity}
         />
       )}
     </div>

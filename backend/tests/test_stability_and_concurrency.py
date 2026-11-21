@@ -7,10 +7,9 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+import backend.config as _cfg
 from backend.config import (
     BASE_DIR,
-    CASES_DIR,
-    CUSTOM_LOCATIONS_FILE,
     _load_custom_case_dirs,
     get_case_db_path,
     get_case_dir,
@@ -26,13 +25,34 @@ from backend.db.engine import (
 from backend.main import app, is_rejected_or_non_regular_file
 
 
+@pytest.fixture(scope="module", autouse=True)
+def isolated_stability_env(tmp_path_factory):
+    tmp_root = tmp_path_factory.mktemp("wft_stability_isolated")
+    cases_dir = (tmp_root / "cases").resolve()
+    appdata_dir = (tmp_root / "appdata").resolve()
+    cases_dir.mkdir(parents=True, exist_ok=True)
+    appdata_dir.mkdir(parents=True, exist_ok=True)
+
+    mp = pytest.MonkeyPatch()
+    mp.setenv("WFT_CASES_DIR", str(cases_dir))
+    mp.setenv("WFT_APPDATA_DIR", str(appdata_dir))
+    mp.setattr(_cfg, "CASES_DIR", cases_dir)
+    mp.setattr(_cfg, "APP_DATA_DIR", appdata_dir)
+    mp.setattr(_cfg, "CUSTOM_LOCATIONS_FILE", (appdata_dir / "custom_locations.json").resolve())
+    _load_custom_case_dirs()
+    yield {"cases_dir": cases_dir, "appdata_dir": appdata_dir, "tmp_root": tmp_root}
+    DuckDBManager.close_all()
+    mp.undo()
+    _load_custom_case_dirs()
+
+
 @pytest.fixture(scope="module")
-def client():
+def client(isolated_stability_env):
     return TestClient(app)
 
 
 @pytest.fixture(scope="module")
-def audit_case():
+def audit_case(isolated_stability_env):
     case_id = "test_audit_case"
     case_dir = get_case_dir(case_id, create_if_missing=True)
     init_case_db(case_id)
@@ -137,6 +157,21 @@ def test_rejected_ntfs_metadata_and_directories(client, audit_case):
         res_raw = client.get(f"/api/cases/{case_id}/file/raw", params={"file_path": p})
         assert res_raw.status_code == 404, f"Expected 404 for raw on {p}, got {res_raw.status_code}"
 
+    # Regular files INSIDE $Recycle.Bin\<SID>\..., PerfLogs\..., Config.Msi\... MUST be allowed
+    staging_dir = (audit_case["case_dir"] / "staging").resolve()
+    allowed_staged = [
+        (r"C:\$Recycle.Bin\S-1-5-21-1001\$Rtest.txt", staging_dir / "$Recycle.Bin" / "S-1-5-21-1001" / "$Rtest.txt"),
+        (r"C:\PerfLogs\System\perf_diag.log", staging_dir / "PerfLogs" / "System" / "perf_diag.log"),
+        (r"C:\Config.Msi\1a2b3c.rbf", staging_dir / "Config.Msi" / "1a2b3c.rbf"),
+    ]
+    for vpath, disk_file in allowed_staged:
+        disk_file.parent.mkdir(parents=True, exist_ok=True)
+        disk_file.write_bytes(b"Recovered regular forensic artifact bytes")
+        assert is_rejected_or_non_regular_file(vpath) is False
+        assert client.get(f"/api/cases/{case_id}/hex", params={"file_path": vpath}).status_code == 200
+        assert client.get(f"/api/cases/{case_id}/file/content", params={"file_path": vpath}).status_code == 200
+        assert client.get(f"/api/cases/{case_id}/file/raw", params={"file_path": vpath}).status_code == 200
+
 
 def test_column_validation_against_describe(audit_case):
     """
@@ -204,52 +239,121 @@ def test_pruning_missing_custom_locations():
     assert fake_case_id not in active_cases
 
 
-def test_no_tool_cases_created_with_custom_target_dir(client):
+def test_no_tool_cases_created_with_custom_target_dir(client, isolated_stability_env, tmp_path):
     """
-    Verify that when processing a case with target_dir, or querying its endpoints,
-    no 'cases' folder is ever created inside the tool directory (BASE_DIR).
+    Verify that when processing a case with a distinct custom target_dir (temp_src != temp_target),
+    case storage goes to temp_target, source_path is untouched, and BASE_DIR / 'cases' is untouched.
     """
-    temp_target = tempfile.mkdtemp()
-    temp_path = Path(temp_target).resolve()
+    temp_src = (tmp_path / "evidence_source").resolve()
+    temp_target = (tmp_path / "custom_case_storage").resolve()
+    temp_src.mkdir(parents=True, exist_ok=True)
+    temp_target.mkdir(parents=True, exist_ok=True)
+    (temp_src / "triage_note.txt").write_text("Forensic triage sample", encoding="utf-8")
     custom_cid = "test_external_storage_case"
 
+    tool_cases = (BASE_DIR / "cases").resolve()
+    pre_existing_tool_cases = set(tool_cases.iterdir()) if tool_cases.exists() else None
+
     try:
-        # Trigger process with explicit target_dir
         res = client.post(
             "/api/cases/process",
             json={
                 "case_name": custom_cid,
                 "case_id": custom_cid,
                 "source_type": "directory",
-                "source_path": str(temp_path),
-                "target_dir": str(temp_path),
+                "source_path": str(temp_src),
+                "target_dir": str(temp_target),
+                "enable_yara": False,
+                "enable_ioc": False,
+                "enable_ocr": False,
+                "enable_stinger": False,
+                "enable_hindsight": False,
                 "run_async": False,
             },
         )
         assert res.status_code == 200
 
-        # Verify DuckDB and files were placed in temp_path, NOT in BASE_DIR / "cases"
-        expected_case_dir = (temp_path / custom_cid) if (temp_path / custom_cid / "case.duckdb").exists() else temp_path
+        expected_case_dir = (temp_target / custom_cid).resolve()
         assert (expected_case_dir / "case.duckdb").exists()
-        tool_cases = (BASE_DIR / "cases").resolve()
-        assert not tool_cases.exists(), f"Found unexpected cases folder in tool repo: {tool_cases}"
+        assert not (temp_src / "case.duckdb").exists()
+        assert not (temp_src / "staging").exists()
 
-        # Verify get_case_dir returns custom target
+        if pre_existing_tool_cases is None:
+            assert not tool_cases.exists(), f"Found unexpected cases folder in tool repo: {tool_cases}"
+        else:
+            assert not (tool_cases / custom_cid).exists()
+
         resolved_case = get_case_dir(custom_cid)
         assert resolved_case == expected_case_dir
 
-        # Verify API case status and listing points to external directory
         list_res = client.get("/api/cases")
         assert list_res.status_code == 200
         cases = list_res.json()["cases"]
         matching = [c for c in cases if c["case_id"] == custom_cid]
         assert len(matching) == 1
         assert matching[0]["case_path"] == str(expected_case_dir)
-
-        # Still no tool cases folder
-        assert not tool_cases.exists()
     finally:
-        DuckDBManager.close_all()
-        shutil.rmtree(temp_path, ignore_errors=True)
-        _load_custom_case_dirs()
+        DuckDBManager.close_connection(custom_cid)
+
+
+def test_source_path_never_polluted_when_target_equals_source_or_none(client, isolated_stability_env, tmp_path):
+    """Verify target_dir=None/'' defaults safely to CASES_DIR / case_id while target_dir == source_path (or nested) returns 400."""
+    src_dir = (tmp_path / "readonly_evidence_folder").resolve()
+    src_dir.mkdir(parents=True, exist_ok=True)
+    (src_dir / "sample.txt").write_text("Immutable evidence", encoding="utf-8")
+
+    for bad_cid, bad_tgt in (
+        ("reject_same_as_src", str(src_dir)),
+        ("reject_nested_in_src", str(src_dir / "nested_out")),
+    ):
+        bad_res = client.post(
+            "/api/cases/process",
+            json={
+                "case_name": bad_cid,
+                "case_id": bad_cid,
+                "source_type": "folder",
+                "source_path": str(src_dir),
+                "target_dir": bad_tgt,
+                "enable_yara": False,
+                "enable_ioc": False,
+                "enable_ocr": False,
+                "enable_stinger": False,
+                "enable_hindsight": False,
+                "run_async": False,
+            },
+        )
+        assert bad_res.status_code == 400
+        assert not (src_dir / "case.duckdb").exists()
+        assert not (src_dir / "staging").exists()
+        assert not (src_dir / "nested_out").exists()
+
+    for cid, tgt_val in (
+        ("safe_default_none_case", None),
+        ("safe_default_blank_case", ""),
+    ):
+        res = client.post(
+            "/api/cases/process",
+            json={
+                "case_name": cid,
+                "case_id": cid,
+                "source_type": "folder",
+                "source_path": str(src_dir),
+                "target_dir": tgt_val,
+                "enable_yara": False,
+                "enable_ioc": False,
+                "enable_ocr": False,
+                "enable_stinger": False,
+                "enable_hindsight": False,
+                "run_async": False,
+            },
+        )
+        assert res.status_code == 200
+        body = res.json()
+        expected_dir = (isolated_stability_env["cases_dir"] / cid).resolve()
+        assert Path(body["target_dir"]).resolve() == expected_dir
+        assert (expected_dir / "case.duckdb").exists()
+        assert not (src_dir / "case.duckdb").exists()
+        assert not (src_dir / "staging").exists()
+        DuckDBManager.close_connection(cid)
+
 

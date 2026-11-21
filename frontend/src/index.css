@@ -435,7 +435,6 @@ table th, table td {
 /* === WFT RESIZABLE TABLE ANTI-CRUSH GUARD === */
 table {
   min-width: 100%;
-  width: max-content !important;
   border-collapse: collapse;
 }
 thead th {
@@ -444,13 +443,6 @@ thead th {
   overflow-wrap: normal !important;
   vertical-align: middle !important;
   height: auto !important;
-  min-width: 70px;
-}
-thead th:last-child,
-tbody td:last-child {
-  min-width: 340px !important;
-  word-break: normal !important;
-  overflow-wrap: break-word !important;
 }
 tbody td {
   vertical-align: top;
@@ -458,18 +450,25 @@ tbody td {
   overflow-wrap: break-word !important;
 }
 
-
 /* === WFT THUMBNAIL GRID COMPACT CARD FIX === */
 .grid {
   align-content: start !important;
   grid-auto-rows: max-content !important;
 }
-.wft-thumb-card {
+.wft-thumb-card,
+.grid > div.h-48[class*="rounded"][class*="border"][class*="cursor-pointer"] {
   height: 210px !important;
   max-height: 210px !important;
   display: flex !important;
   flex-direction: column !important;
   justify-content: space-between !important;
+  overflow: hidden !important;
+}
+.grid > div.h-48[class*="rounded"][class*="border"][class*="cursor-pointer"] > div:first-child {
+  height: 140px !important;
+  max-height: 140px !important;
+  min-height: 140px !important;
+  flex: 0 0 140px !important;
   overflow: hidden !important;
 }
 .wft-thumb-media {
@@ -488,47 +487,4 @@ tbody td {
   height: 100% !important;
   object-fit: cover !important;
   display: block !important;
-}
-
-
-/* === WFT THUMBNAIL GRID & RESIZABLE TABLE FIX === */
-.grid {
-  align-content: start !important;
-  grid-auto-rows: max-content !important;
-}
-/* Prevent thumbnail cards from stretching vertically into tall bars */
-.grid > div[class*="rounded"][class*="border"][class*="cursor-pointer"] {
-  height: 215px !important;
-  max-height: 215px !important;
-  min-height: 215px !important;
-  display: flex !important;
-  flex-direction: column !important;
-  justify-content: space-between !important;
-  overflow: hidden !important;
-}
-.grid > div[class*="rounded"][class*="border"][class*="cursor-pointer"] > div:first-child {
-  height: 145px !important;
-  max-height: 145px !important;
-  min-height: 145px !important;
-  flex: 0 0 145px !important;
-  overflow: hidden !important;
-}
-/* Prevent EVTX / Artifact table last column from crushing into 1-char vertical stack */
-table {
-  min-width: 100%;
-  width: max-content !important;
-  border-collapse: collapse;
-}
-thead th {
-  white-space: nowrap !important;
-  word-break: keep-all !important;
-  overflow-wrap: normal !important;
-  vertical-align: middle !important;
-  height: auto !important;
-}
-thead th:last-child,
-tbody td:last-child {
-  min-width: 340px !important;
-  word-break: normal !important;
-  overflow-wrap: break-word !important;
 }

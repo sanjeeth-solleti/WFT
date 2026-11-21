@@ -25,6 +25,8 @@ import {
   X,
   Save,
   FileJson,
+  Trash2,
+  Network,
 } from 'lucide-react';
 import {
   apiClient,
@@ -36,11 +38,50 @@ import {
 import { useResizable, ResizeHandle } from './ResizeHandle';
 import { RowContextMenu } from './RowContextMenu';
 
+const BUILTIN_PROFILE_IDS = new Set<string>([
+  'auth_logons',
+  'brute_force_spray',
+  'kerberos_pth_attacks',
+  'rdp_remote_access',
+  'smb_winrm_lateral',
+  'powershell_script',
+  'process_execution_sysmon',
+  'persistence_services_tasks',
+  'wmi_persistence',
+  'bits_staging_downloads',
+  'account_management',
+  'antivirus_defender',
+  'log_clearing_antiforensics',
+  'ransomware_vss_backup',
+  'firewall_network_tamper',
+  'usb_external_storage',
+  'app_crashes_exploits',
+  'system_boot_shutdown',
+]);
+
 interface EventLogsWorkbenchProps {
   caseId: string;
+  globalSearch?: string;
+  dateRange?: {
+    preset?: string;
+    startUtc?: string;
+    endUtc?: string;
+  };
+  externalKeywords?: string[];
+  tags?: string[];
+  bookmarkedOnly?: boolean;
+  onInspectEntity?: (entityValue: string) => void;
 }
 
-export const EventLogsWorkbench: React.FC<EventLogsWorkbenchProps> = ({ caseId }) => {
+export const EventLogsWorkbench: React.FC<EventLogsWorkbenchProps> = ({
+  caseId,
+  globalSearch = '',
+  dateRange,
+  externalKeywords = [],
+  tags = [],
+  bookmarkedOnly = false,
+  onInspectEntity,
+}) => {
   // Profiles and files list
   const [profilesData, setProfilesData] = useState<EvtxProfilesResponse | null>(null);
   const [selectedProfileId, setSelectedProfileId] = useState<string | null>('auth_logons');
@@ -51,7 +92,8 @@ export const EventLogsWorkbench: React.FC<EventLogsWorkbenchProps> = ({ caseId }
   const [rowsData, setRowsData] = useState<EvtxRowsResponse | null>(null);
   const [selectedRow, setSelectedRow] = useState<Record<string, any> | null>(null);
   const [isLoadingRows, setIsLoadingRows] = useState(false);
-  const [search, setSearch] = useState('');
+  const [searchInput, setSearchInput] = useState(globalSearch);
+  const [debouncedSearch, setDebouncedSearch] = useState(globalSearch);
   const [levelFilter, setLevelFilter] = useState('');
   const [eventRows, setEventRows] = useState<Record<string, any>[]>([]);
   const [isLoadingMore, setIsLoadingMore] = useState(false);
@@ -111,8 +153,25 @@ export const EventLogsWorkbench: React.FC<EventLogsWorkbenchProps> = ({ caseId }
   const [isCreatingProfile, setIsCreatingProfile] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
 
+  // Sync global search & debounce local search input (300ms)
+  useEffect(() => {
+    setSearchInput(globalSearch || '');
+    setDebouncedSearch(globalSearch || '');
+  }, [globalSearch]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setDebouncedSearch(searchInput);
+    }, 300);
+    return () => window.clearTimeout(timer);
+  }, [searchInput]);
+
+  const keywordsKey = useMemo(() => JSON.stringify(externalKeywords || []), [externalKeywords]);
+  const tagsKey = useMemo(() => JSON.stringify(tags || []), [tags]);
+
   // Fetch profiles and file counts
   const fetchProfiles = useCallback(async () => {
+    if (!caseId) return;
     setIsLoadingProfiles(true);
     try {
       const data = await apiClient.getEvtxProfiles(caseId);
@@ -124,8 +183,22 @@ export const EventLogsWorkbench: React.FC<EventLogsWorkbenchProps> = ({ caseId }
     }
   }, [caseId]);
 
+  const handleDeleteProfile = async (e: React.MouseEvent, profileId: string) => {
+    e.stopPropagation();
+    try {
+      await apiClient.deleteEventProfile(profileId);
+      if (selectedProfileId === profileId) {
+        setSelectedProfileId('auth_logons');
+      }
+      await fetchProfiles();
+    } catch (err: any) {
+      console.error('Failed to delete custom profile:', err);
+    }
+  };
+
   // Fetch rows based on selected profile, file, or filters
   const fetchRows = useCallback(async (reset: boolean = true) => {
+    if (!caseId) return;
     if (reset) {
       setIsLoadingRows(true);
     } else {
@@ -133,20 +206,41 @@ export const EventLogsWorkbench: React.FC<EventLogsWorkbenchProps> = ({ caseId }
     }
     try {
       const offset = reset ? 0 : eventRows.length;
+      const isLocalOnlyProfile =
+        selectedProfileId &&
+        profilesData?.profiles.some((p) => p.id === selectedProfileId && p.is_custom && !BUILTIN_PROFILE_IDS.has(p.id));
       const res = await apiClient.getEvtxRows(caseId, {
         profile_id: selectedProfileId || undefined,
         file_name: selectedFileName || undefined,
         level: levelFilter || undefined,
-        search: search.trim() || undefined,
+        search: debouncedSearch.trim() || undefined,
+        keywords: externalKeywords.length > 0 ? externalKeywords : undefined,
+        start_time: dateRange?.startUtc || undefined,
+        end_time: dateRange?.endUtc || undefined,
+        tags: tags.length > 0 ? tags : undefined,
+        bookmarked_only: bookmarkedOnly || undefined,
         limit: pageSize,
         offset,
         sort_col: 'TimeCreated',
         sort_dir: 'DESC',
+      }).catch(async (err) => {
+        if (isLocalOnlyProfile) {
+          return await apiClient.getEvtxRows(caseId, {
+            file_name: selectedFileName || undefined,
+            level: levelFilter || undefined,
+            search: debouncedSearch.trim() || undefined,
+            limit: pageSize,
+            offset,
+            sort_col: 'TimeCreated',
+            sort_dir: 'DESC',
+          });
+        }
+        throw err;
       });
       setRowsData(res);
       if (reset) {
         setEventRows(res.rows || []);
-        if (res.rows.length > 0) {
+        if (res.rows && res.rows.length > 0) {
           setSelectedRow(res.rows[0]);
         } else {
           setSelectedRow(null);
@@ -160,7 +254,20 @@ export const EventLogsWorkbench: React.FC<EventLogsWorkbenchProps> = ({ caseId }
       setIsLoadingRows(false);
       setIsLoadingMore(false);
     }
-  }, [caseId, selectedProfileId, selectedFileName, levelFilter, search, eventRows.length]);
+  }, [
+    caseId,
+    selectedProfileId,
+    selectedFileName,
+    levelFilter,
+    debouncedSearch,
+    keywordsKey,
+    tagsKey,
+    bookmarkedOnly,
+    dateRange?.startUtc,
+    dateRange?.endUtc,
+    eventRows.length,
+    profilesData?.profiles,
+  ]);
 
   useEffect(() => {
     fetchProfiles();
@@ -168,7 +275,18 @@ export const EventLogsWorkbench: React.FC<EventLogsWorkbenchProps> = ({ caseId }
 
   useEffect(() => {
     fetchRows(true);
-  }, [caseId, selectedProfileId, selectedFileName, levelFilter, search]);
+  }, [
+    caseId,
+    selectedProfileId,
+    selectedFileName,
+    levelFilter,
+    debouncedSearch,
+    keywordsKey,
+    tagsKey,
+    bookmarkedOnly,
+    dateRange?.startUtc,
+    dateRange?.endUtc,
+  ]);
 
   const handleSelectProfile = (pId: string) => {
     setSelectedProfileId(pId);
@@ -291,8 +409,19 @@ export const EventLogsWorkbench: React.FC<EventLogsWorkbenchProps> = ({ caseId }
     );
   }, [profilesData?.files, fileSearch]);
 
-  const totalPages = rowsData ? Math.ceil(rowsData.filtered_count / pageSize) : 0;
-  const rows = eventRows;
+  const rows = useMemo(() => {
+    let list = eventRows;
+    if (externalKeywords.length > 0) {
+      const lowered = externalKeywords.map((k) => k.toLowerCase()).filter(Boolean);
+      if (lowered.length > 0) {
+        list = list.filter((r) => {
+          const hay = JSON.stringify(r).toLowerCase();
+          return lowered.some((kw) => hay.includes(kw));
+        });
+      }
+    }
+    return list;
+  }, [eventRows, externalKeywords]);
 
   return (
     <div
@@ -351,32 +480,53 @@ export const EventLogsWorkbench: React.FC<EventLogsWorkbenchProps> = ({ caseId }
 
             {profilesData?.profiles.map((p) => {
               const isSelected = selectedProfileId === p.id;
+              const isCustom = Boolean(p.is_custom) || !BUILTIN_PROFILE_IDS.has(p.id);
               return (
-                <button
+                <div
                   key={p.id}
                   onClick={() => handleSelectProfile(p.id)}
-                  className={`w-full text-left px-2.5 py-2 rounded text-xs transition-colors flex items-center justify-between gap-2 cursor-pointer ${
+                  className={`w-full text-left px-2.5 py-2 rounded text-xs transition-colors flex items-center justify-between gap-2 cursor-pointer group ${
                     isSelected
                       ? 'bg-[#bae6fd] dark:bg-[#0c4a6e] text-[#0369a1] dark:text-[#38bdf8] font-bold border border-[#0284c7] shadow-2xs'
                       : 'hover:bg-slate-100 dark:hover:bg-[#0f172a] text-[#0f172a] dark:text-[#f8fafc]'
                   }`}
                 >
                   <div className="truncate flex-1 min-w-0">
-                    <div className="truncate font-semibold">{p.name}</div>
+                    <div className="truncate font-semibold flex items-center gap-1.5">
+                      <span className="truncate">{p.name}</span>
+                      {isCustom && (
+                        <span className="text-[9px] px-1 py-0.2 rounded bg-sky-100 dark:bg-sky-950/60 text-[#0284c7] dark:text-[#38bdf8] font-mono font-bold shrink-0">
+                          CUSTOM
+                        </span>
+                      )}
+                    </div>
                     <div className="text-[10px] text-slate-400 truncate font-normal mt-0.5">
                       {p.description}
                     </div>
                   </div>
-                  <span
-                    className={`font-mono text-[11px] font-bold px-2 py-0.5 rounded-full shrink-0 ${
-                      p.hit_count > 0
-                        ? 'bg-amber-100 dark:bg-amber-950/60 text-amber-800 dark:text-amber-300 border border-amber-300 dark:border-amber-800'
-                        : 'bg-slate-100 dark:bg-slate-800 text-slate-400'
-                    }`}
-                  >
-                    {p.hit_count.toLocaleString()}
-                  </span>
-                </button>
+                  <div className="flex items-center gap-1 shrink-0">
+                    <span
+                      className={`font-mono text-[11px] font-bold px-2 py-0.5 rounded-full shrink-0 ${
+                        p.hit_count > 0
+                          ? 'bg-amber-100 dark:bg-amber-950/60 text-amber-800 dark:text-amber-300 border border-amber-300 dark:border-amber-800'
+                          : 'bg-slate-100 dark:bg-slate-800 text-slate-400'
+                      }`}
+                    >
+                      {p.hit_count.toLocaleString()}
+                    </span>
+                    {isCustom && (
+                      <button
+                        type="button"
+                        data-testid={`delete-profile-${p.id}`}
+                        onClick={(e) => handleDeleteProfile(e, p.id)}
+                        title="Delete custom profile"
+                        className="p-1 rounded text-slate-400 hover:text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/50 transition-colors cursor-pointer"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                  </div>
+                </div>
               );
             })}
           </div>
@@ -492,8 +642,11 @@ export const EventLogsWorkbench: React.FC<EventLogsWorkbenchProps> = ({ caseId }
               <Search className="w-3.5 h-3.5 absolute left-2.5 top-2.5 text-slate-400 pointer-events-none" />
               <input
                 type="text"
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
+                value={searchInput}
+                onChange={(e) => setSearchInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') setDebouncedSearch(searchInput);
+                }}
                 placeholder="Search across Payload, Provider, Message, Computer, User..."
                 className="w-full text-xs pl-8 pr-3 py-1.5 rounded bg-white dark:bg-[#1e293b] border border-[#cbd5e1] dark:border-[#334155] focus:outline-none focus:border-[#0284c7] text-[#0f172a] dark:text-[#f8fafc]"
               />
@@ -711,15 +864,37 @@ export const EventLogsWorkbench: React.FC<EventLogsWorkbenchProps> = ({ caseId }
                       <span className="text-slate-400">Channel:</span>
                       <span className="truncate max-w-[200px] text-right">{selectedRow.Channel}</span>
                     </div>
-                    <div className="flex justify-between">
+                    <div className="flex justify-between items-center">
                       <span className="text-slate-400">Computer:</span>
-                      <span className="font-mono">{selectedRow.Computer || '-'}</span>
+                      {selectedRow.Computer && onInspectEntity ? (
+                        <button
+                          type="button"
+                          onClick={() => onInspectEntity(String(selectedRow.Computer))}
+                          className="font-mono text-[#0284c7] dark:text-[#38bdf8] hover:underline inline-flex items-center gap-1 cursor-pointer"
+                        >
+                          <span>{selectedRow.Computer}</span>
+                          <Network className="w-3 h-3" />
+                        </button>
+                      ) : (
+                        <span className="font-mono">{selectedRow.Computer || '-'}</span>
+                      )}
                     </div>
-                    <div className="flex justify-between">
+                    <div className="flex justify-between items-center">
                       <span className="text-slate-400">User:</span>
-                      <span className="font-semibold text-emerald-600 dark:text-emerald-400">
-                        {selectedRow.UserName || '-'}
-                      </span>
+                      {selectedRow.UserName && onInspectEntity ? (
+                        <button
+                          type="button"
+                          onClick={() => onInspectEntity(String(selectedRow.UserName))}
+                          className="font-semibold text-emerald-600 dark:text-emerald-400 hover:underline inline-flex items-center gap-1 cursor-pointer"
+                        >
+                          <span>{selectedRow.UserName}</span>
+                          <Network className="w-3 h-3" />
+                        </button>
+                      ) : (
+                        <span className="font-semibold text-emerald-600 dark:text-emerald-400">
+                          {selectedRow.UserName || '-'}
+                        </span>
+                      )}
                     </div>
                   </div>
                 </div>
@@ -780,7 +955,7 @@ export const EventLogsWorkbench: React.FC<EventLogsWorkbenchProps> = ({ caseId }
       {/* MODAL 1: RAW EVENT PROFILES JSON EDITOR                       */}
       {/* ------------------------------------------------------------- */}
       {isRawModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 select-none">
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 select-none">
           <div className="bg-white dark:bg-[#1e293b] border border-[#cbd5e1] dark:border-[#334155] rounded-lg shadow-2xl w-full max-w-4xl flex flex-col max-h-[90vh] overflow-hidden font-sans">
             <div className="px-5 py-3.5 bg-[#f8fafc] dark:bg-[#0f172a] border-b border-[#cbd5e1] dark:border-[#334155] flex items-center justify-between shrink-0">
               <div className="flex items-center gap-2.5">
@@ -864,7 +1039,7 @@ export const EventLogsWorkbench: React.FC<EventLogsWorkbenchProps> = ({ caseId }
       {/* MODAL 2: CREATE CUSTOM FORENSIC PROFILE                       */}
       {/* ------------------------------------------------------------- */}
       {isCreateModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 select-none">
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 select-none">
           <div className="bg-white dark:bg-[#1e293b] border border-[#cbd5e1] dark:border-[#334155] rounded-lg shadow-2xl w-full max-w-lg flex flex-col max-h-[90vh] overflow-hidden font-sans">
             <div className="px-5 py-3.5 bg-[#f8fafc] dark:bg-[#0f172a] border-b border-[#cbd5e1] dark:border-[#334155] flex items-center justify-between shrink-0">
               <div className="flex items-center gap-2.5">
@@ -996,6 +1171,7 @@ export const EventLogsWorkbench: React.FC<EventLogsWorkbenchProps> = ({ caseId }
           row={contextMenu.row}
           tableName="raw_evtx"
           cellValue={contextMenu.cellValue}
+          onInspectEntity={onInspectEntity}
         />
       )}
     </div>

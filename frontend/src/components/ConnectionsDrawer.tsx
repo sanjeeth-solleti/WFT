@@ -16,7 +16,9 @@ import {
 interface ConnectionsDrawerProps {
   caseId: string;
   activeEntity: string;
+  entityType?: string;
   onSelectEntity: (entityValue: string) => void;
+  onNavigateToSource?: (sourceTable: string, sourceRowId: number, entityValue?: string) => void;
   onClose?: () => void;
   isFullScreen?: boolean;
   width?: number;
@@ -26,6 +28,7 @@ export const ConnectionsDrawer: React.FC<ConnectionsDrawerProps> = ({
   caseId,
   activeEntity,
   onSelectEntity,
+  onNavigateToSource,
   onClose,
   isFullScreen = false,
   width,
@@ -76,22 +79,49 @@ export const ConnectionsDrawer: React.FC<ConnectionsDrawerProps> = ({
     if (!containerRef.current || !data) return;
 
     if (cyRef.current) {
-      cyRef.current.destroy();
+      try {
+        cyRef.current.destroy();
+      } catch {
+        // ignore teardown errors
+      }
       cyRef.current = null;
     }
 
+    const uniqueNodesMap = new Map<string, any>();
+    for (const n of data.nodes || []) {
+      if (n?.data?.id && !uniqueNodesMap.has(n.data.id)) {
+        uniqueNodesMap.set(n.data.id, n.data);
+      }
+    }
+
+    const uniqueEdgesMap = new Map<string, any>();
+    for (const e of data.edges || []) {
+      if (
+        e?.data?.id &&
+        e.data.source &&
+        e.data.target &&
+        uniqueNodesMap.has(e.data.source) &&
+        uniqueNodesMap.has(e.data.target) &&
+        !uniqueEdgesMap.has(e.data.id)
+      ) {
+        uniqueEdgesMap.set(e.data.id, e.data);
+      }
+    }
+
     const elements = [
-      ...data.nodes.map((n) => ({
+      ...Array.from(uniqueNodesMap.values()).map((d) => ({
         group: 'nodes' as const,
-        data: n.data,
+        data: d,
       })),
-      ...data.edges.map((e) => ({
+      ...Array.from(uniqueEdgesMap.values()).map((d) => ({
         group: 'edges' as const,
-        data: e.data,
+        data: d,
       })),
     ];
 
     if (elements.length === 0) return;
+
+    let rafId: number | null = null;
 
     try {
       const cy = cytoscape({
@@ -168,8 +198,7 @@ export const ConnectionsDrawer: React.FC<ConnectionsDrawerProps> = ({
         layout: {
           name: layoutName,
           padding: 30,
-          animate: true,
-          animationDuration: 400,
+          animate: false,
         },
       });
 
@@ -183,14 +212,28 @@ export const ConnectionsDrawer: React.FC<ConnectionsDrawerProps> = ({
       });
 
       cyRef.current = cy;
-      cy.fit();
+      rafId = requestAnimationFrame(() => {
+        if (cyRef.current && containerRef.current && containerRef.current.clientWidth > 0) {
+          try {
+            cyRef.current.resize();
+            cyRef.current.fit(undefined, 30);
+          } catch {
+            // ignore headless viewport timing issues
+          }
+        }
+      });
     } catch (err) {
       console.error('Cytoscape rendering failed:', err);
     }
 
     return () => {
+      if (rafId !== null) cancelAnimationFrame(rafId);
       if (cyRef.current) {
-        cyRef.current.destroy();
+        try {
+          cyRef.current.destroy();
+        } catch {
+          // ignore
+        }
         cyRef.current = null;
       }
     };
@@ -253,9 +296,21 @@ export const ConnectionsDrawer: React.FC<ConnectionsDrawerProps> = ({
             <span className="font-bold text-xs text-[#0f172a] dark:text-[#f8fafc] flex items-center gap-1.5 truncate">
               WFT Connections
             </span>
-            <span className="text-[10px] font-mono text-[#0284c7] dark:text-[#38bdf8] truncate font-semibold">
-              {activeEntity ? activeEntity : 'Cross-Artifact Hub Overview'}
-            </span>
+            <div className="flex items-center gap-1.5 overflow-hidden">
+              <span className="text-[10px] font-mono text-[#0284c7] dark:text-[#38bdf8] truncate font-semibold">
+                {activeEntity ? activeEntity : 'Cross-Artifact Hub Overview'}
+              </span>
+              {activeEntity && (
+                <button
+                  type="button"
+                  onClick={() => onSelectEntity('')}
+                  className="text-[9px] px-1.5 py-0.2 rounded bg-white dark:bg-[#1e293b] border border-[#cbd5e1] dark:border-[#334155] text-slate-600 dark:text-slate-300 hover:text-[#0284c7] font-mono shrink-0 cursor-pointer"
+                  title="Return to Cross-Artifact Hub Overview"
+                >
+                  Hub Overview ✕
+                </button>
+              )}
+            </div>
           </div>
         </div>
 
@@ -338,12 +393,21 @@ export const ConnectionsDrawer: React.FC<ConnectionsDrawerProps> = ({
         {error ? (
           <div className="p-4 text-center text-[#991b1b] dark:text-red-400 text-xs font-mono">{error}</div>
         ) : !data || data.nodes.length === 0 ? (
-          <div className="h-full flex flex-col items-center justify-center text-slate-500 text-xs italic gap-1 p-4 text-center">
+          <div className="h-full flex flex-col items-center justify-center text-slate-500 text-xs italic gap-2 p-4 text-center">
             <Network className="w-8 h-8 text-slate-400" />
             <span>No connections recorded for entity '{activeEntity}'.</span>
             <span className="text-[10px] text-slate-400">
               Run EZ tools and non-EZ parsers to index cross-artifact relationships.
             </span>
+            {activeEntity && (
+              <button
+                type="button"
+                onClick={() => onSelectEntity('')}
+                className="mt-1 not-italic px-2.5 py-1 rounded bg-[#0284c7] hover:bg-[#0369a1] text-white text-[11px] font-semibold cursor-pointer"
+              >
+                Return to Hub Overview
+              </button>
+            )}
           </div>
         ) : (
           <div ref={containerRef} className="w-full h-full" />
@@ -376,7 +440,10 @@ export const ConnectionsDrawer: React.FC<ConnectionsDrawerProps> = ({
             displayedOccurrences.map((occ) => (
               <div
                 key={occ.connection_id}
-                className="p-2 rounded bg-white dark:bg-[#1e293b] border border-[#cbd5e1] dark:border-[#334155] hover:border-slate-400 flex flex-col gap-0.5 shadow-2xs"
+                onClick={() => onNavigateToSource?.(occ.source_table, occ.source_row_id, occ.entity_value)}
+                className={`p-2 rounded bg-white dark:bg-[#1e293b] border border-[#cbd5e1] dark:border-[#334155] hover:border-[#0284c7] flex flex-col gap-0.5 shadow-2xs transition-colors ${
+                  onNavigateToSource ? 'cursor-pointer' : ''
+                }`}
               >
                 <div className="flex items-center justify-between text-[10px]">
                   <span className="font-semibold text-[#0284c7] dark:text-[#38bdf8]">{occ.artifact_name}</span>

@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Text;
 using System.Windows.Forms;
 
 namespace WFTPicker
@@ -9,7 +10,10 @@ namespace WFTPicker
         [STAThread]
         static int Main(string[] args)
         {
-            if (args != null && args.Length > 0 && args[0].Equals("--test", StringComparison.OrdinalIgnoreCase))
+            try { Console.OutputEncoding = Encoding.UTF8; } catch { }
+            if (args == null) args = new string[0];
+
+            if (args.Length > 0 && args[0].Equals("--test", StringComparison.OrdinalIgnoreCase))
             {
                 Console.Out.WriteLine("WFT_PICKER_OK");
                 return 0;
@@ -17,6 +21,7 @@ namespace WFTPicker
 
             try
             {
+                Application.EnableVisualStyles();
                 string mode = (args.Length > 0 && !string.IsNullOrEmpty(args[0])) ? args[0].ToLowerInvariant() : "folder";
                 string title = (args.Length > 1 && !string.IsNullOrEmpty(args[1])) ? args[1] : (mode == "file" ? "Select Forensic Image or File" : "Select Target Directory");
                 string initDir = (args.Length > 2 && !string.IsNullOrEmpty(args[2])) ? args[2] : "";
@@ -24,6 +29,8 @@ namespace WFTPicker
                 using (Form f = new Form())
                 {
                     f.TopMost = true;
+                    f.ShowInTaskbar = false;
+                    f.Opacity = 0;
                     if (mode == "file")
                     {
                         using (OpenFileDialog ofd = new OpenFileDialog())

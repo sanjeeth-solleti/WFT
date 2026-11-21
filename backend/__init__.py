@@ -1,4 +1,4 @@
-﻿"""
+"""
 Windows Forensic Toolkit (WFT) DFIR Suite Backend Package
 """
 

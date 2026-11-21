@@ -21,13 +21,18 @@ rule C2_CobaltStrike_Beacon_Indicators {
         $bcn2 = "beacon.x64.dll" ascii wide nocase
         $cfg = { 00 01 00 01 00 02 00 01 00 02 00 02 }
         $cradle_cs = "DownloadString('http://127.0.0.1:" ascii wide nocase
+        $iex1 = "IEX" ascii wide nocase
+        $iex2 = "Invoke-Expression" ascii wide nocase
     condition:
-        filesize < 25MB and (
-            any of ($p*) or
-            $fmt or
-            any of ($bcn*) or
-            $cradle_cs or
-            (uint16(0) == 0x5A4D and $ref and $cfg)
+        (
+            uint16(0) == 0x5A4D and uint32(0x3C) < filesize and uint32(uint32(0x3C)) == 0x00004550 and
+            filesize < 25MB and (
+                $fmt or
+                ($ref and ($cfg or any of ($bcn*) or any of ($p*))) or
+                2 of ($p*)
+            )
+        ) or (
+            uint16(0) != 0x5A4D and filesize < 2MB and $cradle_cs and ($iex1 or $iex2)
         )
 }
 
@@ -46,7 +51,7 @@ rule C2_CobaltStrike_Malleable_Profile {
         $m5 = "stage {" ascii wide
         $m6 = "process-inject {" ascii wide
     condition:
-        filesize < 2MB and 3 of ($m*)
+        uint16(0) != 0x5A4D and filesize < 2MB and $m1 and 3 of ($m2, $m3, $m4, $m5, $m6)
 }
 
 rule C2_Sliver_Implant {
@@ -64,10 +69,8 @@ rule C2_Sliver_Implant {
         $s5 = "RevToSelfReq" ascii wide
         $s6 = "ImpersonateReq" ascii wide
     condition:
-        filesize < 50MB and (
-            $s1 or $s2 or $s3 or
-            (2 of ($s4, $s5, $s6))
-        )
+        uint16(0) == 0x5A4D and uint32(0x3C) < filesize and uint32(uint32(0x3C)) == 0x00004550 and
+        filesize < 50MB and ($s1 or $s2 or $s3) and 2 of ($s2, $s3, $s4, $s5, $s6)
 }
 
 rule C2_Metasploit_Meterpreter {
@@ -84,10 +87,10 @@ rule C2_Metasploit_Meterpreter {
         $m4 = "stdapi_net_config_get_interfaces" ascii wide
         $m5 = "ReflectiveLoader" ascii wide
     condition:
+        uint16(0) == 0x5A4D and uint32(0x3C) < filesize and uint32(uint32(0x3C)) == 0x00004550 and
         filesize < 25MB and (
-            $m1 or $m2 or
-            ($m3 and $m4) or
-            ($m5 and ($m3 or $m4))
+            (($m1 or $m2) and ($m3 or $m4 or $m5)) or
+            ($m3 and $m4)
         )
 }
 
@@ -105,9 +108,10 @@ rule C2_Havoc_Demon {
         $h4 = "PackageAddInt32" ascii wide
         $h5 = "DemonConfig" ascii wide
     condition:
+        uint16(0) == 0x5A4D and uint32(0x3C) < filesize and uint32(uint32(0x3C)) == 0x00004550 and
         filesize < 20MB and (
-            $h1 or $h2 or
-            (2 of ($h3, $h4, $h5))
+            (($h1 or $h2) and any of ($h3, $h4, $h5)) or
+            2 of ($h3, $h4, $h5)
         )
 }
 
@@ -128,9 +132,11 @@ rule RAT_AsyncRAT_Quasar_DcRat {
         $q7 = "Anti_Analysis" ascii wide
         $q8 = "RunAntiAnalysis" ascii wide
     condition:
-        uint16(0) == 0x5A4D and filesize < 15MB and (
-            $q1 or $q2 or $q3 or $q4 or
-            ($q5 and ($q6 or $q7 or $q8))
+        uint16(0) == 0x5A4D and uint32(0x3C) < filesize and uint32(uint32(0x3C)) == 0x00004550 and
+        filesize < 15MB and (
+            (($q1 or $q2) and any of ($q5, $q6, $q7, $q8)) or
+            ($q3 and $q4) or
+            ($q5 and 2 of ($q6, $q7, $q8))
         )
 }
 
@@ -151,9 +157,10 @@ rule RAT_Remcos_AgentTesla {
         $a4 = "Opera Stable\\Login Data" ascii wide
         $a5 = "GetKeyboardState" ascii wide
     condition:
-        uint16(0) == 0x5A4D and filesize < 20MB and (
-            any of ($r*) or
-            $a1 or
+        uint16(0) == 0x5A4D and uint32(0x3C) < filesize and uint32(uint32(0x3C)) == 0x00004550 and
+        filesize < 20MB and (
+            2 of ($r*) or
+            ($a1 and 2 of ($a2, $a3, $a4, $a5)) or
             ($a2 and $a3 and $a4 and $a5)
         )
 }

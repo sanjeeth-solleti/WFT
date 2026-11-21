@@ -19,7 +19,7 @@ rule Webshell_Java_JSP_Tomcat_Exec {
         $param2 = "request.getHeader(" ascii wide
         $param3 = "request.getInputStream(" ascii wide
     condition:
-        filesize < 2MB and uint16(0) != 0x5A4D and
+        filesize < 1MB and uint16(0) != 0x5A4D and uint32(0) != 0x00021401 and
         any of ($jsp*) and any of ($exec*) and any of ($param*)
 }
 
@@ -35,11 +35,10 @@ rule Webshell_Java_JSP_Godzilla_Behinder {
         $c1 = "Cipher.getInstance(\"AES\"" ascii wide
         $c2 = "SecretKeySpec(" ascii wide
         $d1 = "super.defineClass(" ascii wide
-        $d2 = ".defineClass(b, 0, b.length)" ascii wide
-        $s1 = "session.getAttribute(" ascii wide
+        $d2 = ".defineClass(" ascii wide
     condition:
-        filesize < 2MB and uint16(0) != 0x5A4D and
-        $jsp1 and ($c1 or $c2) and ($d1 or $d2 or $s1)
+        filesize < 1MB and uint16(0) != 0x5A4D and uint32(0) != 0x00021401 and
+        $jsp1 and ($c1 or $c2) and ($d1 or $d2)
 }
 
 rule Webshell_ASP_NET_IIS {
@@ -58,13 +57,17 @@ rule Webshell_ASP_NET_IIS {
         $eval3 = "eval(Request[" ascii wide nocase
         $exec1 = "ProcessStartInfo" ascii wide
         $exec2 = "System.Diagnostics.Process" ascii wide
+        $shell1 = "cmd.exe" ascii wide nocase
+        $shell2 = "cmd /c" ascii wide nocase
+        $shell3 = "powershell" ascii wide nocase
         $req1 = "Request.Form[" ascii wide nocase
         $req2 = "Request.QueryString[" ascii wide nocase
         $req3 = "Request.Item[" ascii wide nocase
     condition:
-        filesize < 2MB and uint16(0) != 0x5A4D and (
+        filesize < 1MB and uint16(0) != 0x5A4D and uint32(0) != 0x00021401 and
+        any of ($asp*) and (
             any of ($eval*) or
-            (any of ($asp*) and ($exec1 or $exec2) and any of ($req*))
+            (($exec1 or $exec2) and any of ($shell*) and any of ($req*))
         )
 }
 
@@ -85,7 +88,7 @@ rule Webshell_ASPX_SharPyShell_Godzilla {
         $r1 = "Request.BinaryRead(" ascii wide
         $r2 = "Request.InputStream" ascii wide
     condition:
-        filesize < 2MB and uint16(0) != 0x5A4D and
+        filesize < 1MB and uint16(0) != 0x5A4D and uint32(0) != 0x00021401 and
         any of ($asp*) and ($c1 or $c2) and ($a1 or $a2) and ($r1 or $r2)
 }
 
@@ -99,23 +102,31 @@ rule Webshell_PHP_Execution {
     strings:
         $php = "<?php" ascii wide nocase
         $php_short = "<?=" ascii wide
+        $direct1 = "shell_exec($_" ascii wide nocase
+        $direct2 = "passthru($_" ascii wide nocase
+        $direct3 = "system($_" ascii wide nocase
+        $direct4 = "proc_open($_" ascii wide nocase
+        $direct5 = "popen($_" ascii wide nocase
+        $b64_in = "base64_decode($_" ascii wide nocase
         $e1 = "shell_exec(" ascii wide nocase
         $e2 = "passthru(" ascii wide nocase
         $e3 = "system(" ascii wide nocase
         $e4 = "proc_open(" ascii wide nocase
         $e5 = "popen(" ascii wide nocase
-        $r1 = "$_GET[" ascii wide nocase
-        $r2 = "$_POST[" ascii wide nocase
-        $r3 = "$_REQUEST[" ascii wide nocase
-        $r4 = "$_COOKIE[" ascii wide nocase
         $obf1 = "eval(base64_decode(" ascii wide nocase
         $obf2 = "eval(gzinflate(" ascii wide nocase
         $obf3 = "eval(gzuncompress(" ascii wide nocase
         $obf4 = "@eval($_POST[" ascii wide nocase
-        $obf5 = "assert($_POST[" ascii wide nocase
+        $obf5 = "@eval($_GET[" ascii wide nocase
+        $obf6 = "@eval($_REQUEST[" ascii wide nocase
+        $obf7 = "eval($_POST[" ascii wide nocase
+        $obf8 = "eval($_GET[" ascii wide nocase
+        $obf9 = "assert($_POST[" ascii wide nocase
     condition:
-        filesize < 2MB and uint16(0) != 0x5A4D and (
+        filesize < 1MB and uint16(0) != 0x5A4D and uint32(0) != 0x00021401 and
+        ($php or $php_short) and (
+            any of ($direct*) or
             any of ($obf*) or
-            (($php or $php_short) and any of ($e*) and any of ($r*))
+            ($b64_in and any of ($e*))
         )
 }

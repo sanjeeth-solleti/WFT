@@ -50,32 +50,58 @@ export const ToolPathsModal: React.FC<ToolPathsModalProps> = ({
   // Expandable section for individual EZ tools
   const [isEzOverridesExpanded, setIsEzOverridesExpanded] = useState(false);
 
+  const buildFilteredToolsAndForm = (
+    data: ToolPathsMap,
+    prevForm?: Record<string, string>
+  ): { filteredTools: ToolPathsMap; nextForm: Record<string, string> } => {
+    const filteredTools: ToolPathsMap = {};
+    const nextForm: Record<string, string> = prevForm ? { ...prevForm } : {};
+
+    Object.entries(data || {}).forEach(([key, info]) => {
+      if (
+        !info ||
+        key === 'rules' ||
+        key === 'cases' ||
+        key === 'yara_x' ||
+        key === 'cases_dir' ||
+        key.includes('RULES_DIR') ||
+        key.includes('CASES_DIR')
+      ) {
+        return;
+      }
+      const normalizedKey = key === 'WFT_BULK_EXTRACTOR_EXE' ? 'bulk_extractor' : key;
+      filteredTools[normalizedKey] = info;
+      nextForm[normalizedKey] = info.configured_path || info.path || info.resolved_path || nextForm[normalizedKey] || '';
+    });
+
+    if (!filteredTools['bulk_extractor']) {
+      filteredTools['bulk_extractor'] = {
+        name: 'Bulk Extractor (bulk_extractor64.exe)',
+        env_var: 'WFT_BULK_EXTRACTOR_EXE',
+        binary: 'bulk_extractor64.exe',
+        configured_path: '',
+        resolved_path: null,
+        path: null,
+        status: 'MISSING',
+        description: 'Open-source multi-threaded raw stream & E01 feature, IOC, and carving extractor',
+        category: 'main',
+      };
+      if (nextForm['bulk_extractor'] === undefined) {
+        nextForm['bulk_extractor'] = '';
+      }
+    }
+
+    return { filteredTools, nextForm };
+  };
+
   const fetchPaths = async (scan: boolean = false) => {
     setIsLoading(true);
     setErrorMsg(null);
     try {
       const data = await apiClient.getToolPaths(scan);
-      // Filter out internal non-tool entries (YARA rules, Cases storage)
-      const filteredTools: ToolPathsMap = {};
-      const initialForm: Record<string, string> = {};
-
-      Object.entries(data).forEach(([key, info]) => {
-        if (
-          key === 'rules' ||
-          key === 'cases' ||
-          key === 'yara_x' ||
-          key === 'cases_dir' ||
-          key.includes('RULES_DIR') ||
-          key.includes('CASES_DIR')
-        ) {
-          return;
-        }
-        filteredTools[key] = info;
-        initialForm[key] = info.configured_path || info.path || info.resolved_path || '';
-      });
-
+      const { filteredTools, nextForm } = buildFilteredToolsAndForm(data);
       setTools(filteredTools);
-      setFormData(initialForm);
+      setFormData(nextForm);
     } catch (err: any) {
       setErrorMsg(err.message || 'Failed to load external tool paths');
     } finally {
@@ -132,7 +158,13 @@ export const ToolPathsModal: React.FC<ToolPathsModalProps> = ({
       });
 
       const res = await apiClient.saveToolPaths(cleanData);
-      setTools(res.tools);
+      if (res.tools && Object.keys(res.tools).length > 0) {
+        const { filteredTools, nextForm } = buildFilteredToolsAndForm(res.tools, cleanData);
+        setTools(filteredTools);
+        setFormData(nextForm);
+      } else {
+        await fetchPaths(false);
+      }
       setSavedEnvPath(res.env_file_path || '.env');
       setSaveSuccess(true);
       if (onPathsUpdated) onPathsUpdated();
@@ -157,16 +189,12 @@ export const ToolPathsModal: React.FC<ToolPathsModalProps> = ({
         stdout: res.stdout,
       });
 
-      if (res.tools) {
-        setTools(res.tools);
-        const updatedForm: Record<string, string> = { ...formData };
-        Object.entries(res.tools).forEach(([k, info]) => {
-          const p = info.configured_path || info.path || info.resolved_path || '';
-          if (p) updatedForm[k] = p;
-        });
-        setFormData(updatedForm);
+      if (res.tools && Object.keys(res.tools).length > 0) {
+        const { filteredTools, nextForm } = buildFilteredToolsAndForm(res.tools, formData);
+        setTools(filteredTools);
+        setFormData(nextForm);
       } else {
-        await fetchPaths();
+        await fetchPaths(true);
       }
 
       if (onPathsUpdated) onPathsUpdated();
@@ -177,8 +205,16 @@ export const ToolPathsModal: React.FC<ToolPathsModalProps> = ({
     }
   };
 
-  // Main 4 forensic engines (Strictly excluding YARA & Cases Folder)
-  const mainToolKeys = ['ez_tools', 'regripper', 'hindsight', 'stinger'];
+  // Main 5 forensic engines (EZ Tools, RegRipper, Hindsight, Stinger, Bulk Extractor)
+  const orderedMainKeys = ['ez_tools', 'regripper', 'hindsight', 'stinger', 'bulk_extractor'];
+  const mainToolKeys = tools
+    ? [
+        ...orderedMainKeys.filter((k) => Boolean(tools[k])),
+        ...Object.keys(tools).filter(
+          (k) => tools[k]?.category === 'main' && !orderedMainKeys.includes(k)
+        ),
+      ]
+    : orderedMainKeys;
 
   // Individual EZ binaries
   const individualEzKeys = tools
@@ -195,7 +231,7 @@ export const ToolPathsModal: React.FC<ToolPathsModalProps> = ({
   ).length;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 select-none">
+    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 select-none">
       <div className="bg-white dark:bg-[#1e293b] border border-[#cbd5e1] dark:border-[#334155] rounded-lg shadow-2xl w-full max-w-3xl flex flex-col max-h-[92vh] overflow-hidden font-sans">
         {/* Header */}
         <div className="px-5 py-3.5 bg-[#f8fafc] dark:bg-[#0f172a] border-b border-[#cbd5e1] dark:border-[#334155] flex items-center justify-between shrink-0">
@@ -309,8 +345,7 @@ export const ToolPathsModal: React.FC<ToolPathsModalProps> = ({
                 {mainToolKeys.map((key) => {
                   const info: ToolPathInfo | undefined = tools?.[key];
                   if (!info) return null;
-                  const isFound = info.status === 'FOUND' || info.status === 'HEURISTICS READY';
-                  const isExecutable = key === 'stinger' || key === 'hindsight' || key === 'regripper';
+                  const isExecutable = key !== 'ez_tools' && !(info.env_var || '').toUpperCase().endsWith('_DIR');
 
                   return (
                     <div

@@ -10,19 +10,40 @@ import duckdb
 import pytest
 from fastapi.testclient import TestClient
 
+import backend.config as _cfg
+import backend.main as _main
 from backend.main import app
-from backend.config import CASES_DIR, get_case_staging_dir, get_case_db_path, get_case_dir
+from backend.config import get_case_staging_dir, get_case_db_path, get_case_dir
 from backend.db.engine import DuckDBManager, init_case_db
 from backend.db.schema import sync_artifact_registry_counts, MASTER_ARTIFACT_CATALOG
 
 
 @pytest.fixture(scope="module")
-def client():
+def isolated_cases_env(tmp_path_factory):
+    tmp_root = tmp_path_factory.mktemp("wft_exports_isolated")
+    cases_dir = (tmp_root / "cases").resolve()
+    appdata_dir = (tmp_root / "appdata").resolve()
+    cases_dir.mkdir(parents=True, exist_ok=True)
+    appdata_dir.mkdir(parents=True, exist_ok=True)
+
+    mp = pytest.MonkeyPatch()
+    mp.setenv("WFT_CASES_DIR", str(cases_dir))
+    mp.setenv("WFT_APPDATA_DIR", str(appdata_dir))
+    mp.setattr(_cfg, "CASES_DIR", cases_dir)
+    mp.setattr(_cfg, "APP_DATA_DIR", appdata_dir)
+    mp.setattr(_cfg, "CUSTOM_LOCATIONS_FILE", (appdata_dir / "custom_locations.json").resolve())
+    yield {"cases_dir": cases_dir, "appdata_dir": appdata_dir, "tmp_root": tmp_root}
+    DuckDBManager.close_all()
+    mp.undo()
+
+
+@pytest.fixture(scope="module")
+def client(isolated_cases_env):
     return TestClient(app)
 
 
 @pytest.fixture(scope="module")
-def sample_case():
+def sample_case(isolated_cases_env):
     case_id = "test_export_case"
     case_dir = get_case_dir(case_id, create_if_missing=True)
     staging_dir = get_case_staging_dir(case_id)
@@ -91,12 +112,11 @@ def test_schema_combined_cleanup(sample_case):
         # Run sync_artifact_registry_counts
         sync_artifact_registry_counts(conn, case_id=case_id)
 
-        # Verify they were deleted from artifact_registry
+        # Verify deprecated internal combined tables were deleted from artifact_registry
         res = cursor.execute("""
             SELECT artifact_id, display_name, table_name 
             FROM artifact_registry 
-            WHERE display_name LIKE '%(Combined)%' 
-               OR artifact_id IN ('media_exif', 'documents_metadata')
+            WHERE artifact_id IN ('media_exif', 'documents_metadata')
                OR table_name IN ('parsed_media_exif', 'parsed_documents_metadata');
         """).fetchall()
         assert len(res) == 0, f"Combined entries should be deleted from artifact_registry: {res}"
@@ -208,3 +228,30 @@ def test_delete_bookmark_by_row(client, sample_case):
     list_res2 = client.get(f"/api/cases/{case_id}/bookmarks")
     bms2 = list_res2.json()["bookmarks"]
     assert not any(b["source_table"] == "parsed_documents_metadata" and b["source_row_id"] == 1 for b in bms2)
+
+
+def test_export_save_to_folder_headless_destination_dir(client, sample_case, tmp_path, monkeypatch):
+    """Verify destination_dir exports directly without invoking native folder picker."""
+    case_id = sample_case["case_id"]
+    headless_dest = (tmp_path / "headless_export_out").resolve()
+
+    def _forbid_picker(*args, **kwargs):
+        raise AssertionError("_run_native_picker must not be called when destination_dir is provided")
+
+    monkeypatch.setattr(_main, "_run_native_picker", _forbid_picker)
+
+    resp = client.post(
+        f"/api/cases/{case_id}/export/save-to-folder",
+        json={
+            "file_path": "Documents\\evidence_doc.txt",
+            "destination_dir": str(headless_dest),
+            "is_folder": False,
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["success"] is True
+    exported = headless_dest / "evidence_doc.txt"
+    assert exported.is_file()
+    assert exported.read_text(encoding="utf-8") == "Confidential DFIR forensic findings 12345"
+

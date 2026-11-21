@@ -14,8 +14,18 @@ import {
   AlertCircle,
   Loader2,
   Edit3,
+  Network,
+  Clock,
 } from 'lucide-react';
 import { apiClient, Bookmark as BookmarkItem } from '../api/client';
+
+export interface CustomExportRequestDetail {
+  caseId: string;
+  filePath?: string;
+  isFolder?: boolean;
+  tableName?: string;
+  rowId?: number;
+}
 
 export interface RowContextMenuProps {
   caseId: string;
@@ -29,6 +39,9 @@ export interface RowContextMenuProps {
   filePath?: string;
   onBookmarkUpdated?: () => void;
   onExportTableCsv?: () => void;
+  onInspectEntity?: (entityValue: string) => void;
+  onPivotTimeline?: (aroundTimestamp: string, windowMinutes?: number) => void;
+  onRequestCustomExport?: (detail: CustomExportRequestDetail) => void;
 }
 
 export const FORENSIC_TAGS = [
@@ -76,6 +89,13 @@ export function extractRowFilePath(row: Record<string, any>, explicitPath?: stri
   }
   if (!row) return '';
   const cand =
+    row.carved_rel_path ||
+    row.carved_path ||
+    row.carved_file_path ||
+    row.vfs_path ||
+    row.staged_rel_path ||
+    row.staged_file_path ||
+    row.full_path ||
     row.file_path ||
     row.FilePath ||
     row.FullPath ||
@@ -83,7 +103,6 @@ export function extractRowFilePath(row: Record<string, any>, explicitPath?: stri
     row.source_file ||
     row.LocalPath ||
     row.target_path ||
-    row.staged_file_path ||
     '';
   if (cand) return String(cand);
 
@@ -96,6 +115,60 @@ export function extractRowFilePath(row: Record<string, any>, explicitPath?: stri
   if (row.file_name) return String(row.file_name);
   if (row.SourceFilename) return String(row.SourceFilename);
   return '';
+}
+
+export function extractRowTimestamp(row: Record<string, any>): string {
+  if (!row) return '';
+  const candidates = [
+    row.timestamp_utc,
+    row.TimeCreated,
+    row.time_created,
+    row.LastRun,
+    row.si_modified,
+    row.si_created,
+    row.Created0x10,
+    row.LastModified0x10,
+    row.visit_time_utc,
+    row.last_visit_utc,
+    row.date_utc,
+    row.ingested_at,
+  ];
+  for (const val of candidates) {
+    if (typeof val === 'string' && /\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}/.test(val)) {
+      return val.trim();
+    }
+  }
+  for (const val of Object.values(row)) {
+    if (typeof val === 'string' && /\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}/.test(val)) {
+      return val.trim();
+    }
+  }
+  return '';
+}
+
+export function extractRowEntity(row: Record<string, any>, cellValue?: unknown): string {
+  if (typeof cellValue === 'string') {
+    const trimmed = cellValue.trim();
+    if (trimmed.length >= 2 && trimmed.length <= 180 && !/\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}/.test(trimmed)) {
+      return trimmed;
+    }
+  }
+  if (!row) return '';
+  const cand =
+    row.primary_entity ||
+    row.entity_value ||
+    row.ExecutableName ||
+    row.file_name ||
+    row.FileName ||
+    row.sha256 ||
+    row.UserName ||
+    row.user_account ||
+    row.Computer ||
+    row.host ||
+    row.domain ||
+    row.RemoteHost ||
+    '';
+  return cand ? String(cand).trim() : '';
 }
 
 export function extractRowFileName(row: Record<string, any>, filePath: string): string {
@@ -121,6 +194,9 @@ export const RowContextMenu: React.FC<RowContextMenuProps> = ({
   filePath,
   onBookmarkUpdated,
   onExportTableCsv,
+  onInspectEntity,
+  onPivotTimeline,
+  onRequestCustomExport,
 }) => {
   const menuRef = useRef<HTMLDivElement>(null);
   const [coords, setCoords] = useState<{ top: number; left: number }>({ top: position.y, left: position.x });
@@ -143,6 +219,8 @@ export const RowContextMenu: React.FC<RowContextMenuProps> = ({
   const rowId = row._row_id !== undefined ? Number(row._row_id) : undefined;
   const detectedFilePath = extractRowFilePath(row, filePath);
   const detectedFileName = extractRowFileName(row, detectedFilePath);
+  const detectedTimestamp = extractRowTimestamp(row);
+  const detectedEntity = extractRowEntity(row, cellValue);
 
   const isDirectory = Boolean(
     isFolder ||
@@ -313,39 +391,49 @@ export const RowContextMenu: React.FC<RowContextMenuProps> = ({
     setTimeout(onClose, 800);
   };
 
-  // Export to Custom Destination Folder (Native Windows Dialog)
-  const handleSaveToFolder = async () => {
+  // Export to Custom Destination Folder (Browser FileBrowserModal via root App.tsx)
+  const handleSaveToFolder = () => {
     if (!caseId) return;
-    setIsProcessingAction(true);
-    setStatusMsg({ type: 'info', text: 'Opening Windows folder browser...' });
-
-    try {
-      const res = await apiClient.saveToFolder(caseId, {
-        file_path: isDirectory ? effectiveFolderPath : detectedFilePath,
-        is_folder: isDirectory,
-        table_name: tableName,
-        row_id: rowId,
-      });
-
-      if (res.cancelled) {
-        setStatusMsg({ type: 'info', text: 'Export cancelled' });
-        setIsProcessingAction(false);
-        setTimeout(onClose, 600);
-        return;
-      }
-
-      if (res.success) {
-        setStatusMsg({
-          type: 'success',
-          text: `Saved to: ${res.saved_path || res.destination_folder}`,
-        });
-        setTimeout(onClose, 1500);
-      }
-    } catch (err: any) {
-      console.error('Save to folder error:', err);
-      setStatusMsg({ type: 'error', text: err?.message || 'Failed to export to custom folder' });
-      setIsProcessingAction(false);
+    const targetPath = isDirectory ? effectiveFolderPath : detectedFilePath || undefined;
+    const detail: CustomExportRequestDetail = {
+      caseId,
+      filePath: targetPath,
+      isFolder: isDirectory,
+      tableName: effectiveTable,
+      rowId,
+    };
+    if (onRequestCustomExport) {
+      onRequestCustomExport(detail);
+    } else {
+      window.dispatchEvent(new CustomEvent('wft:open-custom-export', { detail }));
     }
+    onClose();
+  };
+
+  const handleInspectGraph = () => {
+    if (!detectedEntity) return;
+    if (onInspectEntity) {
+      onInspectEntity(detectedEntity);
+    } else {
+      window.dispatchEvent(
+        new CustomEvent('wft:inspect-entity', { detail: { entityValue: detectedEntity } })
+      );
+    }
+    onClose();
+  };
+
+  const handlePivotTimeline = () => {
+    if (!detectedTimestamp) return;
+    if (onPivotTimeline) {
+      onPivotTimeline(detectedTimestamp, 5);
+    } else {
+      window.dispatchEvent(
+        new CustomEvent('wft:pivot-timeline', {
+          detail: { aroundTimestamp: detectedTimestamp, windowMinutes: 5 },
+        })
+      );
+    }
+    onClose();
   };
 
   // Export Table to CSV
@@ -417,7 +505,7 @@ export const RowContextMenu: React.FC<RowContextMenuProps> = ({
         left: coords.left,
         zIndex: 99999,
       }}
-      className="w-72 bg-white dark:bg-[#0f172a] rounded-lg shadow-2xl border border-slate-200 dark:border-[#334155] py-1 text-xs select-none animate-in fade-in zoom-in-95 duration-100 flex flex-col font-sans"
+      className="w-72 max-h-[calc(100vh-24px)] overflow-y-auto bg-white dark:bg-[#0f172a] rounded-lg shadow-2xl border border-slate-200 dark:border-[#334155] py-1 text-xs select-none animate-in fade-in zoom-in-95 duration-100 flex flex-col font-sans"
     >
       {/* Toast / Status banner */}
       {statusMsg && (
@@ -612,6 +700,46 @@ export const RowContextMenu: React.FC<RowContextMenuProps> = ({
       >
         <FileCode className="w-3.5 h-3.5 text-indigo-500 shrink-0" />
         <span>Export Selected Row as JSON</span>
+      </button>
+
+      <div className="my-1 border-b border-slate-200 dark:border-[#1e293b]" />
+
+      {/* --------------------------------------------------------------------- */}
+      {/* SECTION 2B: FORENSIC PIVOT & GRAPH                                    */}
+      {/* --------------------------------------------------------------------- */}
+      <div className="px-3 py-1 text-[10px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-wider flex items-center gap-1.5">
+        <Network className="w-3 h-3 text-[#0284c7]" />
+        <span>Forensic Pivot & Graph</span>
+      </div>
+
+      <button
+        disabled={!detectedEntity || isProcessingAction}
+        onClick={handleInspectGraph}
+        title={detectedEntity ? `Inspect "${detectedEntity}" in Connections Graph` : 'No entity detected on this row'}
+        className={`flex items-center gap-2 px-3 py-1.5 text-left mx-1 rounded transition-colors ${
+          detectedEntity && !isProcessingAction
+            ? 'text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-[#1e293b] hover:text-[#0284c7] cursor-pointer'
+            : 'text-slate-400 dark:text-slate-600 cursor-not-allowed opacity-60'
+        }`}
+      >
+        <Network className="w-3.5 h-3.5 text-[#0284c7] shrink-0" />
+        <span className="truncate">
+          Inspect in Connections Graph {detectedEntity ? `(${detectedEntity})` : ''}
+        </span>
+      </button>
+
+      <button
+        disabled={!detectedTimestamp || isProcessingAction}
+        onClick={handlePivotTimeline}
+        title={detectedTimestamp ? `Pivot ±5m around ${detectedTimestamp}` : 'No timestamp detected on this row'}
+        className={`flex items-center gap-2 px-3 py-1.5 text-left mx-1 rounded transition-colors ${
+          detectedTimestamp && !isProcessingAction
+            ? 'text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-[#1e293b] hover:text-[#0284c7] cursor-pointer'
+            : 'text-slate-400 dark:text-slate-600 cursor-not-allowed opacity-60'
+        }`}
+      >
+        <Clock className="w-3.5 h-3.5 text-amber-500 shrink-0" />
+        <span className="truncate">Pivot ±5m in Timeline</span>
       </button>
 
       <div className="my-1 border-b border-slate-200 dark:border-[#1e293b]" />

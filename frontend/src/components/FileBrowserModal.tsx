@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import {
   Folder,
   FolderOpen,
@@ -52,8 +52,9 @@ export const FileBrowserModal: React.FC<FileBrowserModalProps> = ({
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Address bar input state
+  // Address bar input state & dirty guard (prevents in-flight initial loadDirectory("") from clobbering user typing)
   const [addressInput, setAddressInput] = useState<string>('');
+  const addressDirtyRef = useRef<boolean>(false);
   // Filter search inside directory
   const [searchTerm, setSearchTerm] = useState<string>('');
   // Filter images only vs all files (for file mode)
@@ -63,10 +64,15 @@ export const FileBrowserModal: React.FC<FileBrowserModalProps> = ({
   const loadDirectory = useCallback(async (path?: string) => {
     setIsLoading(true);
     setError(null);
+    if (path) {
+      addressDirtyRef.current = false;
+    }
     try {
       const data: ListDirectoryResponse = await apiClient.listDirectory(path);
       setCurrentPath(data.current_path || '');
-      setAddressInput(data.current_path || '');
+      if (!addressDirtyRef.current) {
+        setAddressInput(data.current_path || '');
+      }
       setParentPath(data.parent_path ?? null);
       setDrives(data.drives || []);
       setQuickAccess(data.quick_access || []);
@@ -90,6 +96,7 @@ export const FileBrowserModal: React.FC<FileBrowserModalProps> = ({
   // Initial load when modal opens
   useEffect(() => {
     if (isOpen) {
+      addressDirtyRef.current = false;
       loadDirectory(initialPath || '');
     }
   }, [isOpen, initialPath, loadDirectory]);
@@ -97,6 +104,7 @@ export const FileBrowserModal: React.FC<FileBrowserModalProps> = ({
   // Handle navigate to parent folder
   const handleNavigateUp = () => {
     if (parentPath !== null) {
+      addressDirtyRef.current = false;
       loadDirectory(parentPath);
     }
   };
@@ -105,6 +113,7 @@ export const FileBrowserModal: React.FC<FileBrowserModalProps> = ({
   const handleAddressSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (addressInput.trim()) {
+      addressDirtyRef.current = false;
       loadDirectory(addressInput.trim());
     }
   };
@@ -155,7 +164,7 @@ export const FileBrowserModal: React.FC<FileBrowserModalProps> = ({
     title || (mode === 'file' ? 'Select Forensic Disk Image' : 'Select Target Directory');
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4 select-none animate-in fade-in duration-150">
+    <div className="fixed inset-0 z-[100000] bg-black/60 backdrop-blur-xs flex items-center justify-center p-4 select-none animate-in fade-in duration-150">
       <div className="bg-white dark:bg-[#1e293b] border border-[#cbd5e1] dark:border-[#334155] rounded shadow-2xl w-full max-w-4xl h-[720px] max-h-[92vh] flex flex-col overflow-hidden text-[#0f172a] dark:text-[#f8fafc] font-sans">
         {/* Header */}
         <div className="h-12 bg-[#f1f5f9] dark:bg-[#0f172a] border-b border-[#cbd5e1] dark:border-[#334155] px-4 flex items-center justify-between shrink-0">
@@ -210,7 +219,10 @@ export const FileBrowserModal: React.FC<FileBrowserModalProps> = ({
               <input
                 type="text"
                 value={addressInput}
-                onChange={(e) => setAddressInput(e.target.value)}
+                onChange={(e) => {
+                  addressDirtyRef.current = true;
+                  setAddressInput(e.target.value);
+                }}
                 placeholder="Type or paste Windows path (e.g. C:\Forensics or D:\Evidence)"
                 className="w-full bg-[#f8fafc] dark:bg-[#0f172a] border border-[#cbd5e1] dark:border-[#334155] focus:border-[#0284c7] rounded px-3 py-1.5 text-xs text-[#0f172a] dark:text-[#f8fafc] font-mono focus:outline-none"
               />

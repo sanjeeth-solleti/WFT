@@ -24,6 +24,7 @@ start_wft.bat
 # Tests
 /tests/
 !backend/tests/
+test_write.bin
 
 # Large External Third-Party Binary Tool Suites (Installed via Setup-WFTTools.ps1)
 EZTools/

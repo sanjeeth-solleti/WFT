@@ -45,17 +45,75 @@ interface SidebarTreeProps {
   width?: number;
 }
 
-// Canonical 8 WFT Examine Categories (EVENT LOGS and MALWARE are dedicated top-level tabs)
+// Canonical 10 WFT Examine Categories matching backend/db/schema.py
 export const CANONICAL_WFT_CATEGORIES = [
   'REFINED RESULTS',
   'WEB RELATED',
   'CHAT',
-  'EMAIL',
+  'EMAIL & CALENDAR',
   'CLOUD',
   'MEDIA',
   'DOCUMENTS',
   'OPERATING SYSTEM',
+  'EVENT LOGS',
+  'MALWARE & YARA',
 ] as const;
+
+/**
+ * Mirrors backend `_build_subview_dedup_predicate` so aggregate row totals
+ * (`ALL EVIDENCE`, TopNavBar `Artifacts`, Sidebar footer `Rows`, and per-category badges)
+ * never double-count granular SQL slice views when their parent table is present,
+ * while keeping granular leaf items visible and clickable inside the tree.
+ */
+export function buildSubviewDedupPredicate(
+  artifactsList: ArtifactItem[]
+): (item: ArtifactItem) => boolean {
+  const presentTables = new Set<string>();
+  const presentIds = new Set<string>();
+  for (const a of artifactsList) {
+    if ((a.row_count || 0) > 0) {
+      if (a.table_name) presentTables.add(a.table_name);
+      if (a.artifact_id) presentIds.add(a.artifact_id);
+    }
+  }
+  const hasConcreteMalware =
+    presentTables.has('artifact_stinger_hits') ||
+    presentTables.has('artifact_yara_hits') ||
+    presentTables.has('parsed_suspicious_binaries');
+  const hasRawEvtx = presentTables.has('raw_evtx') || presentIds.has('os_evtx');
+  const hasViewDocs = presentTables.has('view_documents') || presentIds.has('view_documents');
+  const hasRawRecmd =
+    presentTables.has('raw_recmd') ||
+    presentIds.has('os_recmd') ||
+    presentIds.has('registry_recmd');
+  const recmdSliceViews = new Set([
+    'view_usb_devices',
+    'view_autoruns',
+    'view_userassist',
+    'view_bam_dam',
+  ]);
+
+  return (item: ArtifactItem): boolean => {
+    const tname = item.table_name || '';
+    const aid = item.artifact_id || '';
+    if (
+      hasConcreteMalware &&
+      (tname === 'view_all_malware_detections' || aid === 'malware_all_detections')
+    ) {
+      return true;
+    }
+    if (hasRawEvtx && (tname.startsWith('view_evtx_') || aid.startsWith('view_evtx_'))) {
+      return true;
+    }
+    if (hasViewDocs && (tname.startsWith('view_docs_') || aid.startsWith('view_docs_'))) {
+      return true;
+    }
+    if (hasRawRecmd && (recmdSliceViews.has(tname) || recmdSliceViews.has(aid))) {
+      return true;
+    }
+    return false;
+  };
+}
 
 // Normalize arbitrary category string to one of the canonical WFT categories
 export function normalizeWftCategory(cat: string): string {
@@ -63,7 +121,7 @@ export function normalizeWftCategory(cat: string): string {
   if (c.includes('REFINED')) return 'REFINED RESULTS';
   if (c.includes('WEB') || c.includes('BROWSER')) return 'WEB RELATED';
   if (c.includes('CHAT') || c.includes('COLLABORATION')) return 'CHAT';
-  if (c.includes('EMAIL') || c.includes('CALENDAR') || c.includes('MAIL')) return 'EMAIL';
+  if (c.includes('EMAIL') || c.includes('CALENDAR') || c.includes('MAIL')) return 'EMAIL & CALENDAR';
   if (c.includes('CLOUD') || c.includes('ONEDRIVE') || c.includes('GDRIVE') || c.includes('DROPBOX')) return 'CLOUD';
   if (c.includes('MEDIA') || c.includes('PICTURE') || c.includes('PHOTO') || c.includes('VIDEO') || c.includes('THUMBCACHE')) return 'MEDIA';
   if (c.includes('DOC') || c.includes('OFFICE') || c.includes('PDF') || c.includes('SPREADSHEET')) return 'DOCUMENTS';
@@ -82,6 +140,7 @@ function getCategoryIcon(category: string) {
     case 'CHAT':
       return <MessageSquare className="w-3.5 h-3.5 text-[#0284c7] dark:text-[#38bdf8] shrink-0" />;
     case 'EMAIL':
+    case 'EMAIL & CALENDAR':
       return <Mail className="w-3.5 h-3.5 text-[#0284c7] dark:text-[#38bdf8] shrink-0" />;
     case 'CLOUD':
       return <Cloud className="w-3.5 h-3.5 text-[#0284c7] dark:text-[#38bdf8] shrink-0" />;
@@ -176,19 +235,41 @@ export const SidebarTree: React.FC<SidebarTreeProps> = ({
     }));
   };
 
-  // Strictly filter out row_count === 0 and separate out EVENT LOGS & MALWARE
-  const rawArtifacts = (registryData?.artifacts || []).filter((a) => {
-    const cat = normalizeWftCategory(a.category);
-    return cat !== 'EVENT LOGS' && cat !== 'MALWARE & YARA' && a.row_count > 0;
-  });
+  // Strictly filter out row_count === 0 while including all 10 canonical categories
+  // (deduplicating pure SQL union view `view_all_malware_detections` when underlying tables exist,
+  // while keeping granular sub-views visible & clickable inside the tree without double-counting)
+  const allPopulated = (registryData?.artifacts || []).filter((a) => a.row_count > 0);
+  const hasConcreteMalwareTable = allPopulated.some(
+    (a) =>
+      a.table_name === 'artifact_stinger_hits' ||
+      a.table_name === 'artifact_yara_hits' ||
+      a.table_name === 'parsed_suspicious_binaries'
+  );
+  const rawArtifacts = allPopulated.filter(
+    (a) => !(hasConcreteMalwareTable && a.table_name === 'view_all_malware_detections')
+  );
   const contentTypeFiltered =
     contentTypes.length > 0
       ? rawArtifacts.filter((a) => matchContentType(a, contentTypes))
       : rawArtifacts;
   const artifacts = contentTypeFiltered.filter((a) => a.row_count > 0);
-  const totalAllRows = artifacts.reduce((acc, a) => acc + a.row_count, 0);
+  const isDuplicateSubview = useMemo(
+    () => buildSubviewDedupPredicate(allPopulated),
+    [allPopulated]
+  );
+  const computedDedupTotal = artifacts.reduce(
+    (acc, a) => acc + (isDuplicateSubview(a) ? 0 : a.row_count),
+    0
+  );
+  const totalAllRows =
+    contentTypes.length === 0 &&
+    typeof registryData?.all_evidence_total === 'number' &&
+    registryData.all_evidence_total > 0 &&
+    registryData.all_evidence_total === computedDedupTotal
+      ? registryData.all_evidence_total
+      : computedDedupTotal || artifacts.reduce((acc, a) => acc + a.row_count, 0);
 
-  // Group into Canonical 8 Categories (Event Logs & Malware are dedicated top-level tabs)
+  // Group into Canonical 10 Categories
   // Strictly hide any artifact sub-item with row_count === 0, and hide any parent category whose children sum to 0
   const groupedCategories = useMemo(() => {
     const groups: Record<string, ArtifactItem[]> = {};
@@ -199,9 +280,6 @@ export const SidebarTree: React.FC<SidebarTreeProps> = ({
     artifacts.forEach((art) => {
       if (art.row_count <= 0) return;
       const canonicalCat = normalizeWftCategory(art.category);
-      if (canonicalCat === 'EVENT LOGS' || canonicalCat === 'MALWARE & YARA') {
-        return;
-      }
       if (!groups[canonicalCat]) {
         groups[canonicalCat] = [];
       }
@@ -220,7 +298,12 @@ export const SidebarTree: React.FC<SidebarTreeProps> = ({
           category.toLowerCase().includes(q)
         );
       });
-      const categorySum = matched.reduce((sum, item) => sum + item.row_count, 0);
+      const dedupSum = matched.reduce(
+        (sum, item) => sum + (isDuplicateSubview(item) ? 0 : item.row_count),
+        0
+      );
+      const categorySum =
+        dedupSum > 0 ? dedupSum : matched.reduce((sum, item) => sum + item.row_count, 0);
       // Strictly omit any parent category whose visible children sum to 0
       if (matched.length > 0 && categorySum > 0) {
         filtered[category] = matched;
@@ -228,7 +311,7 @@ export const SidebarTree: React.FC<SidebarTreeProps> = ({
     });
 
     return filtered;
-  }, [artifacts, searchFilter]);
+  }, [artifacts, searchFilter, isDuplicateSubview]);
 
   // Categories with visible, positive-count artifacts
   const visibleCategories = useMemo(() => {
@@ -346,7 +429,14 @@ export const SidebarTree: React.FC<SidebarTreeProps> = ({
             const items = (groupedCategories[category] || []).filter((item) => item.row_count > 0);
             if (items.length === 0) return null;
 
-            const categoryRowCount = items.reduce((sum, item) => sum + item.row_count, 0);
+            const dedupCatRows = items.reduce(
+              (sum, item) => sum + (isDuplicateSubview(item) ? 0 : item.row_count),
+              0
+            );
+            const categoryRowCount =
+              dedupCatRows > 0
+                ? dedupCatRows
+                : items.reduce((sum, item) => sum + item.row_count, 0);
             if (categoryRowCount <= 0) return null;
             const isCollapsed = Boolean(collapsedCategories[category]);
 

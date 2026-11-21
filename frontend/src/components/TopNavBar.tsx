@@ -1,4 +1,5 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useLayoutEffect } from 'react';
+import { createPortal } from 'react-dom';
 import {
   LayoutDashboard,
   Layers,
@@ -19,6 +20,9 @@ import {
   Check,
   FolderTree,
   Trash2,
+  Download,
+  FileCode,
+  Network,
 } from 'lucide-react';
 import { CaseSummary, apiClient } from '../api/client';
 
@@ -42,6 +46,9 @@ interface TopNavBarProps {
   onOpenNewCaseModal: () => void;
   onOpenKeywordManager: () => void;
   onOpenToolPaths: () => void;
+  onOpenConnections?: () => void;
+  onExportCsv?: () => void;
+  onExportHtmlReport?: () => void;
   onRefresh: () => void;
   isRefreshing?: boolean;
   totalArtifacts?: number;
@@ -64,6 +71,9 @@ export const TopNavBar: React.FC<TopNavBarProps> = ({
   onOpenNewCaseModal,
   onOpenKeywordManager,
   onOpenToolPaths,
+  onOpenConnections,
+  onExportCsv,
+  onExportHtmlReport,
   onRefresh,
   isRefreshing = false,
   totalArtifacts = 0,
@@ -78,6 +88,31 @@ export const TopNavBar: React.FC<TopNavBarProps> = ({
   const [isDropdownOpen, setIsDropdownOpen] = useState(false);
   const [isDeletingCase, setIsDeletingCase] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
+  const selectSlotRef = useRef<HTMLDivElement>(null);
+  const [selectCoords, setSelectCoords] = useState<{ top: number; left: number; width: number; height: number }>({
+    top: 9,
+    left: 256,
+    width: 190,
+    height: 26,
+  });
+
+  useLayoutEffect(() => {
+    const syncSlot = () => {
+      if (selectSlotRef.current) {
+        const r = selectSlotRef.current.getBoundingClientRect();
+        if (r.width > 0 && r.height > 0) {
+          setSelectCoords({ top: r.top, left: r.left, width: r.width, height: r.height });
+        }
+      }
+    };
+    syncSlot();
+    window.addEventListener('resize', syncSlot);
+    window.addEventListener('scroll', syncSlot, true);
+    return () => {
+      window.removeEventListener('resize', syncSlot);
+      window.removeEventListener('scroll', syncSlot, true);
+    };
+  }, [currentCaseId, cases.length]);
 
   const handleDeleteCase = async () => {
     if (!currentCaseId || isDeletingCase) return;
@@ -191,7 +226,7 @@ export const TopNavBar: React.FC<TopNavBarProps> = ({
   const activeLabel = activeTab === 'process' ? 'Execution Logs' : activeView.label;
 
   return (
-    <header className="h-11 bg-white dark:bg-[#1e293b] border-b border-[#cbd5e1] dark:border-[#334155] px-3 flex items-center justify-between gap-2 select-none z-30 shadow-xs font-sans w-full min-w-0 shrink-0">
+    <header className="h-11 bg-white dark:bg-[#1e293b] border-b border-[#cbd5e1] dark:border-[#334155] px-3 flex items-center justify-between gap-2 select-none z-50 shadow-xs font-sans w-full min-w-0 shrink-0">
       {/* Brand & Case Selector */}
       <div className="flex items-center gap-2.5 shrink-0 min-w-0">
         <div className="flex items-center gap-2 pr-2.5 border-r border-[#cbd5e1] dark:border-[#334155] shrink-0" title="Windows Forensic Toolkit (WFT)">
@@ -209,25 +244,40 @@ export const TopNavBar: React.FC<TopNavBarProps> = ({
 
         {/* Case Selector Dropdown & Actions */}
         <div className="flex items-center gap-1.5 shrink-0">
-          <div className="relative">
-            <HardDrive className="w-3.5 h-3.5 absolute left-2 top-2 text-slate-400 pointer-events-none" />
-            <select
-              aria-label="Active Evidence Case"
-              value={currentCaseId}
-              onChange={(e) => onSelectCase(e.target.value)}
-              className="bg-white dark:bg-[#0f172a] border border-[#cbd5e1] dark:border-[#334155] hover:border-slate-400 focus:border-[#0284c7] text-[#0f172a] dark:text-[#f8fafc] text-xs rounded pl-7 pr-6 py-1 focus:outline-none focus:ring-1 focus:ring-[#0284c7] font-mono transition-colors shadow-2xs max-w-[190px] truncate"
-            >
-              {uniqueCases.length === 0 ? (
-                <option value="">No Cases</option>
-              ) : (
-                uniqueCases.map((c) => (
-                  <option key={c.case_id} value={c.case_id}>
-                    {c.case_id} ({c.total_artifact_rows.toLocaleString()} rows)
-                  </option>
-                ))
-              )}
-            </select>
-          </div>
+          <div ref={selectSlotRef} className="relative w-[190px] h-[26px] shrink-0" />
+          {typeof document !== 'undefined' &&
+            createPortal(
+              <div
+                style={{
+                  position: 'fixed',
+                  top: selectCoords.top,
+                  left: selectCoords.left,
+                  width: selectCoords.width,
+                  height: selectCoords.height,
+                  zIndex: 55,
+                }}
+                className="font-sans select-none"
+              >
+                <HardDrive className="w-3.5 h-3.5 absolute left-2 top-2 text-slate-400 pointer-events-none" />
+                <select
+                  aria-label="Active Evidence Case"
+                  value={currentCaseId}
+                  onChange={(e) => onSelectCase(e.target.value)}
+                  className="w-full h-full bg-white dark:bg-[#0f172a] border border-[#cbd5e1] dark:border-[#334155] hover:border-slate-400 focus:border-[#0284c7] text-[#0f172a] dark:text-[#f8fafc] text-xs rounded pl-7 pr-6 py-1 focus:outline-none focus:ring-1 focus:ring-[#0284c7] font-mono transition-colors shadow-2xs truncate"
+                >
+                  {uniqueCases.length === 0 ? (
+                    <option value="">No Cases</option>
+                  ) : (
+                    uniqueCases.map((c) => (
+                      <option key={c.case_id} value={c.case_id}>
+                        {c.case_id} ({c.total_artifact_rows.toLocaleString()} rows)
+                      </option>
+                    ))
+                  )}
+                </select>
+              </div>,
+              document.body
+            )}
 
           {currentCaseId && (
             <button
@@ -380,6 +430,44 @@ export const TopNavBar: React.FC<TopNavBarProps> = ({
             </span>
           </div>
         </div>
+
+        {currentCaseId && onOpenConnections && (
+          <button
+            type="button"
+            onClick={onOpenConnections}
+            className="flex items-center gap-1 px-2.5 py-1 rounded text-xs font-semibold border border-[#cbd5e1] dark:border-[#334155] bg-white hover:bg-slate-50 dark:bg-[#0f172a] dark:hover:bg-[#334155] text-[#0284c7] dark:text-[#38bdf8] shadow-2xs transition-colors cursor-pointer shrink-0"
+            title="Open Cross-Artifact Entity Connections Graph"
+          >
+            <Network className="w-3.5 h-3.5 shrink-0" />
+            <span>Connections</span>
+          </button>
+        )}
+
+        {currentCaseId && onExportCsv && (
+          <button
+            type="button"
+            onClick={onExportCsv}
+            data-testid="topnav-export-csv-btn"
+            className="flex items-center gap-1 px-2 py-1 rounded text-xs font-semibold border border-[#cbd5e1] dark:border-[#334155] bg-white hover:bg-slate-50 dark:bg-[#0f172a] dark:hover:bg-[#334155] text-[#0f172a] dark:text-[#f8fafc] shadow-2xs transition-colors cursor-pointer shrink-0"
+            title="Export Active Evidence Table to CSV"
+          >
+            <Download className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400 shrink-0" />
+            <span>Export CSV</span>
+          </button>
+        )}
+
+        {currentCaseId && onExportHtmlReport && (
+          <button
+            type="button"
+            onClick={onExportHtmlReport}
+            data-testid="topnav-export-html-btn"
+            className="flex items-center gap-1 px-2 py-1 rounded text-xs font-semibold border border-[#cbd5e1] dark:border-[#334155] bg-white hover:bg-slate-50 dark:bg-[#0f172a] dark:hover:bg-[#334155] text-[#0f172a] dark:text-[#f8fafc] shadow-2xs transition-colors cursor-pointer shrink-0"
+            title="Export Standalone HTML Forensic Case Report"
+          >
+            <FileCode className="w-3.5 h-3.5 text-[#0284c7] dark:text-[#38bdf8] shrink-0" />
+            <span>Export HTML</span>
+          </button>
+        )}
 
         <button
           onClick={() => onChangeTab(activeTab === 'process' ? 'artifacts' : 'process')}

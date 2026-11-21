@@ -18,6 +18,8 @@ import {
   Download,
   ExternalLink,
   Clock,
+  Network,
+  FolderOpen,
 } from 'lucide-react';
 import {
   apiClient,
@@ -31,11 +33,30 @@ interface DetailsAndHexPaneProps {
   caseId: string;
   tableName: string | null;
   selectedRow: Record<string, unknown> | null;
-  onInspectEntity?: (entityValue: string) => void;
+  onInspectEntity?: (entityValue: string, entityType?: string) => void;
+  onJumpToFileSystem?: (filePath: string) => void;
   onBookmarkCreated?: () => void;
   isCollapsed?: boolean;
   onToggleCollapse?: () => void;
   width?: number;
+}
+
+function isPivotableEntity(key: string, val: string): boolean {
+  const trimmed = val.trim();
+  if (trimmed.length < 2 || trimmed.length > 240) return false;
+  if (
+    /entity|user|account|domain|host|computer|url|ip|addr|hash|sha256|md5|executable|process|file_name|filename|path|sender|recipient/i.test(
+      key
+    )
+  ) {
+    return true;
+  }
+  if (/^(?:\d{1,3}\.){3}\d{1,3}$/.test(trimmed)) return true;
+  if (/^[a-f0-9]{32}$|^[a-f0-9]{64}$/i.test(trimmed)) return true;
+  if (/^S-1-5-\d+/i.test(trimmed)) return true;
+  if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed)) return true;
+  if (/\.(exe|dll|sys|ps1|bat|cmd|vbs)$/i.test(trimmed)) return true;
+  return false;
 }
 
 export const DetailsAndHexPane: React.FC<DetailsAndHexPaneProps> = ({
@@ -43,6 +64,7 @@ export const DetailsAndHexPane: React.FC<DetailsAndHexPaneProps> = ({
   tableName,
   selectedRow,
   onInspectEntity,
+  onJumpToFileSystem,
   onBookmarkCreated,
   width,
 }) => {
@@ -64,6 +86,7 @@ export const DetailsAndHexPane: React.FC<DetailsAndHexPaneProps> = ({
   // Hex Viewer State
   const [hexData, setHexData] = useState<HexViewerResponse | null>(null);
   const [hexOffset, setHexOffset] = useState(0);
+  const [hexJumpInput, setHexJumpInput] = useState('');
   const [hexError, setHexError] = useState<string | null>(null);
   const [isLoadingHex, setIsLoadingHex] = useState(false);
 
@@ -91,8 +114,13 @@ export const DetailsAndHexPane: React.FC<DetailsAndHexPaneProps> = ({
   const detectedFilePath = (() => {
     if (!selectedRow) return '';
     return (
+      (selectedRow.carved_rel_path as string) ||
       (selectedRow.carved_path as string) ||
       (selectedRow.carved_file_path as string) ||
+      (selectedRow.vfs_path as string) ||
+      (selectedRow.staged_rel_path as string) ||
+      (selectedRow.staged_file_path as string) ||
+      (selectedRow.full_path as string) ||
       (selectedRow.thumbnail_path as string) ||
       (selectedRow.file_path as string) ||
       (selectedRow.FullPath as string) ||
@@ -109,6 +137,29 @@ export const DetailsAndHexPane: React.FC<DetailsAndHexPaneProps> = ({
       ''
     );
   })();
+
+  // Reset Hex offset when row or detectedFilePath changes
+  useEffect(() => {
+    setHexOffset(0);
+    setHexJumpInput('');
+    setHexData(null);
+    setHexError(null);
+  }, [detectedFilePath, selectedRow?._row_id]);
+
+  const handleHexJump = (e: React.FormEvent) => {
+    e.preventDefault();
+    const raw = hexJumpInput.trim();
+    if (!raw) return;
+    const parsed = raw.toLowerCase().startsWith('0x')
+      ? parseInt(raw.slice(2), 16)
+      : /^[0-9a-f]+$/i.test(raw) && /[a-f]/i.test(raw)
+      ? parseInt(raw, 16)
+      : parseInt(raw, 10);
+    if (Number.isNaN(parsed) || parsed < 0) return;
+    const maxOffset = hexData?.file_size ? Math.max(0, hexData.file_size - 1) : parsed;
+    const clamped = Math.min(parsed, maxOffset);
+    setHexOffset(Math.floor(clamped / 16) * 16);
+  };
 
   const ocrText = selectedRow ? String(selectedRow.ocr_extracted_text || selectedRow.text || '') : '';
   const isDocumentOrMedia = Boolean(
@@ -146,8 +197,13 @@ export const DetailsAndHexPane: React.FC<DetailsAndHexPaneProps> = ({
     setContentError(null);
 
     apiClient
-      .getFileContent(caseId, detectedFilePath, 2000000, abortController.signal)
+      .getFileContent(caseId, detectedFilePath, 2000000, abortController.signal, true)
       .then((res) => {
+        if (res.found === false) {
+          setContentError(res.error || 'Evidence file not found on disk or in image.');
+          setFileContent(null);
+          return;
+        }
         setFileContent(res);
       })
       .catch((err) => {
@@ -180,8 +236,13 @@ export const DetailsAndHexPane: React.FC<DetailsAndHexPaneProps> = ({
     setHexError(null);
 
     apiClient
-      .getHexViewer(caseId, detectedFilePath, hexOffset, 4096, abortController.signal)
+      .getHexViewer(caseId, detectedFilePath, hexOffset, 4096, abortController.signal, true)
       .then((res) => {
+        if (res.found === false) {
+          setHexError(res.error || 'Evidence file not found on disk or in image.');
+          setHexData(null);
+          return;
+        }
         setHexData(res);
       })
       .catch((err) => {
@@ -374,8 +435,8 @@ export const DetailsAndHexPane: React.FC<DetailsAndHexPaneProps> = ({
         <div className="flex-1 overflow-y-auto overflow-x-hidden p-2 text-xs bg-slate-50/40 dark:bg-[#0f172a]/40">
           {previewTab === 'hex' ? (
             // Formatted 16-Byte Hex / ASCII Viewer with Monospace Alignment
-            <div className="h-full flex flex-col font-mono text-[11px]">
-              {isLoadingHex ? (
+            <div className="h-full min-h-0 flex flex-col font-mono text-[11px]">
+              {isLoadingHex && !hexData ? (
                 <div className="flex flex-col items-center justify-center h-full text-slate-400 gap-2">
                   <Loader2 className="w-5 h-5 animate-spin text-[#0284c7]" />
                   <span>Reading binary bytes...</span>
@@ -386,54 +447,80 @@ export const DetailsAndHexPane: React.FC<DetailsAndHexPaneProps> = ({
                   <p className="font-semibold text-slate-600 dark:text-slate-400">Hex Dump Unavailable</p>
                   <p className="text-[10px] text-slate-400 mt-1">{hexError}</p>
                 </div>
-              ) : hexData && hexData.lines.length > 0 ? (
-                <div className="flex-1 flex flex-col">
+              ) : hexData !== null ? (
+                <div className="flex-1 min-h-0 flex flex-col">
                   {/* Hex Navigation Bar */}
-                  <div className="flex items-center justify-between pb-1.5 mb-1.5 border-b border-[#cbd5e1] dark:border-[#334155] text-[10px] text-slate-500">
-                    <span className="truncate max-w-[160px]" title={hexData.file_path}>
+                  <div className="flex flex-wrap items-center justify-between gap-1 pb-1.5 mb-1.5 border-b border-[#cbd5e1] dark:border-[#334155] text-[10px] text-slate-500 shrink-0">
+                    <span className="truncate max-w-[140px]" title={hexData.file_path}>
                       {hexData.file_name} ({hexData.file_size.toLocaleString()} B)
                     </span>
                     <div className="flex items-center gap-1">
                       <button
+                        type="button"
                         onClick={() => setHexOffset((o) => Math.max(0, o - 4096))}
                         disabled={hexOffset === 0}
-                        className="p-1 rounded border border-[#cbd5e1] dark:border-[#334155] bg-white dark:bg-[#1e293b] hover:bg-slate-50 dark:hover:bg-[#334155] disabled:opacity-30 cursor-pointer"
+                        className="px-1.5 py-0.5 rounded border border-[#cbd5e1] dark:border-[#334155] bg-white dark:bg-[#1e293b] hover:bg-slate-50 dark:hover:bg-[#334155] disabled:opacity-30 cursor-pointer flex items-center gap-0.5"
                         title="Previous 4KB"
                       >
                         <ArrowLeft className="w-3 h-3" />
+                        <span>Prev 4KB</span>
                       </button>
-                      <span className="font-mono px-1">
-                        {hexOffset.toString(16).padStart(8, '0').toUpperCase()}
+                      <span className="font-mono px-1 text-[#0f172a] dark:text-[#f8fafc] font-bold">
+                        0x{hexOffset.toString(16).padStart(8, '0').toUpperCase()}
                       </span>
                       <button
+                        type="button"
                         onClick={() => setHexOffset((o) => o + 4096)}
                         disabled={hexOffset + 4096 >= hexData.file_size}
-                        className="p-1 rounded border border-[#cbd5e1] dark:border-[#334155] bg-white dark:bg-[#1e293b] hover:bg-slate-50 dark:hover:bg-[#334155] disabled:opacity-30 cursor-pointer"
+                        className="px-1.5 py-0.5 rounded border border-[#cbd5e1] dark:border-[#334155] bg-white dark:bg-[#1e293b] hover:bg-slate-50 dark:hover:bg-[#334155] disabled:opacity-30 cursor-pointer flex items-center gap-0.5"
                         title="Next 4KB"
                       >
+                        <span>Next 4KB</span>
                         <ArrowRight className="w-3 h-3" />
                       </button>
+                      <form onSubmit={handleHexJump} className="flex items-center gap-0.5 ml-1">
+                        <input
+                          type="text"
+                          value={hexJumpInput}
+                          onChange={(e) => setHexJumpInput(e.target.value)}
+                          placeholder="0x0040"
+                          aria-label="Jump to hex offset"
+                          className="w-16 px-1.5 py-0.5 text-[10px] font-mono rounded border border-[#cbd5e1] dark:border-[#334155] bg-white dark:bg-[#1e293b] text-[#0f172a] dark:text-[#f8fafc] focus:outline-none focus:border-[#0284c7]"
+                        />
+                        <button
+                          type="submit"
+                          className="px-1.5 py-0.5 rounded bg-[#0284c7] hover:bg-[#0369a1] text-white font-semibold text-[10px] cursor-pointer"
+                        >
+                          Go
+                        </button>
+                      </form>
                     </div>
                   </div>
 
-                  {/* Hex Lines Scrollable */}
-                  <div className="flex-1 overflow-y-auto space-y-0.5 select-text">
-                    {hexData.lines.slice(0, 64).map((line) => (
-                      <div
-                        key={line.offset}
-                        className="flex items-center hover:bg-[#bae6fd]/30 dark:hover:bg-[#0c4a6e]/30 rounded px-1"
-                      >
-                        <span className="text-slate-500 dark:text-slate-400 font-bold w-16 shrink-0 select-none">
-                          {line.offset_hex}
-                        </span>
-                        <span className="text-[#0f172a] dark:text-[#f8fafc] flex-1 px-2 whitespace-nowrap overflow-hidden">
-                          {line.hex_bytes}
-                        </span>
-                        <span className="text-[#0284c7] dark:text-[#38bdf8] w-24 shrink-0 truncate pl-1 border-l border-[#cbd5e1] dark:border-[#334155]">
-                          {line.ascii_repr}
-                        </span>
+                  {/* Hex Lines Scrollable (all 256 lines = 4096 bytes) */}
+                  <div className="flex-1 min-h-0 overflow-y-auto space-y-0.5 select-text">
+                    {hexData.lines.length === 0 ? (
+                      <div className="p-4 text-center text-slate-400 italic text-xs">
+                        No bytes at this offset (out of range or empty file).
                       </div>
-                    ))}
+                    ) : (
+                      hexData.lines.map((line) => (
+                        <div
+                          key={line.offset}
+                          className="flex items-center hover:bg-[#bae6fd]/30 dark:hover:bg-[#0c4a6e]/30 rounded px-1"
+                        >
+                          <span className="text-slate-500 dark:text-slate-400 font-bold w-16 shrink-0 select-none">
+                            {line.offset_hex}
+                          </span>
+                          <span className="text-[#0f172a] dark:text-[#f8fafc] flex-1 px-2 whitespace-nowrap overflow-hidden">
+                            {line.hex_bytes}
+                          </span>
+                          <span className="text-[#0284c7] dark:text-[#38bdf8] w-24 shrink-0 truncate pl-1 border-l border-[#cbd5e1] dark:border-[#334155]">
+                            {line.ascii_repr}
+                          </span>
+                        </div>
+                      ))
+                    )}
                   </div>
                 </div>
               ) : (
@@ -625,14 +712,27 @@ export const DetailsAndHexPane: React.FC<DetailsAndHexPaneProps> = ({
             </span>
           </div>
 
-          <button
-            onClick={() => setIsBookmarking(!isBookmarking)}
-            className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-white hover:bg-slate-50 dark:bg-[#1e293b] dark:hover:bg-[#334155] text-[#0f172a] dark:text-[#f8fafc] border border-[#cbd5e1] dark:border-[#334155] font-semibold text-[11px] shadow-2xs transition-colors cursor-pointer"
-            title="Add forensic tag / bookmark"
-          >
-            <Bookmark className="w-3 h-3 text-[#0284c7] dark:text-[#38bdf8]" />
-            <span>+ Bookmark</span>
-          </button>
+          <div className="flex items-center gap-1.5">
+            {detectedFilePath && onJumpToFileSystem && (
+              <button
+                type="button"
+                onClick={() => onJumpToFileSystem(detectedFilePath)}
+                className="flex items-center gap-1 px-2 py-1 rounded bg-white hover:bg-slate-50 dark:bg-[#1e293b] dark:hover:bg-[#334155] text-[#0284c7] dark:text-[#38bdf8] border border-[#cbd5e1] dark:border-[#334155] font-semibold text-[11px] shadow-2xs transition-colors cursor-pointer"
+                title={`Jump to "${detectedFilePath}" in File System Explorer`}
+              >
+                <FolderOpen className="w-3 h-3" />
+                <span>File System</span>
+              </button>
+            )}
+            <button
+              onClick={() => setIsBookmarking(!isBookmarking)}
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-white hover:bg-slate-50 dark:bg-[#1e293b] dark:hover:bg-[#334155] text-[#0f172a] dark:text-[#f8fafc] border border-[#cbd5e1] dark:border-[#334155] font-semibold text-[11px] shadow-2xs transition-colors cursor-pointer"
+              title="Add forensic tag / bookmark"
+            >
+              <Bookmark className="w-3 h-3 text-[#0284c7] dark:text-[#38bdf8]" />
+              <span>+ Bookmark</span>
+            </button>
+          </div>
         </div>
 
         {/* Inline Bookmark Creator if open */}
@@ -836,6 +936,17 @@ export const DetailsAndHexPane: React.FC<DetailsAndHexPaneProps> = ({
                                 {strVal || <span className="italic text-slate-400">—</span>}
                               </span>
 
+                              {onInspectEntity && strVal && isPivotableEntity(key, strVal) && (
+                                <button
+                                  type="button"
+                                  onClick={() => onInspectEntity(strVal, key)}
+                                  className="p-0.5 rounded hover:bg-sky-100 dark:hover:bg-sky-900/50 text-[#0284c7] dark:text-[#38bdf8] shrink-0 cursor-pointer"
+                                  title={`Inspect "${strVal}" in Connections Graph`}
+                                >
+                                  <Network className="w-3 h-3" />
+                                </button>
+                              )}
+
                               <button
                                 onClick={() => handleCopy(key, strVal)}
                                 className="p-0.5 rounded opacity-0 group-hover:opacity-100 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-500 shrink-0 cursor-pointer"
@@ -886,6 +997,17 @@ export const DetailsAndHexPane: React.FC<DetailsAndHexPaneProps> = ({
                               >
                                 {strVal || <span className="italic text-slate-400">—</span>}
                               </span>
+
+                              {onInspectEntity && strVal && isPivotableEntity(key, strVal) && (
+                                <button
+                                  type="button"
+                                  onClick={() => onInspectEntity(strVal, key)}
+                                  className="p-0.5 rounded hover:bg-sky-100 dark:hover:bg-sky-900/50 text-[#0284c7] dark:text-[#38bdf8] shrink-0 cursor-pointer"
+                                  title={`Inspect "${strVal}" in Connections Graph`}
+                                >
+                                  <Network className="w-3 h-3" />
+                                </button>
+                              )}
 
                               <button
                                 onClick={() => handleCopy(key, strVal)}

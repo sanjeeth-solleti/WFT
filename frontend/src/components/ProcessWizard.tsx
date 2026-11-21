@@ -29,7 +29,7 @@ import {
   ProcessingLog,
   ValidatePathResponse,
 } from '../api/client';
-import { KeywordManager } from './KeywordManagerModal';
+import { KeywordManager, StagedKeywordItem } from './KeywordManagerModal';
 import { FileBrowserModal } from './FileBrowserModal';
 import { useResizable, ResizeHandle } from './ResizeHandle';
 
@@ -91,11 +91,36 @@ const ARTIFACT_CATEGORIES_CATALOG: CategoryCatalog[] = [
     ],
   },
   {
+    category: 'Recovery, Carving & Bulk Extractor',
+    icon: 'recovery',
+    items: [
+      {
+        id: 'fs_vss',
+        name: 'Volume Shadow Copies (VSS)',
+        tool: 'pyvshadow / dissect.vss',
+        desc: 'Enumerate offline & live NTFS Volume Shadow Copy snapshots and differentially parse historical/deleted Registry, EVTX, Browser, and user files',
+      },
+      {
+        id: 'carve_files',
+        name: 'Data Carving (Unallocated & Deleted)',
+        tool: 'DataCarver (Multi-Threaded)',
+        desc: 'Multi-threaded signature & structural carving of deleted JPEG, PNG, GIF, PDF, Office/ZIP, SQLite, EVTX, Registry, LNK, PST/OST, and PE files',
+      },
+      {
+        id: 'bulk_extractor',
+        name: 'Bulk Extractor (Open-Source Feature & IOC Scanner)',
+        tool: 'bulk_extractor64.exe (-j threads)',
+        desc: 'High-speed C++ multi-threaded stream & E01 scanner extracting emails, URLs, domains, IPs, EXIF, WinPE, LNK, Prefetch, and carved streams',
+      },
+    ],
+  },
+  {
     category: 'Registry & OS',
     icon: 'reg',
     items: [
       { id: 'registry_recmd', name: 'Registry Hives (RECmd)', tool: 'RECmd.exe', desc: 'Kroll Batch RECmd registry hive analysis across SYSTEM, SOFTWARE, NTUSER' },
       { id: 'view_autoruns', name: 'AutoRuns & Persistence', tool: 'RECmd.exe', desc: 'Run keys, Services, Winlogon, Image File Execution Options' },
+      { id: 'sqlecmd', name: 'SQLECmd SQLite Hunting', tool: 'SQLECmd.exe', desc: 'Map-driven SQLite forensic hunting across Windows & application databases' },
     ],
   },
   {
@@ -168,10 +193,31 @@ const ARTIFACT_CATEGORIES_CATALOG: CategoryCatalog[] = [
     items: [
       { id: 'file_enrichment', name: 'SHA256 & Threat Analysis', tool: 'FileEnrichmentEngine', desc: 'Cryptographic hashing, extension mismatch, and archive unpacking' },
       { id: 'artifact_yara_hits', name: 'YARA-X Malware Rule Matches', tool: 'YARA-X', desc: 'Compiled rule scanning for webshells, beacons, mimikatz, credential dumpers' },
+      { id: 'artifact_stinger_hits', name: 'Trellix Stinger Malware Scan', tool: 'stinger64.exe', desc: 'Trellix Stinger rootkit, trojan, and malware binary signature scanning' },
       { id: 'artifact_ocr_results', name: 'RapidOCR Text Extraction', tool: 'RapidOCR', desc: 'OnnxRuntime optical character recognition for screenshots, memes, and scans' },
     ],
   },
 ];
+
+const HEAVY_OPT_IN_IDS = new Set(['fs_vss', 'carve_files', 'bulk_extractor']);
+const ALL_CATALOG_IDS = new Set<string>(
+  ARTIFACT_CATEGORIES_CATALOG.flatMap((cat) => cat.items.map((item) => item.id))
+);
+
+function normPath(p: string): string {
+  return (p || '').trim().replace(/^["']|["']$/g, '').replace(/[\\/]+$/, '').toLowerCase();
+}
+
+function isSameOrSubpath(targetRaw: string, sourceRaw: string): boolean {
+  const normTarget = normPath(targetRaw);
+  const normSource = normPath(sourceRaw);
+  if (!normTarget || !normSource) return false;
+  return (
+    normTarget === normSource ||
+    normTarget.startsWith(normSource + '\\') ||
+    normTarget.startsWith(normSource + '/')
+  );
+}
 
 export const ProcessWizard: React.FC<ProcessWizardProps> = ({
   currentCaseId,
@@ -212,12 +258,6 @@ export const ProcessWizard: React.FC<ProcessWizardProps> = ({
       const isImg = ['.e01', '.ex01', '.vhdx', '.vhd', '.vmdk', '.raw', '.dd', '.img', '.iso', '.001'].some(ext => lower.endsWith(ext));
       setSourceType(isImg ? 'image' : 'folder');
       validateInputPath(clean);
-      if (!targetStorageDir.trim()) {
-        const parentDir = clean.replace(/[\\/][^\\/]+$/, '');
-        if (parentDir && parentDir !== clean) {
-          setTargetStorageDir(isImg ? parentDir : clean);
-        }
-      }
     } else {
       setTargetStorageDir(clean);
     }
@@ -264,15 +304,38 @@ export const ProcessWizard: React.FC<ProcessWizardProps> = ({
     return () => clearTimeout(timer);
   }, [sourcePath]);
 
+  const [selectedPreset, setSelectedPreset] = useState<'quick' | 'comprehensive' | 'malware' | 'custom'>('custom');
   const [selectedCategory, setSelectedCategory] = useState<string>('Operating System');
   const [selectedArtifactIds, setSelectedArtifactIds] = useState<Set<string>>(() => {
-    const all = new Set<string>();
-    ARTIFACT_CATEGORIES_CATALOG.forEach((cat) => cat.items.forEach((item) => all.add(item.id)));
-    return all;
+    const std = new Set<string>();
+    ARTIFACT_CATEGORIES_CATALOG.forEach((cat) =>
+      cat.items.forEach((item) => {
+        if (!HEAVY_OPT_IN_IDS.has(item.id)) {
+          std.add(item.id);
+        }
+      })
+    );
+    std.add('web_hindsight');
+    return std;
   });
   const [enableYara, setEnableYara] = useState(true);
+  const [enableIoc, setEnableIoc] = useState(true);
   const [enableOcr, setEnableOcr] = useState(true);
+  const [enableStinger, setEnableStinger] = useState(true);
+  const [enableHindsight, setEnableHindsight] = useState(true);
+  const [maxWorkers, setMaxWorkers] = useState<number>(16);
+  const [initialKeywords, setInitialKeywords] = useState<StagedKeywordItem[]>([]);
   const [step3SubTab, setStep3SubTab] = useState<'artifacts' | 'keywords'>('artifacts');
+
+  // Strictly synchronized booleans & catalog count from Step 3 checkboxes:
+  const enableVss = selectedArtifactIds.has('fs_vss');
+  const enableDataCarving = selectedArtifactIds.has('carve_files');
+  const enableBulkExtractor = selectedArtifactIds.has('bulk_extractor');
+  const selectedCatalogCount = Array.from(selectedArtifactIds).filter((id) =>
+    ALL_CATALOG_IDS.has(id)
+  ).length;
+
+  const isTargetSameAsSource = isSameOrSubpath(targetStorageDir, sourcePath);
 
   const step3ContainerRef = useRef<HTMLDivElement>(null);
   const step3Left = useResizable({
@@ -329,32 +392,105 @@ export const ProcessWizard: React.FC<ProcessWizardProps> = ({
     };
   }, [activeCaseId, statusData?.status, isSubmitting]);
 
+  const syncEngineBooleansFromSet = (ids: Set<string>, includeHindsight = false) => {
+    setEnableYara(ids.has('artifact_yara_hits'));
+    setEnableStinger(ids.has('artifact_stinger_hits'));
+    setEnableOcr(ids.has('artifact_ocr_results'));
+    setEnableIoc(ids.has('file_enrichment'));
+    if (includeHindsight) {
+      setEnableHindsight(ids.has('web_hindsight'));
+    }
+  };
+
+  const handleEngineSwitchChange = (
+    engine: 'yara' | 'stinger' | 'ocr' | 'ioc' | 'hindsight',
+    checked: boolean
+  ) => {
+    setSelectedPreset('custom');
+    const idMap: Record<'yara' | 'stinger' | 'ocr' | 'ioc' | 'hindsight', string> = {
+      yara: 'artifact_yara_hits',
+      stinger: 'artifact_stinger_hits',
+      ocr: 'artifact_ocr_results',
+      ioc: 'file_enrichment',
+      hindsight: 'web_hindsight',
+    };
+    const targetId = idMap[engine];
+    if (engine === 'yara') setEnableYara(checked);
+    else if (engine === 'stinger') setEnableStinger(checked);
+    else if (engine === 'ocr') setEnableOcr(checked);
+    else if (engine === 'ioc') setEnableIoc(checked);
+    else if (engine === 'hindsight') setEnableHindsight(checked);
+
+    setSelectedArtifactIds((prev) => {
+      const next = new Set(prev);
+      if (checked) next.add(targetId);
+      else next.delete(targetId);
+      return next;
+    });
+  };
+
   const applyPreset = (preset: 'quick' | 'comprehensive' | 'malware') => {
-    const all = new Set<string>();
+    const next = new Set<string>();
     if (preset === 'quick') {
-      ['os_evtx', 'os_prefetch', 'fs_lnk', 'os_shimcache', 'usb_devices', 'browser_history'].forEach((id) => all.add(id));
-      setSelectedArtifactIds(all);
+      [
+        'os_evtx',
+        'os_prefetch',
+        'fs_lnk',
+        'os_shimcache',
+        'usb_devices',
+        'browser_history',
+        'registry_recmd',
+        'view_autoruns',
+      ].forEach((id) => next.add(id));
+      setSelectedArtifactIds(next);
       setEnableYara(false);
+      setEnableIoc(false);
       setEnableOcr(false);
-      setSourceType('image');
+      setEnableStinger(false);
+      setEnableHindsight(false);
+      setSelectedPreset('quick');
     } else if (preset === 'malware') {
-      ARTIFACT_CATEGORIES_CATALOG.forEach((cat) => cat.items.forEach((item) => all.add(item.id)));
-      setSelectedArtifactIds(all);
+      ARTIFACT_CATEGORIES_CATALOG.forEach((cat) =>
+        cat.items.forEach((item) => {
+          if (
+            item.id !== 'fs_vss' &&
+            item.id !== 'carve_files' &&
+            item.id !== 'artifact_ocr_results'
+          ) {
+            next.add(item.id);
+          }
+        })
+      );
+      next.add('bulk_extractor');
+      next.add('web_hindsight');
+      setSelectedArtifactIds(next);
       setEnableYara(true);
+      setEnableIoc(true);
+      setEnableStinger(true);
+      setEnableHindsight(true);
       setEnableOcr(false);
+      setSelectedPreset('malware');
     } else {
-      ARTIFACT_CATEGORIES_CATALOG.forEach((cat) => cat.items.forEach((item) => all.add(item.id)));
-      setSelectedArtifactIds(all);
+      // Comprehensive IR: checks ALL 43 catalog items including fs_vss, carve_files, bulk_extractor + web_hindsight
+      ARTIFACT_CATEGORIES_CATALOG.forEach((cat) => cat.items.forEach((item) => next.add(item.id)));
+      next.add('web_hindsight');
+      setSelectedArtifactIds(next);
       setEnableYara(true);
+      setEnableIoc(true);
       setEnableOcr(true);
+      setEnableStinger(true);
+      setEnableHindsight(true);
+      setSelectedPreset('comprehensive');
     }
   };
 
   const toggleArtifact = (id: string) => {
+    setSelectedPreset('custom');
     setSelectedArtifactIds((prev) => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
       else next.add(id);
+      syncEngineBooleansFromSet(next, false);
       return next;
     });
   };
@@ -362,24 +498,27 @@ export const ProcessWizard: React.FC<ProcessWizardProps> = ({
   const toggleCategoryAll = (catName: string, select: boolean) => {
     const cat = ARTIFACT_CATEGORIES_CATALOG.find((c) => c.category === catName);
     if (!cat) return;
+    setSelectedPreset('custom');
     setSelectedArtifactIds((prev) => {
       const next = new Set(prev);
       cat.items.forEach((item) => {
         if (select) next.add(item.id);
         else next.delete(item.id);
       });
+      syncEngineBooleansFromSet(next, false);
       return next;
     });
   };
 
   const toggleAllGlobally = (select: boolean) => {
-    setSelectedArtifactIds(() => {
-      const next = new Set<string>();
-      if (select) {
-        ARTIFACT_CATEGORIES_CATALOG.forEach((cat) => cat.items.forEach((item) => next.add(item.id)));
-      }
-      return next;
-    });
+    setSelectedPreset('custom');
+    const next = new Set<string>();
+    if (select) {
+      ARTIFACT_CATEGORIES_CATALOG.forEach((cat) => cat.items.forEach((item) => next.add(item.id)));
+      next.add('web_hindsight');
+    }
+    setSelectedArtifactIds(next);
+    syncEngineBooleansFromSet(next, true);
   };
 
   // Single-click Process Evidence: starts immediately and jumps directly to live execution monitor
@@ -396,15 +535,55 @@ export const ProcessWizard: React.FC<ProcessWizardProps> = ({
       return;
     }
 
+    const cleanTarget = targetStorageDir.trim().replace(/^["']|["']$/g, '').trim();
+    if (cleanTarget && isSameOrSubpath(cleanTarget, finalSourcePath)) {
+      setSubmissionError(
+        'Target Case / Output Folder must not be the same as the Evidence Source path (or a subfolder inside it).'
+      );
+      setIsSubmitting(false);
+      return;
+    }
+
     try {
-      const cleanTarget = targetStorageDir.trim().replace(/^["']|["']$/g, '').trim();
+      const clampedWorkers = Math.max(1, Math.min(32, Number(maxWorkers) || 16));
+      const outgoingSet = new Set(selectedArtifactIds);
+      if (enableYara) outgoingSet.add('artifact_yara_hits');
+      else outgoingSet.delete('artifact_yara_hits');
+      if (enableStinger) outgoingSet.add('artifact_stinger_hits');
+      else outgoingSet.delete('artifact_stinger_hits');
+      if (enableOcr) outgoingSet.add('artifact_ocr_results');
+      else outgoingSet.delete('artifact_ocr_results');
+      if (enableIoc) outgoingSet.add('file_enrichment');
+      else outgoingSet.delete('file_enrichment');
+      if (enableHindsight) outgoingSet.add('web_hindsight');
+      else outgoingSet.delete('web_hindsight');
+      const selectedList = Array.from(outgoingSet);
+
       const req: ProcessCaseRequest = {
         case_name: caseName.trim(),
         source_type: sourceType,
         source_path: finalSourcePath,
         target_dir: cleanTarget || undefined,
+        case_number: caseNumber.trim(),
+        examiner: examinerName.trim(),
+        notes: caseNotes.trim(),
         enable_yara: enableYara,
+        enable_ioc: enableIoc,
         enable_ocr: enableOcr,
+        enable_stinger: enableStinger,
+        enable_hindsight: enableHindsight,
+        enable_data_carving: selectedArtifactIds.has('carve_files'),
+        enable_bulk_extractor: selectedArtifactIds.has('bulk_extractor'),
+        enable_vss: selectedArtifactIds.has('fs_vss'),
+        max_workers: clampedWorkers,
+        selected_artifacts: selectedList,
+        initial_keywords: initialKeywords.map((k) => ({
+          keyword: k.keyword,
+          is_regex: Boolean(k.is_regex),
+          case_sensitive: Boolean(k.case_sensitive),
+          category: k.category || 'General',
+        })),
+        keywords: initialKeywords.map((k) => k.keyword),
         run_async: true,
       };
 
@@ -468,6 +647,19 @@ export const ProcessWizard: React.FC<ProcessWizardProps> = ({
           </div>
 
           <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                setCurrentStep(4);
+                setIsLogDrawerExpanded(true);
+              }}
+              className="flex items-center gap-1.5 px-2.5 py-1 bg-white hover:bg-slate-50 dark:bg-[#0f172a] dark:hover:bg-[#334155] border border-[#cbd5e1] dark:border-[#334155] text-slate-700 dark:text-slate-300 rounded text-xs font-semibold transition-colors shadow-2xs cursor-pointer"
+              title="Open Pipeline Execution Monitor & CLI Logs"
+            >
+              <Terminal className="w-3.5 h-3.5 text-[#0284c7] dark:text-[#38bdf8]" />
+              <span>Console / Logs</span>
+            </button>
+
             {/* Single-Click Process Evidence Button available directly in header once source path is selected */}
             {sourcePath.trim() && currentStep !== 4 && (
               <button
@@ -561,7 +753,21 @@ export const ProcessWizard: React.FC<ProcessWizardProps> = ({
               </div>
               <div className="text-slate-500 dark:text-slate-400 flex justify-between">
                 <span>Artifacts:</span>
-                <span className="text-[#0f172a] dark:text-[#f8fafc] font-semibold">{selectedArtifactIds.size} Selected</span>
+                <span className="text-[#0f172a] dark:text-[#f8fafc] font-semibold">{selectedCatalogCount} Selected</span>
+              </div>
+              <div className="text-slate-500 dark:text-slate-400 flex justify-between">
+                <span>Threads:</span>
+                <span className="text-[#0284c7] dark:text-[#38bdf8] font-bold">{maxWorkers} Workers</span>
+              </div>
+              <div className="text-slate-500 dark:text-slate-400 flex justify-between">
+                <span>VSS/Carve/BE:</span>
+                <span className="text-[#0f172a] dark:text-[#f8fafc] font-semibold">
+                  {[enableVss && 'VSS', enableDataCarving && 'Carve', enableBulkExtractor && 'BE'].filter(Boolean).join('+') || 'Off'}
+                </span>
+              </div>
+              <div className="text-slate-500 dark:text-slate-400 flex justify-between">
+                <span>Keywords:</span>
+                <span className="text-[#0f172a] dark:text-[#f8fafc] font-semibold">{initialKeywords.length} Staged</span>
               </div>
               <div className="text-slate-500 dark:text-slate-400 flex justify-between">
                 <span>Threat YARA:</span>
@@ -575,6 +781,17 @@ export const ProcessWizard: React.FC<ProcessWizardProps> = ({
           </div>
 
           <div className="flex-1 flex flex-col overflow-hidden bg-[#f1f5f9] dark:bg-[#0f172a]">
+            {submissionError && currentStep !== 4 && (
+              <div className="mx-8 mt-4 p-2.5 badge-status-error text-xs flex items-center justify-between gap-2 rounded shrink-0">
+                <div className="flex items-center gap-2">
+                  <AlertTriangle className="w-4 h-4 shrink-0 text-[#991b1b]" />
+                  <span>{submissionError}</span>
+                </div>
+                <button type="button" onClick={() => setSubmissionError(null)} className="p-0.5 hover:opacity-80 cursor-pointer">
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            )}
             {currentStep === 1 && (
               <div className="flex-1 overflow-y-auto p-8 max-w-4xl space-y-6">
                 <div>
@@ -595,42 +812,54 @@ export const ProcessWizard: React.FC<ProcessWizardProps> = ({
                     <button
                       type="button"
                       onClick={() => applyPreset('quick')}
-                      className="p-3 bg-white dark:bg-[#1e293b] hover:bg-slate-50 dark:hover:bg-[#334155] border border-[#cbd5e1] dark:border-[#334155] hover:border-[#0284c7] dark:hover:border-[#38bdf8] rounded text-left transition-colors cursor-pointer group shadow-2xs"
+                      className={`p-3 bg-white dark:bg-[#1e293b] hover:bg-slate-50 dark:hover:bg-[#334155] border rounded text-left transition-colors cursor-pointer group shadow-2xs ${
+                        selectedPreset === 'quick'
+                          ? 'border-[#0284c7] dark:border-[#38bdf8]'
+                          : 'border-[#cbd5e1] dark:border-[#334155] hover:border-[#0284c7] dark:hover:border-[#38bdf8]'
+                      }`}
                     >
                       <div className="text-xs font-bold text-[#0f172a] dark:text-[#f8fafc] group-hover:text-[#0284c7] dark:group-hover:text-[#38bdf8] flex items-center justify-between">
                         <span>Quick Triage</span>
                         <Zap className="w-3.5 h-3.5 text-slate-400 group-hover:text-[#0284c7] dark:group-hover:text-[#38bdf8]" />
                       </div>
                       <div className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">
-                        Event Logs, Prefetch, LNK, USB, and ShimCache. Fast baseline in under 30 seconds.
+                        Event Logs, Prefetch, LNK, USB, Browser History, RECmd & AutoRuns. Skips heavy VSS/Carving/BE.
                       </div>
                     </button>
 
                     <button
                       type="button"
                       onClick={() => applyPreset('comprehensive')}
-                      className="p-3 bg-white dark:bg-[#1e293b] hover:bg-slate-50 dark:hover:bg-[#334155] border border-[#0284c7] dark:border-[#38bdf8] rounded text-left transition-colors cursor-pointer group shadow-2xs"
+                      className={`p-3 bg-white dark:bg-[#1e293b] hover:bg-slate-50 dark:hover:bg-[#334155] border rounded text-left transition-colors cursor-pointer group shadow-2xs ${
+                        selectedPreset === 'comprehensive'
+                          ? 'border-[#0284c7] dark:border-[#38bdf8]'
+                          : 'border-[#cbd5e1] dark:border-[#334155] hover:border-[#0284c7] dark:hover:border-[#38bdf8]'
+                      }`}
                     >
                       <div className="text-xs font-bold text-[#0284c7] dark:text-[#38bdf8] flex items-center justify-between">
                         <span>Comprehensive IR</span>
                         <Cpu className="w-3.5 h-3.5 text-[#0284c7] dark:text-[#38bdf8]" />
                       </div>
                       <div className="text-[11px] text-slate-600 dark:text-slate-300 mt-1">
-                        All 15 EZ Tools, $MFT, $J, SRUM, Browsers, Chat, Emails, YARA-X & RapidOCR.
+                        All 43 options: 16 EZ Tools, SQLECmd, VSS, Data Carving, Bulk Extractor, Browsers, YARA-X, Stinger & OCR.
                       </div>
                     </button>
 
                     <button
                       type="button"
                       onClick={() => applyPreset('malware')}
-                      className="p-3 bg-white dark:bg-[#1e293b] hover:bg-slate-50 dark:hover:bg-[#334155] border border-[#cbd5e1] dark:border-[#334155] hover:border-[#0284c7] dark:hover:border-[#38bdf8] rounded text-left transition-colors cursor-pointer group shadow-2xs"
+                      className={`p-3 bg-white dark:bg-[#1e293b] hover:bg-slate-50 dark:hover:bg-[#334155] border rounded text-left transition-colors cursor-pointer group shadow-2xs ${
+                        selectedPreset === 'malware'
+                          ? 'border-[#0284c7] dark:border-[#38bdf8]'
+                          : 'border-[#cbd5e1] dark:border-[#334155] hover:border-[#0284c7] dark:hover:border-[#38bdf8]'
+                      }`}
                     >
                       <div className="text-xs font-bold text-[#0f172a] dark:text-[#f8fafc] group-hover:text-[#0284c7] dark:group-hover:text-[#38bdf8] flex items-center justify-between">
                         <span>Threat Hunting</span>
                         <Shield className="w-3.5 h-3.5 text-slate-400 group-hover:text-[#0284c7] dark:group-hover:text-[#38bdf8]" />
                       </div>
                       <div className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">
-                        Full YARA-X rule execution, BAM/DAM execution, Tasks, PowerShell, and Registry persistence.
+                        YARA-X, Trellix Stinger, Bulk Extractor IOCs, Hindsight, BAM/DAM, Tasks & Registry persistence.
                       </div>
                     </button>
                   </div>
@@ -687,9 +916,18 @@ export const ProcessWizard: React.FC<ProcessWizardProps> = ({
                       type="text"
                       value={targetStorageDir}
                       onChange={(e) => setTargetStorageDir(e.target.value.replace(/^["']|["']$/g, ''))}
-                      placeholder="e.g. C:\Forensics\Cases or D:\Cases\Case01"
-                      className="w-full bg-white dark:bg-[#1e293b] border border-[#cbd5e1] dark:border-[#334155] rounded px-3 py-2 text-xs text-[#0f172a] dark:text-[#f8fafc] font-mono focus:border-[#0284c7] focus:outline-none"
+                      placeholder="Optional — defaults to isolated WFT Cases folder (CASES_DIR/<case_id>)"
+                      className={`w-full bg-white dark:bg-[#1e293b] border rounded px-3 py-2 text-xs text-[#0f172a] dark:text-[#f8fafc] font-mono focus:outline-none ${
+                        isTargetSameAsSource
+                          ? 'border-red-500 focus:border-red-600'
+                          : 'border-[#cbd5e1] dark:border-[#334155] focus:border-[#0284c7]'
+                      }`}
                     />
+                    {isTargetSameAsSource && (
+                      <p className="text-[11px] text-[#991b1b] dark:text-red-400 font-semibold">
+                        Target Case / Output Folder must not be the same as the Evidence Source path.
+                      </p>
+                    )}
                   </div>
 
                   <div className="col-span-2 space-y-1.5">
@@ -764,19 +1002,17 @@ export const ProcessWizard: React.FC<ProcessWizardProps> = ({
                       onChange={(e) => {
                         const val = e.target.value.replace(/^["']|["']$/g, '');
                         setSourcePath(val);
-                        if (!targetStorageDir.trim() && val.trim()) {
-                          const cleanVal = val.trim();
-                          const lower = cleanVal.toLowerCase();
-                          const isImg = ['.e01', '.ex01', '.vhdx', '.vhd', '.vmdk', '.raw', '.dd', '.img', '.iso', '.001'].some(ext => lower.endsWith(ext));
-                          const parentDir = cleanVal.replace(/[\\/][^\\/]+$/, '');
-                          if (parentDir && parentDir !== cleanVal) {
-                            setTargetStorageDir(isImg ? parentDir : cleanVal);
-                          }
-                        }
                       }}
                       placeholder="e.g. C:\Evidence\TriageFolder or D:\Forensics\evidence_disk.E01"
                       className="w-full bg-[#f8fafc] dark:bg-[#0f172a] border border-[#cbd5e1] dark:border-[#334155] rounded px-3 py-2 text-xs text-[#0f172a] dark:text-[#f8fafc] font-mono focus:border-[#0284c7] focus:outline-none"
                     />
+
+                    {isTargetSameAsSource && (
+                      <div className="p-2.5 rounded badge-status-error text-xs flex items-center gap-2 font-mono">
+                        <AlertTriangle className="w-4 h-4 shrink-0" />
+                        <span>Target Case / Output Folder must not be the same as the Evidence Source path.</span>
+                      </div>
+                    )}
 
                     {pathValidation && pathValidation.valid && (
                       <div className="p-3 rounded badge-status-success text-xs flex items-center justify-between font-mono">
@@ -837,7 +1073,7 @@ export const ProcessWizard: React.FC<ProcessWizardProps> = ({
                         }`}
                       >
                         <ListChecks className="w-3.5 h-3.5" />
-                        <span>Artifact Selection ({selectedArtifactIds.size})</span>
+                        <span>Artifact Selection ({selectedCatalogCount})</span>
                       </button>
 
                       <button
@@ -850,7 +1086,7 @@ export const ProcessWizard: React.FC<ProcessWizardProps> = ({
                         }`}
                       >
                         <Hash className="w-3.5 h-3.5" />
-                        <span>Keyword Lists to Search</span>
+                        <span>Keyword Lists to Search ({initialKeywords.length})</span>
                       </button>
                     </div>
                   </div>
@@ -879,7 +1115,10 @@ export const ProcessWizard: React.FC<ProcessWizardProps> = ({
                   <div className="flex-1 overflow-hidden p-4 bg-[#f1f5f9] dark:bg-[#0f172a]">
                     <div className="h-full border border-[#cbd5e1] dark:border-[#334155] rounded overflow-hidden bg-white dark:bg-[#1e293b] shadow-2xs flex flex-col">
                       <KeywordManager
-                        caseId={activeCaseId || currentCaseId || caseName.trim().replace(/[^A-Za-z0-9_\-]/g, '_')}
+                        caseId=""
+                        localStagingMode={true}
+                        stagedKeywords={initialKeywords}
+                        onStagedKeywordsChange={setInitialKeywords}
                         isModal={false}
                       />
                     </div>
@@ -923,6 +1162,118 @@ export const ProcessWizard: React.FC<ProcessWizardProps> = ({
                     />
 
                     <div className="flex-1 overflow-y-auto p-6 bg-[#f1f5f9] dark:bg-[#0f172a] space-y-4 min-w-0">
+                      {/* Always-Visible Multi-Threading, Deep Recovery & Forensic Engine Controls */}
+                      <div className="p-4 rounded border border-[#cbd5e1] dark:border-[#334155] bg-white dark:bg-[#1e293b] space-y-3 shadow-2xs">
+                        <div className="flex items-center justify-between gap-4 pb-3 border-b border-[#cbd5e1] dark:border-[#334155]">
+                          <div>
+                            <label htmlFor="wft-max-workers-input" className="text-xs font-bold text-[#0f172a] dark:text-[#f8fafc]">
+                              Multi-Threading Worker Threads (1–32)
+                            </label>
+                            <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                              Parallel threads for EZ Tools, RegRipper, Bulk Extractor (-j), Data Carving, YARA-X, and DuckDB
+                            </p>
+                          </div>
+                          <div className="flex items-center gap-2 shrink-0">
+                            <input
+                              type="range"
+                              min={1}
+                              max={32}
+                              value={maxWorkers}
+                              onChange={(e) => setMaxWorkers(Math.max(1, Math.min(32, Number(e.target.value) || 16)))}
+                              aria-label="Multi-Threading Worker Threads Slider"
+                              className="w-28 accent-[#0284c7] cursor-pointer"
+                            />
+                            <input
+                              id="wft-max-workers-input"
+                              data-testid="max-workers-input"
+                              type="number"
+                              min={1}
+                              max={32}
+                              value={maxWorkers}
+                              onChange={(e) => setMaxWorkers(Math.max(1, Math.min(32, Number(e.target.value) || 1)))}
+                              className="w-16 px-2 py-1 text-xs font-mono font-bold text-center bg-[#f8fafc] dark:bg-[#0f172a] border border-[#cbd5e1] dark:border-[#334155] rounded text-[#0f172a] dark:text-[#f8fafc]"
+                            />
+                          </div>
+                        </div>
+
+                        {/* Keep hidden Deep Recovery inputs when another category is selected so inputs remain in DOM if queried */}
+                        {selectedCategory !== 'Recovery, Carving & Bulk Extractor' && (
+                          <div className="hidden" aria-hidden="true" style={{ display: 'none' }}>
+                            {ARTIFACT_CATEGORIES_CATALOG.find((c) => c.category === 'Recovery, Carving & Bulk Extractor')?.items.map((item) => {
+                              const isChecked = selectedArtifactIds.has(item.id);
+                              return (
+                                <input
+                                  key={item.id}
+                                  type="checkbox"
+                                  data-testid={`artifact-checkbox-${item.id}`}
+                                  checked={isChecked}
+                                  onChange={() => toggleArtifact(item.id)}
+                                  className="hidden"
+                                />
+                              );
+                            })}
+                          </div>
+                        )}
+
+                        {/* Always-Visible Forensic Engine Toggles */}
+                        <div className="space-y-2">
+                          <div className="text-[11px] font-bold uppercase tracking-wider text-slate-600 dark:text-slate-300 font-mono">
+                            Integrated Forensic & Threat Engines
+                          </div>
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-xs">
+                            <label className="flex items-center justify-between p-2 rounded border border-[#cbd5e1] dark:border-[#334155] bg-[#f8fafc] dark:bg-[#0f172a] cursor-pointer">
+                              <span className="font-semibold text-[#0f172a] dark:text-[#f8fafc]">Enable YARA-X Malware Scanning</span>
+                              <input
+                                type="checkbox"
+                                checked={enableYara}
+                                onChange={(e) => handleEngineSwitchChange('yara', e.target.checked)}
+                                className="rounded border-[#cbd5e1] text-[#0284c7] focus:ring-0 w-4 h-4 cursor-pointer"
+                              />
+                            </label>
+
+                            <label className="flex items-center justify-between p-2 rounded border border-[#cbd5e1] dark:border-[#334155] bg-[#f8fafc] dark:bg-[#0f172a] cursor-pointer">
+                              <span className="font-semibold text-[#0f172a] dark:text-[#f8fafc]">Enable IOC & Entity Correlation</span>
+                              <input
+                                type="checkbox"
+                                checked={enableIoc}
+                                onChange={(e) => handleEngineSwitchChange('ioc', e.target.checked)}
+                                className="rounded border-[#cbd5e1] text-[#0284c7] focus:ring-0 w-4 h-4 cursor-pointer"
+                              />
+                            </label>
+
+                            <label className="flex items-center justify-between p-2 rounded border border-[#cbd5e1] dark:border-[#334155] bg-[#f8fafc] dark:bg-[#0f172a] cursor-pointer">
+                              <span className="font-semibold text-[#0f172a] dark:text-[#f8fafc]">Enable Trellix Stinger</span>
+                              <input
+                                type="checkbox"
+                                checked={enableStinger}
+                                onChange={(e) => handleEngineSwitchChange('stinger', e.target.checked)}
+                                className="rounded border-[#cbd5e1] text-[#0284c7] focus:ring-0 w-4 h-4 cursor-pointer"
+                              />
+                            </label>
+
+                            <label className="flex items-center justify-between p-2 rounded border border-[#cbd5e1] dark:border-[#334155] bg-[#f8fafc] dark:bg-[#0f172a] cursor-pointer">
+                              <span className="font-semibold text-[#0f172a] dark:text-[#f8fafc]">Enable Hindsight</span>
+                              <input
+                                type="checkbox"
+                                checked={enableHindsight}
+                                onChange={(e) => handleEngineSwitchChange('hindsight', e.target.checked)}
+                                className="rounded border-[#cbd5e1] text-[#0284c7] focus:ring-0 w-4 h-4 cursor-pointer"
+                              />
+                            </label>
+
+                            <label className="flex items-center justify-between p-2 rounded border border-[#cbd5e1] dark:border-[#334155] bg-[#f8fafc] dark:bg-[#0f172a] cursor-pointer md:col-span-2">
+                              <span className="font-semibold text-[#0f172a] dark:text-[#f8fafc]">Enable RapidOCR Text Extraction</span>
+                              <input
+                                type="checkbox"
+                                checked={enableOcr}
+                                onChange={(e) => handleEngineSwitchChange('ocr', e.target.checked)}
+                                className="rounded border-[#cbd5e1] text-[#0284c7] focus:ring-0 w-4 h-4 cursor-pointer"
+                              />
+                            </label>
+                          </div>
+                        </div>
+                      </div>
+
                       {activeCategoryObj && (
                         <>
                           <div className="flex items-center justify-between border-b border-[#cbd5e1] dark:border-[#334155] pb-3">
@@ -966,6 +1317,7 @@ export const ProcessWizard: React.FC<ProcessWizardProps> = ({
                                 >
                                   <input
                                     type="checkbox"
+                                    data-testid={`artifact-checkbox-${item.id}`}
                                     checked={isChecked}
                                     onChange={() => toggleArtifact(item.id)}
                                     className="mt-0.5 rounded border-[#cbd5e1] text-[#0284c7] focus:ring-0 w-4 h-4 cursor-pointer"
@@ -985,39 +1337,6 @@ export const ProcessWizard: React.FC<ProcessWizardProps> = ({
                               );
                             })}
                           </div>
-
-                          {activeCategoryObj.category.includes('Malware') && (
-                            <div className="mt-6 p-4 rounded border border-[#cbd5e1] dark:border-[#334155] bg-white dark:bg-[#1e293b] space-y-3">
-                              <span className="text-xs font-bold text-[#0f172a] dark:text-[#f8fafc] uppercase font-mono tracking-wider">
-                                Advanced Enrichment Toggles
-                              </span>
-                              <div className="flex items-center justify-between">
-                                <div>
-                                  <div className="text-xs font-semibold text-[#0f172a] dark:text-[#f8fafc]">Compile & Scan with YARA-X</div>
-                                  <div className="text-[11px] text-slate-500 dark:text-slate-400">Match staged payloads against rules/*.yar</div>
-                                </div>
-                                <input
-                                  type="checkbox"
-                                  checked={enableYara}
-                                  onChange={(e) => setEnableYara(e.target.checked)}
-                                  className="rounded border-[#cbd5e1] text-[#0284c7] focus:ring-0 w-4 h-4 cursor-pointer"
-                                />
-                              </div>
-
-                              <div className="flex items-center justify-between pt-2 border-t border-[#cbd5e1] dark:border-[#334155]">
-                                <div>
-                                  <div className="text-xs font-semibold text-[#0f172a] dark:text-[#f8fafc]">RapidOCR Optical Character Recognition</div>
-                                  <div className="text-[11px] text-slate-500 dark:text-slate-400">Extract readable text from evidence screenshots</div>
-                                </div>
-                                <input
-                                  type="checkbox"
-                                  checked={enableOcr}
-                                  onChange={(e) => setEnableOcr(e.target.checked)}
-                                  className="rounded border-[#cbd5e1] text-[#0284c7] focus:ring-0 w-4 h-4 cursor-pointer"
-                                />
-                              </div>
-                            </div>
-                          )}
                         </>
                       )}
                     </div>
@@ -1038,7 +1357,7 @@ export const ProcessWizard: React.FC<ProcessWizardProps> = ({
                             ? 'badge-status-success'
                             : statusData?.status === 'RUNNING'
                             ? 'badge-status-running'
-                            : statusData?.status === 'FAILED'
+                            : statusData?.status === 'FAILED' || statusData?.status === 'ERROR'
                             ? 'badge-status-error'
                             : 'badge-status-neutral'
                         }`}
@@ -1084,7 +1403,7 @@ export const ProcessWizard: React.FC<ProcessWizardProps> = ({
                     <div className="w-full bg-[#f1f5f9] dark:bg-[#0f172a] rounded h-2 overflow-hidden border border-[#cbd5e1] dark:border-[#334155]">
                       <div
                         className={`h-full transition-all duration-300 rounded ${
-                          statusData?.status === 'FAILED'
+                          statusData?.status === 'FAILED' || statusData?.status === 'ERROR'
                             ? 'bg-[#991b1b]'
                             : statusData?.status === 'SUCCESS' || statusData?.status === 'COMPLETED'
                             ? 'bg-[#166534]'
@@ -1095,10 +1414,10 @@ export const ProcessWizard: React.FC<ProcessWizardProps> = ({
                     </div>
                   </div>
 
-                  {submissionError && (
+                  {(submissionError || statusData?.error) && (
                     <div className="p-2.5 badge-status-error text-xs flex items-center gap-2 rounded">
                       <AlertTriangle className="w-4 h-4 shrink-0 text-[#991b1b]" />
-                      <span>{submissionError}</span>
+                      <span>{submissionError || statusData?.error}</span>
                     </div>
                   )}
                 </div>
@@ -1136,10 +1455,11 @@ export const ProcessWizard: React.FC<ProcessWizardProps> = ({
                       <button
                         type="button"
                         onClick={() => setIsLogDrawerExpanded(!isLogDrawerExpanded)}
-                        className="p-1 rounded bg-white dark:bg-[#1e293b] hover:bg-slate-50 dark:hover:bg-[#334155] text-slate-700 dark:text-slate-300 border border-[#cbd5e1] dark:border-[#334155] cursor-pointer"
+                        className="px-2.5 py-1 rounded bg-white dark:bg-[#1e293b] hover:bg-slate-50 dark:hover:bg-[#334155] text-slate-700 dark:text-slate-300 border border-[#cbd5e1] dark:border-[#334155] text-xs font-semibold flex items-center gap-1.5 cursor-pointer"
                         title={isLogDrawerExpanded ? 'Collapse CLI Drawer' : 'Expand CLI Drawer'}
                       >
                         <Terminal className="w-3.5 h-3.5" />
+                        <span>Console / Logs</span>
                       </button>
                     </div>
                   </div>

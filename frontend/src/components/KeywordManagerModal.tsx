@@ -12,9 +12,21 @@ import {
   Hash,
   FileSpreadsheet,
   Loader2,
-  Filter
+  Filter,
+  Play,
 } from 'lucide-react';
 import { apiClient, CaseKeyword } from '../api/client';
+
+export interface StagedKeywordItem {
+  keyword_id: string;
+  keyword: string;
+  is_regex: boolean;
+  case_sensitive?: boolean;
+  category?: string;
+  source_file?: string;
+  hit_count: number;
+  created_at: string;
+}
 
 interface KeywordManagerProps {
   caseId: string;
@@ -24,6 +36,9 @@ interface KeywordManagerProps {
   onKeywordsUpdated?: () => void;
   selectedKeywordFilters?: string[];
   onToggleKeywordFilter?: (keyword: string) => void;
+  localStagingMode?: boolean;
+  stagedKeywords?: StagedKeywordItem[];
+  onStagedKeywordsChange?: (keywords: StagedKeywordItem[]) => void;
 }
 
 export const KeywordManager: React.FC<KeywordManagerProps> = ({
@@ -34,16 +49,21 @@ export const KeywordManager: React.FC<KeywordManagerProps> = ({
   onKeywordsUpdated,
   selectedKeywordFilters = [],
   onToggleKeywordFilter,
+  localStagingMode = false,
+  stagedKeywords = [],
+  onStagedKeywordsChange,
 }) => {
   const [keywords, setKeywords] = useState<CaseKeyword[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [isUploading, setIsUploading] = useState<boolean>(false);
+  const [isScanning, setIsScanning] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
 
   // Manual Add Form State
   const [newKeyword, setNewKeyword] = useState<string>('');
   const [isRegex, setIsRegex] = useState<boolean>(false);
+  const [caseSensitive, setCaseSensitive] = useState<boolean>(false);
   const [isAdding, setIsAdding] = useState<boolean>(false);
 
   // Search filter for keywords table
@@ -52,9 +72,11 @@ export const KeywordManager: React.FC<KeywordManagerProps> = ({
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Fetch keywords for the case
+  const activeList: CaseKeyword[] = localStagingMode ? stagedKeywords : keywords;
+
+  // Fetch keywords for the case (skipped completely in localStagingMode)
   const loadKeywords = async () => {
-    if (!caseId) return;
+    if (localStagingMode || !caseId.trim()) return;
     setIsLoading(true);
     setError(null);
     try {
@@ -69,16 +91,80 @@ export const KeywordManager: React.FC<KeywordManagerProps> = ({
   };
 
   useEffect(() => {
-    if (caseId && isOpen) {
+    if (!localStagingMode && caseId.trim() && isOpen) {
       loadKeywords();
     }
-  }, [caseId, isOpen]);
+  }, [caseId, isOpen, localStagingMode]);
+
+  const handleRunKeywordScan = async () => {
+    if (localStagingMode || !caseId.trim() || isScanning) return;
+    setIsScanning(true);
+    setError(null);
+    setSuccessMessage(null);
+    try {
+      const res = await apiClient.scanKeywords(caseId);
+      if (res?.keywords) {
+        setKeywords(res.keywords);
+      } else {
+        await loadKeywords();
+      }
+      setSuccessMessage('Keyword scan completed across case evidence.');
+      if (onKeywordsUpdated) onKeywordsUpdated();
+      setTimeout(() => setSuccessMessage(null), 3000);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setIsScanning(false);
+    }
+  };
 
   // Handle Manual Add
   const handleAddKeyword = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     const cleanKw = newKeyword.trim();
-    if (!cleanKw || !caseId) return;
+    if (!cleanKw) return;
+
+    if (isRegex) {
+      try {
+        // Validate regex syntax prior to staging or sending
+        new RegExp(cleanKw);
+      } catch (regexErr: unknown) {
+        setError(`Invalid regular expression syntax: ${regexErr instanceof Error ? regexErr.message : String(regexErr)}`);
+        return;
+      }
+    }
+
+    if (localStagingMode) {
+      const current = stagedKeywords || [];
+      const exists = current.some(
+        (k) =>
+          k.keyword === cleanKw &&
+          Boolean(k.is_regex) === Boolean(isRegex) &&
+          Boolean(k.case_sensitive) === Boolean(caseSensitive)
+      );
+      if (exists) {
+        setError(`Keyword "${cleanKw}" is already staged.`);
+        return;
+      }
+      const item: StagedKeywordItem = {
+        keyword_id: `staged_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+        keyword: cleanKw,
+        is_regex: isRegex,
+        case_sensitive: caseSensitive,
+        category: 'General',
+        source_file: 'Pre-Run Staged',
+        hit_count: 0,
+        created_at: new Date().toISOString(),
+      };
+      onStagedKeywordsChange?.([...current, item]);
+      setNewKeyword('');
+      setError(null);
+      setSuccessMessage(`Staged keyword "${cleanKw}" for case processing.`);
+      setTimeout(() => setSuccessMessage(null), 3000);
+      return;
+    }
+
+    if (!caseId.trim()) return;
 
     setIsAdding(true);
     setError(null);
@@ -88,6 +174,7 @@ export const KeywordManager: React.FC<KeywordManagerProps> = ({
         keywords: [cleanKw],
         source_file: 'Manual',
         is_regex: isRegex,
+        case_sensitive: caseSensitive,
       });
       setKeywords(res.keywords || []);
       setNewKeyword('');
@@ -104,7 +191,7 @@ export const KeywordManager: React.FC<KeywordManagerProps> = ({
   // Handle File Upload
   const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const files = event.target.files;
-    if (!files || files.length === 0 || !caseId) return;
+    if (!files || files.length === 0) return;
 
     const file = files[0];
     setIsUploading(true);
@@ -112,6 +199,37 @@ export const KeywordManager: React.FC<KeywordManagerProps> = ({
     setSuccessMessage(null);
 
     try {
+      if (localStagingMode) {
+        const rawText = await file.text();
+        const isCsv = file.name.toLowerCase().endsWith('.csv');
+        const rawTokens = isCsv ? rawText.split(/[\r\n,]+/) : rawText.split(/[\r\n]+/);
+        const current = [...(stagedKeywords || [])];
+        let addedCount = 0;
+        const nowIso = new Date().toISOString();
+        rawTokens.forEach((tok, idx) => {
+          const clean = tok.trim().replace(/^["']|["']$/g, '').trim();
+          if (!clean || clean.startsWith('#')) return;
+          if (!current.some((k) => k.keyword === clean)) {
+            current.push({
+              keyword_id: `staged_file_${Date.now()}_${idx}`,
+              keyword: clean,
+              is_regex: false,
+              case_sensitive: caseSensitive,
+              category: 'General',
+              source_file: file.name,
+              hit_count: 0,
+              created_at: nowIso,
+            });
+            addedCount += 1;
+          }
+        });
+        onStagedKeywordsChange?.(current);
+        setSuccessMessage(`Staged ${addedCount} keywords from ${file.name} for case processing.`);
+        setTimeout(() => setSuccessMessage(null), 3500);
+        return;
+      }
+
+      if (!caseId.trim()) return;
       const res = await apiClient.uploadKeywordsFile(caseId, file);
       setKeywords(res.keywords || []);
       setSuccessMessage(`Uploaded keywords from ${file.name} successfully.`);
@@ -129,7 +247,14 @@ export const KeywordManager: React.FC<KeywordManagerProps> = ({
 
   // Handle Delete Specific Keyword
   const handleDeleteKeyword = async (keywordId: string, kwText: string) => {
-    if (!caseId || !keywordId) return;
+    if (!keywordId) return;
+    if (localStagingMode) {
+      onStagedKeywordsChange?.((stagedKeywords || []).filter((k) => k.keyword_id !== keywordId));
+      setSuccessMessage(`Removed staged keyword "${kwText}".`);
+      setTimeout(() => setSuccessMessage(null), 2500);
+      return;
+    }
+    if (!caseId.trim()) return;
     setDeletingId(keywordId);
     setError(null);
     try {
@@ -146,7 +271,7 @@ export const KeywordManager: React.FC<KeywordManagerProps> = ({
   };
 
   // Filtered keywords for table
-  const filteredKeywords = keywords.filter((k) => {
+  const filteredKeywords = activeList.filter((k) => {
     if (!tableSearch.trim()) return true;
     const q = tableSearch.toLowerCase();
     return (
@@ -155,7 +280,7 @@ export const KeywordManager: React.FC<KeywordManagerProps> = ({
     );
   });
 
-  const totalHits = keywords.reduce((sum, k) => sum + k.hit_count, 0);
+  const totalHits = activeList.reduce((sum, k) => sum + (k.hit_count || 0), 0);
 
   const content = (
     <div className="flex flex-col h-full font-sans text-xs text-[#0f172a] dark:text-[#f8fafc] bg-white dark:bg-[#1e293b]">
@@ -252,15 +377,27 @@ export const KeywordManager: React.FC<KeywordManagerProps> = ({
               </button>
             </div>
 
-            <label className="flex items-center gap-2 cursor-pointer select-none text-[11px] text-slate-600 dark:text-slate-400">
-              <input
-                type="checkbox"
-                checked={isRegex}
-                onChange={(e) => setIsRegex(e.target.checked)}
-                className="w-3.5 h-3.5 rounded border-[#cbd5e1] text-[#0284c7] focus:ring-0 cursor-pointer"
-              />
-              <span>Treat as Regular Expression (Regex Pattern)</span>
-            </label>
+            <div className="flex flex-wrap items-center gap-4">
+              <label className="flex items-center gap-2 cursor-pointer select-none text-[11px] text-slate-600 dark:text-slate-400">
+                <input
+                  type="checkbox"
+                  checked={isRegex}
+                  onChange={(e) => setIsRegex(e.target.checked)}
+                  className="w-3.5 h-3.5 rounded border-[#cbd5e1] text-[#0284c7] focus:ring-0 cursor-pointer"
+                />
+                <span>Treat as Regular Expression (Regex Pattern)</span>
+              </label>
+
+              <label className="flex items-center gap-2 cursor-pointer select-none text-[11px] text-slate-600 dark:text-slate-400">
+                <input
+                  type="checkbox"
+                  checked={caseSensitive}
+                  onChange={(e) => setCaseSensitive(e.target.checked)}
+                  className="w-3.5 h-3.5 rounded border-[#cbd5e1] text-[#0284c7] focus:ring-0 cursor-pointer"
+                />
+                <span>Case Sensitive Match</span>
+              </label>
+            </div>
           </form>
         </div>
       </div>
@@ -270,7 +407,9 @@ export const KeywordManager: React.FC<KeywordManagerProps> = ({
         <div className="flex items-center gap-2">
           <Hash className="w-4 h-4 text-[#0284c7] dark:text-[#38bdf8]" />
           <span className="font-bold text-xs uppercase tracking-wider text-[#0f172a] dark:text-[#f8fafc]">
-            Keyword List ({keywords.length} Defined, {totalHits.toLocaleString()} Hits)
+            {localStagingMode
+              ? `Staged Keyword List (${activeList.length} Staged for Case Run)`
+              : `Keyword List (${activeList.length} Defined, ${totalHits.toLocaleString()} Hits)`}
           </span>
         </div>
 
@@ -294,20 +433,39 @@ export const KeywordManager: React.FC<KeywordManagerProps> = ({
             )}
           </div>
 
-          <button
-            onClick={loadKeywords}
-            disabled={isLoading}
-            className="p-1.5 rounded border border-[#cbd5e1] dark:border-[#334155] bg-white hover:bg-slate-50 dark:bg-[#0f172a] dark:hover:bg-[#334155] text-slate-600 dark:text-slate-300 transition-colors cursor-pointer"
-            title="Refresh Hit Counts"
-          >
-            <RefreshCw className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin text-[#0284c7]' : ''}`} />
-          </button>
+          {!localStagingMode && caseId.trim() ? (
+            <>
+              <button
+                type="button"
+                onClick={handleRunKeywordScan}
+                disabled={isScanning || isLoading}
+                className="px-2.5 py-1 rounded bg-[#0284c7] hover:bg-[#0369a1] text-white text-xs font-semibold border border-[#0369a1] flex items-center gap-1 transition-colors cursor-pointer disabled:opacity-50"
+                title="Re-scan all case evidence for configured keywords"
+              >
+                {isScanning ? <Loader2 className="w-3 h-3 animate-spin" /> : <Play className="w-3 h-3 fill-current" />}
+                <span>Run Keyword Scan</span>
+              </button>
+              <button
+                type="button"
+                onClick={loadKeywords}
+                disabled={isLoading}
+                className="p-1.5 rounded border border-[#cbd5e1] dark:border-[#334155] bg-white hover:bg-slate-50 dark:bg-[#0f172a] dark:hover:bg-[#334155] text-slate-600 dark:text-slate-300 transition-colors cursor-pointer"
+                title="Refresh Hit Counts"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin text-[#0284c7]' : ''}`} />
+              </button>
+            </>
+          ) : (
+            <span className="text-[11px] text-slate-500 dark:text-slate-400 italic">
+              Staged keywords will be scanned automatically during Case Processing.
+            </span>
+          )}
         </div>
       </div>
 
       {/* Scrollable Keyword Table */}
       <div className="flex-1 overflow-y-auto p-4 bg-[#f8fafc] dark:bg-[#0f172a]">
-        {isLoading && keywords.length === 0 ? (
+        {isLoading && activeList.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-12 text-slate-400 gap-2">
             <Loader2 className="w-6 h-6 animate-spin text-[#0284c7]" />
             <span>Loading keywords...</span>
@@ -358,6 +516,7 @@ export const KeywordManager: React.FC<KeywordManagerProps> = ({
                       <td className="py-2.5 px-3">
                         <span className="text-[10px] font-sans px-2 py-0.5 rounded border border-[#cbd5e1] dark:border-[#334155] bg-white dark:bg-[#0f172a] text-slate-700 dark:text-slate-300 font-semibold">
                           {kw.is_regex ? 'Regex' : 'Exact String'}
+                          {kw.case_sensitive ? ' (Aa)' : ''}
                         </span>
                       </td>
 
@@ -426,7 +585,7 @@ export const KeywordManager: React.FC<KeywordManagerProps> = ({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4"
+      className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 backdrop-blur-xs p-4"
       onClick={onClose}
     >
       <div

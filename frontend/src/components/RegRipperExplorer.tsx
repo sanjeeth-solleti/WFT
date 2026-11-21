@@ -19,6 +19,7 @@ import {
   FolderOpen,
   Hash,
   Download,
+  Network,
 } from 'lucide-react';
 import { apiClient, RegRipperPluginItem, RegRipperPluginDetail } from '../api/client';
 import { useResizable, ResizeHandle } from './ResizeHandle';
@@ -29,6 +30,15 @@ interface RegRipperExplorerProps {
   onInspectEntity?: (entityValue: string) => void;
   selectedPluginName?: string | null;
   onSelectPlugin?: (pluginName: string | null) => void;
+  globalSearch?: string;
+  dateRange?: {
+    preset?: string;
+    startUtc?: string;
+    endUtc?: string;
+  };
+  externalKeywords?: string[];
+  tags?: string[];
+  bookmarkedOnly?: boolean;
 }
 
 // Regex to detect linkable entities inside report text
@@ -51,6 +61,11 @@ export const RegRipperExplorer: React.FC<RegRipperExplorerProps> = ({
   onInspectEntity,
   selectedPluginName,
   onSelectPlugin,
+  globalSearch = '',
+  dateRange,
+  externalKeywords = [],
+  tags = [],
+  bookmarkedOnly = false,
 }) => {
   const [plugins, setPlugins] = useState<RegRipperPluginItem[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(true);
@@ -62,12 +77,14 @@ export const RegRipperExplorer: React.FC<RegRipperExplorerProps> = ({
   const [isLoadingDetail, setIsLoadingDetail] = useState<boolean>(false);
 
   // Filter state
-  const [searchQuery, setSearchQuery] = useState<string>('');
+  const [searchQuery, setSearchQuery] = useState<string>(globalSearch);
+  const [debouncedQuery, setDebouncedQuery] = useState<string>(globalSearch);
   const [hiveFilter, setHiveFilter] = useState<string>('ALL');
   const [categoryFilter, setCategoryFilter] = useState<string>('ALL');
 
   // Search within report text
   const [reportSearch, setReportSearch] = useState<string>('');
+  const [debouncedReportSearch, setDebouncedReportSearch] = useState<string>('');
   const [isCopied, setIsCopied] = useState<boolean>(false);
   const [isReRunning, setIsReRunning] = useState<boolean>(false);
 
@@ -90,13 +107,38 @@ export const RegRipperExplorer: React.FC<RegRipperExplorerProps> = ({
     minCenterWidth: 320,
   });
 
+  // Sync globalSearch & debounce inputs (300ms)
+  useEffect(() => {
+    setSearchQuery(globalSearch || '');
+    setDebouncedQuery(globalSearch || '');
+  }, [globalSearch]);
+
+  useEffect(() => {
+    const t = window.setTimeout(() => setDebouncedQuery(searchQuery), 300);
+    return () => window.clearTimeout(t);
+  }, [searchQuery]);
+
+  useEffect(() => {
+    const t = window.setTimeout(() => setDebouncedReportSearch(reportSearch), 300);
+    return () => window.clearTimeout(t);
+  }, [reportSearch]);
+
+  const keywordsKey = useMemo(() => JSON.stringify(externalKeywords || []), [externalKeywords]);
+  const tagsKey = useMemo(() => JSON.stringify(tags || []), [tags]);
+
   // Fetch all plugins
   const loadPlugins = useCallback(async (preferredPluginName?: string | null) => {
     if (!caseId) return;
     setIsLoading(true);
     setError(null);
     try {
-      const res = await apiClient.getRegRipperPlugins(caseId);
+      const res = await apiClient.getRegRipperPlugins(caseId, {
+        keywords: externalKeywords.length > 0 ? externalKeywords : undefined,
+        start_time: dateRange?.startUtc || undefined,
+        end_time: dateRange?.endUtc || undefined,
+        tags: tags.length > 0 ? tags : undefined,
+        bookmarked_only: bookmarkedOnly || undefined,
+      });
       const list = res.plugins || [];
       setPlugins(list);
 
@@ -118,7 +160,7 @@ export const RegRipperExplorer: React.FC<RegRipperExplorerProps> = ({
     } finally {
       setIsLoading(false);
     }
-  }, [caseId]);
+  }, [caseId, keywordsKey, tagsKey, bookmarkedOnly, dateRange?.startUtc, dateRange?.endUtc]);
 
   useEffect(() => {
     loadPlugins(selectedPluginName);
@@ -173,31 +215,54 @@ export const RegRipperExplorer: React.FC<RegRipperExplorerProps> = ({
 
   // Filtered plugins list
   const filteredPlugins = useMemo(() => {
+    const loweredKeywords = (externalKeywords || []).map((k) => k.toLowerCase()).filter(Boolean);
     return plugins.filter((p) => {
       // Hive filter
       if (hiveFilter !== 'ALL') {
-        const h = p.hive_type.toUpperCase();
+        const h = (p.hive_type || '').toUpperCase();
         if (!h.includes(hiveFilter)) return false;
       }
       // Category filter
       if (categoryFilter !== 'ALL') {
-        if (!p.category.toLowerCase().includes(categoryFilter.toLowerCase())) return false;
+        if (!(p.category || '').toLowerCase().includes(categoryFilter.toLowerCase())) return false;
       }
+      const hay = [
+        p.plugin_name,
+        p.description,
+        p.category,
+        p.mitre_attack,
+        p.hive_name,
+        p.summary_line,
+      ]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase();
+
       // Search query
-      if (searchQuery.trim()) {
-        const q = searchQuery.toLowerCase();
-        return (
-          p.plugin_name.toLowerCase().includes(q) ||
-          p.description.toLowerCase().includes(q) ||
-          p.category.toLowerCase().includes(q) ||
-          p.mitre_attack.toLowerCase().includes(q) ||
-          p.hive_name.toLowerCase().includes(q) ||
-          p.summary_line.toLowerCase().includes(q)
-        );
+      if (debouncedQuery.trim()) {
+        const q = debouncedQuery.toLowerCase();
+        if (!hay.includes(q)) return false;
+      }
+      // Global external keywords (OR)
+      if (loweredKeywords.length > 0) {
+        if (!loweredKeywords.some((kw) => hay.includes(kw))) return false;
       }
       return true;
     });
-  }, [plugins, hiveFilter, categoryFilter, searchQuery]);
+  }, [plugins, hiveFilter, categoryFilter, debouncedQuery, externalKeywords]);
+
+  // Detected linkable entities inside active plugin report for quick graph pivot chips
+  const detectedEntities = useMemo(() => {
+    if (!pluginDetail?.report_text) return [];
+    const found = new Set<string>();
+    ENTITY_REGEX.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = ENTITY_REGEX.exec(pluginDetail.report_text)) !== null) {
+      found.add(m[0]);
+      if (found.size >= 16) break;
+    }
+    return Array.from(found);
+  }, [pluginDetail?.report_text]);
 
   // Extract distinct hive types and categories for filter chips
   const distinctHives = useMemo(() => {
@@ -227,8 +292,8 @@ export const RegRipperExplorer: React.FC<RegRipperExplorerProps> = ({
   // Render report line with clickable entity highlight
   const renderReportLine = (line: string, lineIndex: number) => {
     // If user is searching inside report, highlight matches
-    if (reportSearch.trim()) {
-      const q = reportSearch.trim();
+    if (debouncedReportSearch.trim()) {
+      const q = debouncedReportSearch.trim();
       const parts = line.split(new RegExp(`(${q.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&')})`, 'gi'));
       return (
         <span key={lineIndex}>
@@ -562,6 +627,27 @@ export const RegRipperExplorer: React.FC<RegRipperExplorerProps> = ({
                   </button>
                 </div>
               </div>
+
+              {detectedEntities.length > 0 && (
+                <div className="pt-2 border-t border-[#e2e8f0] dark:border-[#334155] flex items-center gap-1.5 flex-wrap">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 mr-1">
+                    Extracted Entities:
+                  </span>
+                  {detectedEntities.map((ent) => (
+                    <button
+                      key={ent}
+                      type="button"
+                      data-testid={`regripper-entity-chip-${ent}`}
+                      onClick={() => onInspectEntity?.(ent)}
+                      className="px-2 py-0.5 rounded bg-white hover:bg-sky-50 dark:bg-[#0f172a] dark:hover:bg-[#0c4a6e] border border-[#cbd5e1] dark:border-[#334155] text-[11px] font-mono text-[#0284c7] dark:text-[#38bdf8] inline-flex items-center gap-1 cursor-pointer transition-colors"
+                      title={`Inspect "${ent}" in Connections Graph`}
+                    >
+                      <Network className="w-3 h-3 shrink-0" />
+                      <span className="truncate max-w-[220px]">{ent}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
 
             {/* Main Report Monospace Card with Line Numbers */}
@@ -627,6 +713,7 @@ export const RegRipperExplorer: React.FC<RegRipperExplorerProps> = ({
           row={contextMenu.row}
           tableName="raw_regripper"
           cellValue={contextMenu.cellValue}
+          onInspectEntity={onInspectEntity}
         />
       )}
     </div>

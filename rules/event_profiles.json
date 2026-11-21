@@ -7,7 +7,7 @@
     "event_ids": [4624, 4625, 4634, 4647, 4648, 4672],
     "channels": ["Security"],
     "keywords": ["Logon", "Special Logon", "Explicit Credentials"],
-    "sql": "EventId IN (4624, 4625, 4634, 4647, 4648, 4672)"
+    "sql": "Channel = 'Security' AND TRY_CAST(EventId AS BIGINT) IN (4624, 4625, 4634, 4647, 4648, 4672)"
   },
   {
     "id": "brute_force_spray",
@@ -17,7 +17,7 @@
     "event_ids": [4625, 4740, 4771, 4776],
     "channels": ["Security"],
     "keywords": ["Failed", "Lockout", "0xC000006A", "0xC0000234", "0x18"],
-    "sql": "EventId IN (4625, 4740, 4771) OR (EventId = 4776 AND COALESCE(PayloadData1, '') NOT ILIKE '%0x0%')"
+    "sql": "Channel = 'Security' AND (TRY_CAST(EventId AS BIGINT) IN (4625, 4740, 4771) OR (TRY_CAST(EventId AS BIGINT) = 4776 AND concat_ws(' ', *COLUMNS(lambda c: c ILIKE 'Payload%' OR c ILIKE 'MapDescription' OR c ILIKE 'ExecutableInfo' OR c ILIKE 'Channel')) ILIKE '%0xC000%'))"
   },
   {
     "id": "kerberos_pth_attacks",
@@ -27,14 +27,14 @@
     "event_ids": [4768, 4769, 4770, 4771, 4624],
     "channels": ["Security"],
     "keywords": ["0x17", "RC4", "NtLmSsp", "LogonType 9", "NewCredentials"],
-    "sql": "EventId IN (4768, 4769, 4770, 4771) OR (EventId = 4624 AND (COALESCE(PayloadData1, '') ILIKE '%NtLmSsp%' OR COALESCE(PayloadData1, '') ILIKE '%LogonType%9%'))"
+    "sql": "Channel = 'Security' AND (TRY_CAST(EventId AS BIGINT) IN (4768, 4769, 4770, 4771) OR (TRY_CAST(EventId AS BIGINT) = 4624 AND regexp_matches(concat_ws(' ', *COLUMNS(lambda c: c ILIKE 'Payload%' OR c ILIKE 'MapDescription' OR c ILIKE 'ExecutableInfo' OR c ILIKE 'Channel')), 'NtLmSsp|Logon ?Type[^0-9]*9([^0-9]|$)', 'i')))"
   },
   {
     "id": "rdp_remote_access",
     "name": "RDP & Remote Desktop Sessions",
     "description": "RDP auth (1149), LocalSessionManager session logon/reconnect/disconnect (21-25), RDP client (1024, 1102), and Type 10 logons (4624, 4778, 4779)",
     "badge_color": "indigo",
-    "event_ids": [1149, 21, 22, 23, 24, 25, 39, 40, 4778, 4779, 1024],
+    "event_ids": [1149, 21, 22, 23, 24, 25, 39, 40, 1024, 1102, 4624, 4778, 4779],
     "channels": [
       "Microsoft-Windows-TerminalServices-RemoteConnectionManager/Operational",
       "Microsoft-Windows-TerminalServices-LocalSessionManager/Operational",
@@ -42,7 +42,7 @@
       "Security"
     ],
     "keywords": ["TerminalServices", "RemoteConnectionManager", "LogonType 10", "RDP"],
-    "sql": "EventId IN (1149, 21, 22, 23, 24, 25, 39, 40, 4778, 4779, 1024) OR Channel ILIKE '%TerminalServices%' OR (EventId = 4624 AND COALESCE(PayloadData1, '') ILIKE '%10%')"
+    "sql": "(Channel ILIKE '%TerminalServices%' AND TRY_CAST(EventId AS BIGINT) IN (21, 22, 23, 24, 25, 39, 40, 1024, 1102, 1149)) OR (Channel = 'Security' AND (TRY_CAST(EventId AS BIGINT) IN (4778, 4779) OR (TRY_CAST(EventId AS BIGINT) = 4624 AND regexp_matches(concat_ws(' ', *COLUMNS(lambda c: c ILIKE 'Payload%' OR c ILIKE 'MapDescription' OR c ILIKE 'ExecutableInfo' OR c ILIKE 'Channel')), 'Logon ?Type[^0-9]*10([^0-9]|$)', 'i'))))"
   },
   {
     "id": "smb_winrm_lateral",
@@ -57,7 +57,7 @@
       "Microsoft-Windows-WinRM/Operational"
     ],
     "keywords": ["ADMIN$", "C$", "IPC$", "WinRM", "SMB"],
-    "sql": "EventId IN (5140, 5145, 5142, 30803) OR Channel ILIKE '%WinRM%' OR Channel ILIKE '%SMB%'"
+    "sql": "(Channel = 'Security' AND TRY_CAST(EventId AS BIGINT) IN (5140, 5145, 5142, 4648)) OR (Channel ILIKE '%WinRM%' AND TRY_CAST(EventId AS BIGINT) IN (6, 91, 168)) OR (Channel ILIKE '%SMB%' AND TRY_CAST(EventId AS BIGINT) IN (30803))"
   },
   {
     "id": "powershell_script",
@@ -70,7 +70,7 @@
       "Windows PowerShell"
     ],
     "keywords": ["ScriptBlock", "HostApplication", "EncodedCommand", "DownloadString"],
-    "sql": "EventId IN (4103, 4104, 4100, 400, 403, 600, 800) OR Channel ILIKE '%PowerShell%'"
+    "sql": "Channel ILIKE '%PowerShell%' AND TRY_CAST(EventId AS BIGINT) IN (4103, 4104, 4100, 400, 403, 600, 800)"
   },
   {
     "id": "process_execution_sysmon",
@@ -83,7 +83,7 @@
       "Microsoft-Windows-Sysmon/Operational"
     ],
     "keywords": ["Process Create", "CommandLine", "CreateRemoteThread", "DnsQuery"],
-    "sql": "EventId IN (4688, 4689) OR Channel ILIKE '%Sysmon%'"
+    "sql": "(Channel = 'Security' AND TRY_CAST(EventId AS BIGINT) IN (4688, 4689)) OR (Channel ILIKE '%Sysmon%' AND TRY_CAST(EventId AS BIGINT) IN (1, 3, 7, 8, 10, 11, 12, 13, 22))"
   },
   {
     "id": "persistence_services_tasks",
@@ -97,7 +97,7 @@
       "Microsoft-Windows-TaskScheduler/Operational"
     ],
     "keywords": ["Service Installed", "TaskRegistered", "ActionStarted", "PSEXESVC"],
-    "sql": "EventId IN (7045, 7036, 7040, 7034, 4697, 4698, 4699, 4700, 4701, 4702, 106, 140, 141, 200, 201)"
+    "sql": "(Channel = 'System' AND TRY_CAST(EventId AS BIGINT) IN (7045, 7036, 7040, 7034)) OR (Channel = 'Security' AND TRY_CAST(EventId AS BIGINT) IN (4697, 4698, 4699, 4700, 4701, 4702)) OR (Channel ILIKE '%TaskScheduler%' AND TRY_CAST(EventId AS BIGINT) IN (106, 140, 141, 200, 201))"
   },
   {
     "id": "wmi_persistence",
@@ -109,7 +109,7 @@
       "Microsoft-Windows-WMI-Activity/Operational"
     ],
     "keywords": ["FilterToConsumerBinding", "CommandLineEventConsumer", "ActiveScriptEventConsumer", "WMI"],
-    "sql": "EventId IN (19, 20, 21, 5857, 5858, 5859, 5860, 5861) OR Channel ILIKE '%WMI-Activity%'"
+    "sql": "(Channel ILIKE '%WMI-Activity%' AND TRY_CAST(EventId AS BIGINT) IN (5857, 5858, 5859, 5860, 5861)) OR (Channel ILIKE '%Sysmon%' AND TRY_CAST(EventId AS BIGINT) IN (19, 20, 21))"
   },
   {
     "id": "bits_staging_downloads",
@@ -121,7 +121,7 @@
       "Microsoft-Windows-Bits-Client/Operational"
     ],
     "keywords": ["Bits-Client", "transfer", "http"],
-    "sql": "Channel ILIKE '%Bits-Client%' OR (EventId IN (3, 4, 59, 60, 61, 16403) AND Provider ILIKE '%Bits%')"
+    "sql": "(Channel ILIKE '%Bits-Client%' OR COALESCE(Provider, '') ILIKE '%Bits%') AND TRY_CAST(EventId AS BIGINT) IN (3, 4, 59, 60, 61, 16403)"
   },
   {
     "id": "account_management",
@@ -131,7 +131,7 @@
     "event_ids": [4720, 4722, 4723, 4724, 4725, 4726, 4728, 4732, 4733, 4738, 4756],
     "channels": ["Security"],
     "keywords": ["User Account", "Administrators", "Group Membership", "Password"],
-    "sql": "EventId IN (4720, 4722, 4723, 4724, 4725, 4726, 4728, 4732, 4733, 4738, 4756)"
+    "sql": "Channel = 'Security' AND TRY_CAST(EventId AS BIGINT) IN (4720, 4722, 4723, 4724, 4725, 4726, 4728, 4732, 4733, 4738, 4756)"
   },
   {
     "id": "antivirus_defender",
@@ -143,7 +143,7 @@
       "Microsoft-Windows-Windows Defender/Operational"
     ],
     "keywords": ["Defender", "Malware", "Exclusion", "DisableRealtimeMonitoring"],
-    "sql": "EventId IN (1006, 1007, 1008, 1116, 1117, 1118, 1119, 2000, 5001, 5004, 5007, 5013) OR Channel ILIKE '%Defender%'"
+    "sql": "(Channel ILIKE '%Defender%' OR COALESCE(Provider, '') ILIKE '%Defender%') AND TRY_CAST(EventId AS BIGINT) IN (1006, 1007, 1008, 1116, 1117, 1118, 1119, 2000, 5001, 5004, 5007, 5013)"
   },
   {
     "id": "log_clearing_antiforensics",
@@ -153,17 +153,17 @@
     "event_ids": [1102, 104, 4719, 4616, 1100],
     "channels": ["Security", "System"],
     "keywords": ["Log Cleared", "Audit Policy", "System Time"],
-    "sql": "EventId IN (1102, 104, 4719, 4616, 1100)"
+    "sql": "(Channel = 'Security' AND TRY_CAST(EventId AS BIGINT) IN (1102, 4719, 4616, 1100)) OR (Channel = 'System' AND TRY_CAST(EventId AS BIGINT) = 104)"
   },
   {
     "id": "ransomware_vss_backup",
     "name": "Shadow Copy (VSS) & Ransomware Indicators",
     "description": "Volume Shadow Copy service stop/errors (7036, 8222) and VSS backup deletion events",
     "badge_color": "red",
-    "event_ids": [8222, 8193, 8194, 7036, 524],
+    "event_ids": [8222, 8193, 8194, 7036, 524, 753, 4688, 1, 4104],
     "channels": ["Application", "System", "Microsoft-Windows-Backup"],
     "keywords": ["VSS", "Shadow Copy", "vssadmin"],
-    "sql": "EventId IN (8222, 8193, 8194, 524) OR COALESCE(Provider, '') ILIKE '%VSS%' OR COALESCE(PayloadData1, '') ILIKE '%Shadow Copy%'"
+    "sql": "(Channel IN ('Application', 'System') AND TRY_CAST(EventId AS BIGINT) IN (8222, 8193, 8194)) OR (Channel ILIKE '%Backup%' AND TRY_CAST(EventId AS BIGINT) IN (524, 753)) OR (((Channel = 'System' AND TRY_CAST(EventId AS BIGINT) = 7036) OR (Channel = 'Security' AND TRY_CAST(EventId AS BIGINT) = 4688) OR (Channel ILIKE '%Sysmon%' AND TRY_CAST(EventId AS BIGINT) = 1) OR (Channel ILIKE '%PowerShell%' AND TRY_CAST(EventId AS BIGINT) IN (4103, 4104, 800))) AND regexp_matches(concat_ws(' ', *COLUMNS(lambda c: c ILIKE 'Payload%' OR c ILIKE 'MapDescription' OR c ILIKE 'ExecutableInfo' OR c ILIKE 'Channel')), CASE WHEN TRY_CAST(EventId AS BIGINT) = 7036 THEN '(Shadow.*Cop|VSS).*stopped|stopped.*(Shadow.*Cop|VSS)' ELSE 'vssadmin|shadowstorage|shadow.*cop.*delet|wbadmin.*delet|bcdedit.*recoveryenabled' END, 'i'))"
   },
   {
     "id": "firewall_network_tamper",
@@ -176,14 +176,14 @@
       "Security"
     ],
     "keywords": ["Firewall", "Rule Added", "Inbound"],
-    "sql": "Channel ILIKE '%Firewall%' OR EventId IN (4946, 4947, 4948)"
+    "sql": "(Channel ILIKE '%Firewall%' AND TRY_CAST(EventId AS BIGINT) IN (2003, 2004, 2005, 2006, 2033)) OR (Channel = 'Security' AND TRY_CAST(EventId AS BIGINT) IN (4946, 4947, 4948))"
   },
   {
     "id": "usb_external_storage",
     "name": "USB & External Storage Mounts",
     "description": "Partition table/volume mount events (1006), PnP device installation (400, 410), and DriverFrameworks USB insertion (2003-2102)",
     "badge_color": "cyan",
-    "event_ids": [1006, 400, 410, 2003, 2004, 2005, 2010, 2100, 2102, 6416],
+    "event_ids": [1006, 400, 410, 420, 2003, 2004, 2005, 2010, 2100, 2102, 6416],
     "channels": [
       "Microsoft-Windows-Partition/Diagnostic",
       "Microsoft-Windows-Kernel-PnP/Configuration",
@@ -191,7 +191,7 @@
       "Security"
     ],
     "keywords": ["USBSTOR", "Partition", "DriverFrameworks", "Removable"],
-    "sql": "EventId IN (1006, 2003, 2004, 2005, 2010, 2100, 2102, 6416) OR Channel ILIKE '%Partition%' OR Channel ILIKE '%DriverFrameworks%' OR Channel ILIKE '%Kernel-PnP%'"
+    "sql": "(Channel = 'Security' AND TRY_CAST(EventId AS BIGINT) = 6416) OR (Channel ILIKE '%Partition%' AND TRY_CAST(EventId AS BIGINT) = 1006) OR (Channel ILIKE '%DriverFrameworks%' AND TRY_CAST(EventId AS BIGINT) IN (2003, 2004, 2005, 2010, 2100, 2102)) OR (Channel ILIKE '%Kernel-PnP%' AND TRY_CAST(EventId AS BIGINT) IN (400, 410, 420))"
   },
   {
     "id": "app_crashes_exploits",
@@ -201,7 +201,7 @@
     "event_ids": [1000, 1001, 1033, 1034, 1040, 11707, 11724],
     "channels": ["Application"],
     "keywords": ["Application Error", "MsiInstaller", "Faulting application"],
-    "sql": "EventId IN (1000, 1001, 1033, 1034, 1040, 11707, 11724) AND Channel = 'Application'"
+    "sql": "Channel = 'Application' AND TRY_CAST(EventId AS BIGINT) IN (1000, 1001, 1033, 1034, 1040, 11707, 11724)"
   },
   {
     "id": "system_boot_shutdown",
@@ -211,6 +211,6 @@
     "event_ids": [12, 13, 41, 1074, 6005, 6006, 6008, 6009],
     "channels": ["System"],
     "keywords": ["Kernel-General", "Kernel-Power", "EventLog", "USER32"],
-    "sql": "EventId IN (12, 13, 41, 1074, 6005, 6006, 6008, 6009) AND Channel = 'System'"
+    "sql": "Channel = 'System' AND TRY_CAST(EventId AS BIGINT) IN (12, 13, 41, 1074, 6005, 6006, 6008, 6009)"
   }
 ]

@@ -19,23 +19,25 @@ rule BYOVD_Vulnerable_Driver_EDR_Killer {
         mitre_attack = "T1068"
         category = "Defense Evasion"
     strings:
-        $d1 = "RTCore64.sys" ascii wide nocase
-        $d2 = "\\\\.\\RTCore64" ascii wide nocase
-        $d3 = "\\\\.\\GIO" ascii wide
-        $d4 = "gdrv.sys" ascii wide nocase
-        $d5 = "\\\\.\\ZemanaAntiMalware" ascii wide nocase
-        $d6 = "\\\\.\\mhyprot2" ascii wide nocase
-        $d7 = "\\\\.\\DBUtil_2_3" ascii wide nocase
-        $d8 = "\\\\.\\aswSP_Avar" ascii wide nocase
-        $k1 = "AuKill" ascii wide nocase
-        $k2 = "Backstab" ascii wide nocase
+        $ms_corp = "Microsoft Corporation" wide
+        $ms_os1 = { 4D 00 69 00 63 00 72 00 6F 00 73 00 6F 00 66 00 74 00 AE 00 20 00 57 00 69 00 6E 00 64 00 6F 00 77 00 73 00 AE 00 20 00 4F 00 70 00 65 00 72 00 61 00 74 00 69 00 6E 00 67 00 20 00 53 00 79 00 73 00 74 00 65 00 6D 00 }
+        $ms_os2 = "Microsoft Windows Operating System" wide
+        $dev1 = "\\\\.\\RTCore64" ascii wide nocase
+        $dev2 = "\\\\.\\GIO" ascii wide
+        $dev3 = "\\\\.\\ZemanaAntiMalware" ascii wide nocase
+        $dev4 = "\\\\.\\mhyprot2" ascii wide nocase
+        $dev5 = "\\\\.\\DBUtil_2_3" ascii wide nocase
+        $dev6 = "\\\\.\\aswSP_Avar" ascii wide nocase
+        $ioctl = "DeviceIoControl" ascii wide
+        $k1 = "AuKill" ascii wide
+        $k2 = "Backstab" ascii wide
         $k3 = "ZwTerminateProcess" ascii wide
         $k4 = "MmMapIoSpace" ascii wide
     condition:
-        uint16(0) == 0x5A4D and filesize < 15MB and (
-            any of ($d*) or
-            ($k1 or ($k2 and$k3)) or
-            ($k3 and $k4 and any of ($d*))
+        uint16(0) == 0x5A4D and uint32(0x3C) < filesize and uint32(uint32(0x3C)) == 0x00004550 and
+        filesize < 15MB and not ($ms_corp and ($ms_os1 or $ms_os2)) and (
+            (any of ($dev*) and ($ioctl or $k3 or $k4)) or
+            (($k1 or $k2) and $ioctl and $k3)
         )
 }
 
@@ -47,6 +49,9 @@ rule Evasion_SysWhispers_Direct_Syscalls_And_Unhooking {
         mitre_attack = "T1055"
         category = "Defense Evasion"
     strings:
+        $ms_corp = "Microsoft Corporation" wide
+        $ms_os1 = { 4D 00 69 00 63 00 72 00 6F 00 73 00 6F 00 66 00 74 00 AE 00 20 00 57 00 69 00 6E 00 64 00 6F 00 77 00 73 00 AE 00 20 00 4F 00 70 00 65 00 72 00 61 00 74 00 69 00 6E 00 67 00 20 00 53 00 79 00 73 00 74 00 65 00 6D 00 }
+        $ms_os2 = "Microsoft Windows Operating System" wide
         $sw1 = "SW2_GetSyscallNumber" ascii wide
         $sw2 = "SW3_GetSyscallNumber" ascii wide
         $sw3 = "SW2_PopulateSyscallList" ascii wide
@@ -59,9 +64,10 @@ rule Evasion_SysWhispers_Direct_Syscalls_And_Unhooking {
         $api3 = "NtCreateThreadEx" ascii wide
         $api4 = "NtProtectVirtualMemory" ascii wide
     condition:
-        uint16(0) == 0x5A4D and filesize < 20MB and (
-            any of ($sw*) or
-            ($unhook1 and$unhook2 and $unhook3 and 2 of ($api*))
+        uint16(0) == 0x5A4D and uint32(0x3C) < filesize and uint32(uint32(0x3C)) == 0x00004550 and
+        filesize < 20MB and not ($ms_corp and ($ms_os1 or $ms_os2)) and (
+            2 of ($sw*) or
+            ($unhook1 and $unhook2 and $unhook3 and 3 of ($api*))
         )
 }
 
@@ -73,6 +79,11 @@ rule Loader_Process_Hollowing_And_APC_Injection {
         mitre_attack = "T1055.012"
         category = "Defense Evasion"
     strings:
+        $ms_corp = "Microsoft Corporation" wide
+        $ms_os1 = { 4D 00 69 00 63 00 72 00 6F 00 73 00 6F 00 66 00 74 00 AE 00 20 00 57 00 69 00 6E 00 64 00 6F 00 77 00 73 00 AE 00 20 00 4F 00 70 00 65 00 72 00 61 00 74 00 69 00 6E 00 67 00 20 00 53 00 79 00 73 00 74 00 65 00 6D 00 }
+        $ms_os2 = "Microsoft Windows Operating System" wide
+        $dotnet = "_CorExeMain" ascii
+        $dotnet_dll = "_CorDllMain" ascii
         $h1 = "CreateProcessA" ascii wide
         $h2 = "CreateProcessW" ascii wide
         $h3 = "NtUnmapViewOfSection" ascii wide
@@ -82,12 +93,12 @@ rule Loader_Process_Hollowing_And_APC_Injection {
         $h7 = "SetThreadContext" ascii wide
         $h8 = "Wow64SetThreadContext" ascii wide
         $h9 = "ResumeThread" ascii wide
-        $apc1 = "QueueUserAPC" ascii wide
         $apc2 = "NtQueueApcThread" ascii wide
     condition:
-        uint16(0) == 0x5A4D and filesize < 10MB and (
-            (($h1 or $h2) and ($h3 or $h4) and$h5 and $h6 and ($h7 or $h8) and$h9) or
-            (($h1 or $h2) and$h5 and $h6 and ($apc1 or $apc2) and$h9)
+        uint16(0) == 0x5A4D and uint32(0x3C) < filesize and uint32(uint32(0x3C)) == 0x00004550 and
+        filesize < 10MB and not ($ms_corp and ($ms_os1 or $ms_os2)) and not $dotnet and not $dotnet_dll and (
+            (($h1 or $h2) and ($h3 or $h4) and $h5 and $h6 and ($h7 or $h8) and $h9) or
+            (($h1 or $h2) and $h5 and $h6 and $apc2 and $h9)
         )
 }
 
@@ -106,15 +117,17 @@ rule InitialAccess_Weaponized_LNK_Shortcut {
         $e5 = "regsvr32" ascii wide nocase
         $e6 = "wscript" ascii wide nocase
         $e7 = "cscript" ascii wide nocase
-        $p1 = "-enc" ascii wide nocase
-        $p2 = "-w hidden" ascii wide nocase
-        $p3 = "-windowstyle hidden" ascii wide nocase
-        $p4 = "http://" ascii wide nocase
-        $p5 = "https://" ascii wide nocase
-        $p6 = "DownloadString" ascii wide nocase
-        $p7 = "FromBase64String" ascii wide nocase
-        $p8 = "javascript:" ascii wide nocase
-        $p9 = "vbscript:" ascii wide nocase
+        $p1 = " -enc " ascii wide nocase
+        $p2 = "-encodedcommand" ascii wide nocase
+        $p3 = "-w hidden" ascii wide nocase
+        $p4 = "-windowstyle hidden" ascii wide nocase
+        $p5 = "DownloadString(" ascii wide nocase
+        $p6 = "FromBase64String(" ascii wide nocase
+        $p7 = "Invoke-Expression" ascii wide nocase
+        $p8 = "IEX(" ascii wide nocase
+        $p9 = "javascript:" ascii wide nocase
+        $p10 = "vbscript:" ascii wide nocase
+        $p11 = "/i:http" ascii wide nocase
     condition:
         uint32(0) == 0x0000004C and uint32(4) == 0x00021401 and filesize < 500KB and
         any of ($e*) and any of ($p*)
@@ -154,23 +167,26 @@ rule Exfiltration_Rclone_And_Mega_Config_Or_Binary {
         category = "Exfiltration"
     strings:
         $r1 = "github.com/rclone/rclone" ascii wide
+        $r_flag1 = "--ignore-existing" ascii wide
+        $r_flag2 = "backend/mega" ascii wide
         $r2 = "rclone copy " ascii wide nocase
         $r3 = "rclone sync " ascii wide nocase
-        $r4 = "--transfers" ascii wide nocase
-        $r5 = "--TPSLimit" ascii wide nocase
         $c1 = "type = mega" ascii wide nocase
-        $c2 = "type = s3" ascii wide nocase
         $c3 = "type = pcloud" ascii wide nocase
-        $c4 = "access_key_id =" ascii wide nocase
-        $c5 = "secret_access_key =" ascii wide nocase
+        $c_user = "\nuser =" ascii wide nocase
+        $c_pass = "\npass =" ascii wide nocase
         $m1 = "mega-put " ascii wide nocase
         $m2 = "mega-login " ascii wide nocase
+        $arch = ".7z" ascii wide nocase
     condition:
-        filesize < 65MB and (
-            $r1 or
-            (($r2 or$r3) and ($r4 or$r5)) or
-            ($c1 or ($c2 and$c4 and $c5) or$c3) or
-            ($m1 and$m2)
+        (
+            uint16(0) == 0x5A4D and uint32(0x3C) < filesize and uint32(uint32(0x3C)) == 0x00004550 and
+            filesize < 65MB and $r1 and $r_flag1 and $r_flag2
+        ) or (
+            uint16(0) != 0x5A4D and filesize < 1MB and (
+                (($c1 or $c3) and $c_user and $c_pass) or
+                ($m1 and $m2 and ($r2 or $r3 or $arch))
+            )
         )
 }
 
@@ -185,6 +201,14 @@ rule Impact_XMRig_Cryptominer {
         $x1 = "XMRig" ascii wide
         $x2 = "stratum+tcp://" ascii wide nocase
         $x3 = "stratum+ssl://" ascii wide nocase
+        $rx = "rx/0" ascii wide
+        $cfg_pools = "\"pools\"" ascii wide
+        $cfg_donate = "\"donate-level\"" ascii wide
     condition:
-        any of them
+        (
+            uint16(0) == 0x5A4D and uint32(0x3C) < filesize and uint32(uint32(0x3C)) == 0x00004550 and
+            filesize < 30MB and $x1 and ($x2 or $x3) and ($rx or $cfg_donate)
+        ) or (
+            uint16(0) != 0x5A4D and filesize < 1MB and ($x2 or $x3) and $cfg_pools and $cfg_donate
+        )
 }

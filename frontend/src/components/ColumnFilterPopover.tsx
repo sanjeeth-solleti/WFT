@@ -125,9 +125,22 @@ export const ColumnFilterPopover: React.FC<ColumnFilterPopoverProps> = ({
     onClose();
   };
 
+  // Close on Escape key
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        onClose();
+      }
+    };
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [onClose]);
+
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-xs p-4 select-none"
+      className="fixed inset-0 z-[70] flex items-center justify-center bg-black/40 backdrop-blur-xs p-4 select-none"
       onClick={onClose}
     >
       <div
@@ -136,8 +149,8 @@ export const ColumnFilterPopover: React.FC<ColumnFilterPopoverProps> = ({
           position
             ? {
                 position: 'absolute',
-                top: Math.min(position.top, window.innerHeight - 380),
-                left: Math.min(position.left, window.innerWidth - 340),
+                top: Math.max(8, Math.min(position.top, window.innerHeight - 380)),
+                left: Math.max(8, Math.min(position.left, window.innerWidth - 340)),
                 margin: 0,
               }
             : undefined
