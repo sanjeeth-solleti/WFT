@@ -372,6 +372,8 @@ export interface ProcessingLog {
 
 export interface CaseStatusResponse {
   case_id: string;
+  case_name?: string;
+  case_metadata?: DashboardCaseMetadata;
   status: 'IDLE' | 'RUNNING' | 'COMPLETED' | 'SUCCESS' | 'FAILED' | 'ERROR' | 'CANCELLED' | 'UNKNOWN';
   progress: number;
   current_step: string;

@@ -401,7 +401,7 @@ export const RegRipperExplorer: React.FC<RegRipperExplorerProps> = ({
               className={`px-2 py-0.5 rounded font-medium border cursor-pointer shrink-0 transition-colors ${
                 hiveFilter === 'ALL'
                   ? 'bg-[#0284c7] text-white border-[#0284c7]'
-                  : 'bg-white dark:bg-[#0f172a] text-slate-600 dark:text-slate-300 border-[#cbd5e1] dark:border-[#334155] hover:bg-slate-100'
+                  : 'bg-white dark:bg-[#0f172a] text-slate-600 dark:text-slate-300 border-[#cbd5e1] dark:border-[#334155] hover:bg-slate-100 dark:hover:bg-[#334155]'
               }`}
             >
               All Hives
@@ -413,7 +413,7 @@ export const RegRipperExplorer: React.FC<RegRipperExplorerProps> = ({
                 className={`px-2 py-0.5 rounded font-mono uppercase font-medium border cursor-pointer shrink-0 transition-colors ${
                   hiveFilter === h
                     ? 'bg-[#0284c7] text-white border-[#0284c7]'
-                    : 'bg-white dark:bg-[#0f172a] text-slate-600 dark:text-slate-300 border-[#cbd5e1] dark:border-[#334155] hover:bg-slate-100'
+                    : 'bg-white dark:bg-[#0f172a] text-slate-600 dark:text-slate-300 border-[#cbd5e1] dark:border-[#334155] hover:bg-slate-100 dark:hover:bg-[#334155]'
                 }`}
               >
                 {h}
@@ -429,7 +429,7 @@ export const RegRipperExplorer: React.FC<RegRipperExplorerProps> = ({
                 className={`px-1.5 py-0.5 rounded font-medium border cursor-pointer shrink-0 transition-colors ${
                   categoryFilter === 'ALL'
                     ? 'bg-slate-800 text-white dark:bg-slate-200 dark:text-slate-900 border-transparent font-bold'
-                    : 'bg-white dark:bg-[#0f172a] text-slate-500 border-[#cbd5e1] dark:border-[#334155] hover:bg-slate-100'
+                    : 'bg-white dark:bg-[#0f172a] text-slate-500 dark:text-slate-300 border-[#cbd5e1] dark:border-[#334155] hover:bg-slate-100 dark:hover:bg-[#334155]'
                 }`}
               >
                 All Categories
@@ -441,7 +441,7 @@ export const RegRipperExplorer: React.FC<RegRipperExplorerProps> = ({
                   className={`px-1.5 py-0.5 rounded capitalize font-medium border cursor-pointer shrink-0 transition-colors ${
                     categoryFilter === c
                       ? 'bg-slate-800 text-white dark:bg-slate-200 dark:text-slate-900 border-transparent font-bold'
-                      : 'bg-white dark:bg-[#0f172a] text-slate-500 border-[#cbd5e1] dark:border-[#334155] hover:bg-slate-100'
+                      : 'bg-white dark:bg-[#0f172a] text-slate-500 dark:text-slate-300 border-[#cbd5e1] dark:border-[#334155] hover:bg-slate-100 dark:hover:bg-[#334155]'
                   }`}
                 >
                   {c}

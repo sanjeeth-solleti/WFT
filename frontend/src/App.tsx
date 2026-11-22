@@ -11,7 +11,7 @@ import { SidebarTree, buildSubviewDedupPredicate } from './components/SidebarTre
 import { ArtifactGrid } from './components/ArtifactGrid';
 import { DetailsAndHexPane } from './components/DetailsAndHexPane';
 import { TimelineExplorer } from './components/TimelineExplorer';
-import { ProcessWizard } from './components/ProcessWizard';
+import { ProcessWizard, ProcessWizardPersistedState } from './components/ProcessWizard';
 import { CaseDashboard } from './components/CaseDashboard';
 import { KeywordManager } from './components/KeywordManagerModal';
 import { RegRipperExplorer } from './components/RegRipperExplorer';
@@ -45,6 +45,54 @@ export const App: React.FC = () => {
   const [isToolPathsModalOpen, setIsToolPathsModalOpen] = useState<boolean>(false);
   const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
 
+  const loadInitialProcessingSessions = (): Record<string, ProcessWizardPersistedState> => {
+    try {
+      const raw = sessionStorage.getItem('wft_process_sessions_v1');
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === 'object') return parsed;
+      }
+    } catch {
+      // ignore sessionStorage errors
+    }
+    return {};
+  };
+
+  const [processingSessions, setProcessingSessions] = useState<
+    Record<string, ProcessWizardPersistedState>
+  >(loadInitialProcessingSessions);
+  const [processTabState, setProcessTabState] = useState<ProcessWizardPersistedState | null>(() => {
+    const sessions = loadInitialProcessingSessions();
+    const activeRunning = Object.values(sessions).find(
+      (s) => s && s.activeCaseId && s.statusData?.status === 'RUNNING'
+    );
+    return activeRunning || null;
+  });
+
+  const handlePersistProcessState = useCallback(
+    (state: ProcessWizardPersistedState, commitForCaseId?: string) => {
+      setProcessTabState(state);
+      const targetCid = commitForCaseId || state.activeCaseId;
+      if (targetCid) {
+        setProcessingSessions((prev) => {
+          const next = { ...prev, [targetCid]: state };
+          try {
+            sessionStorage.setItem('wft_process_sessions_v1', JSON.stringify(next));
+          } catch {
+            // ignore storage quota errors
+          }
+          return next;
+        });
+      }
+    },
+    []
+  );
+
+  const isProcessingRunning = Boolean(
+    processTabState?.statusData?.status === 'RUNNING' ||
+      (currentCaseId && processingSessions[currentCaseId]?.statusData?.status === 'RUNNING')
+  );
+
   const [globalFilterState, setGlobalFilterState] = useState<GlobalFilterState>({
     evidenceSource: undefined,
     artifactTable: undefined,
@@ -63,7 +111,9 @@ export const App: React.FC = () => {
     caseId: string;
     row: Record<string, unknown>;
   } | null>(null);
-  const userSelectedCaseRef = useRef<string>('');
+  const userSelectedCaseRef = useRef<string>(
+    processTabState?.statusData?.status === 'RUNNING' ? processTabState.activeCaseId : ''
+  );
   const currentCaseIdRef = useRef<string>('');
   currentCaseIdRef.current = currentCaseId;
   const selectedRow =
@@ -324,7 +374,56 @@ export const App: React.FC = () => {
     }
   };
 
+  useEffect(() => {
+    const runningCaseId =
+      processTabState?.statusData?.status === 'RUNNING' ? processTabState.activeCaseId : null;
+    if (!runningCaseId || activeTab === 'process' || isNewCaseModalOpen) return;
+
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const res = await apiClient.getCaseStatus(runningCaseId);
+        if (cancelled) return;
+        setProcessTabState((prev) =>
+          prev && prev.activeCaseId === runningCaseId ? { ...prev, statusData: res } : prev
+        );
+        setProcessingSessions((prev) => {
+          const existing = prev[runningCaseId];
+          if (!existing) return prev;
+          const next = { ...prev, [runningCaseId]: { ...existing, statusData: res } };
+          try {
+            sessionStorage.setItem('wft_process_sessions_v1', JSON.stringify(next));
+          } catch {
+            // ignore
+          }
+          return next;
+        });
+        if (res.status === 'SUCCESS' || res.status === 'COMPLETED') {
+          loadCases(runningCaseId);
+          loadRegistry(runningCaseId);
+        }
+      } catch {
+        // ignore transient poll errors
+      }
+    };
+    const timer = window.setInterval(poll, 2500);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [
+    processTabState?.statusData?.status,
+    processTabState?.activeCaseId,
+    activeTab,
+    isNewCaseModalOpen,
+    loadCases,
+    loadRegistry,
+  ]);
+
   const handleCaseCreated = (newCaseId: string) => {
+    if (newCaseId) {
+      userSelectedCaseRef.current = newCaseId;
+    }
     loadCases(newCaseId);
   };
 
@@ -502,6 +601,11 @@ export const App: React.FC = () => {
             userSelectedCaseRef.current = cid;
             setCurrentCaseId(cid);
             setSelectedRow(null);
+            if (processingSessions[cid]) {
+              setProcessTabState(processingSessions[cid]);
+            } else if (processTabState?.statusData?.status !== 'RUNNING') {
+              setProcessTabState(null);
+            }
           }}
           onDeleteCase={handleDeleteCase}
           activeTab={activeTab}
@@ -514,6 +618,7 @@ export const App: React.FC = () => {
           onExportHtmlReport={handleTopNavExportHtmlReport}
           onRefresh={handleRefresh}
           isRefreshing={isRefreshing}
+          isProcessingRunning={isProcessingRunning}
           totalArtifacts={totalAllArtifactRows}
           totalTimeline={registryData?.timeline_total || 0}
           totalEvtx={totalEvtxCount}
@@ -687,6 +792,19 @@ export const App: React.FC = () => {
               currentCaseId={currentCaseId}
               onCaseCreated={handleCaseCreated}
               isOpenAsModal={false}
+              persistedState={
+                processTabState &&
+                (processTabState.statusData?.status === 'RUNNING' ||
+                  processTabState.activeCaseId === currentCaseId)
+                  ? processTabState
+                  : currentCaseId
+                  ? processingSessions[currentCaseId] || null
+                  : null
+              }
+              onPersistState={handlePersistProcessState}
+              onProcessingComplete={() => {
+                handleRefresh();
+              }}
               onNavigateToExamine={() => setActiveTab('artifacts')}
             />
           </div>
@@ -798,6 +916,11 @@ export const App: React.FC = () => {
                 handleCaseCreated(newCid);
               }}
               isOpenAsModal={true}
+              persistedState={isProcessingRunning ? processTabState : null}
+              onPersistState={handlePersistProcessState}
+              onProcessingComplete={() => {
+                handleRefresh();
+              }}
               onCloseModal={() => setIsNewCaseModalOpen(false)}
               onNavigateToExamine={() => {
                 setActiveTab('artifacts');

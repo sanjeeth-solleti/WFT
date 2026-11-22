@@ -910,7 +910,7 @@ export const FileSystemView: React.FC<FileSystemViewProps> = ({
             <span className="text-[11px] font-bold tracking-wide text-slate-700 dark:text-slate-200">
               Evidence Tree
             </span>
-            <button onClick={loadRootTree} className="p-0.5 text-slate-400 hover:text-slate-700 cursor-pointer">
+            <button onClick={loadRootTree} className="p-0.5 text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 cursor-pointer">
               <RefreshCw className={`w-3 h-3 ${isTreeLoading ? 'animate-spin text-[#0284c7]' : ''}`} />
             </button>
           </div>
@@ -1133,7 +1133,7 @@ export const FileSystemView: React.FC<FileSystemViewProps> = ({
                   type="button"
                   onClick={handleBookmarkFile}
                   disabled={isBookmarking}
-                  className="px-2 py-0.5 text-[11px] font-semibold rounded bg-white dark:bg-[#1e293b] border border-[#cbd5e1] dark:border-[#334155] hover:bg-slate-100 flex items-center gap-1 cursor-pointer"
+                  className="px-2 py-0.5 text-[11px] font-semibold rounded bg-white dark:bg-[#1e293b] border border-[#cbd5e1] dark:border-[#334155] hover:bg-slate-100 dark:hover:bg-[#334155] flex items-center gap-1 cursor-pointer"
                 >
                   <Bookmark className="w-3 h-3 text-amber-500" />
                   <span>{bookmarkSuccess ? 'Bookmarked!' : 'Bookmark'}</span>
@@ -1237,7 +1237,7 @@ export const FileSystemView: React.FC<FileSystemViewProps> = ({
                               setCopiedKey('fs_path');
                               setTimeout(() => setCopiedKey(null), 1500);
                             }}
-                            className="px-2 py-1 rounded border border-[#cbd5e1] dark:border-[#334155] bg-white dark:bg-[#1e293b] hover:bg-slate-50 text-[11px] font-semibold flex items-center gap-1 cursor-pointer"
+                            className="px-2 py-1 rounded border border-[#cbd5e1] dark:border-[#334155] bg-white dark:bg-[#1e293b] hover:bg-slate-50 dark:hover:bg-[#334155] text-[11px] font-semibold flex items-center gap-1 cursor-pointer"
                           >
                             {copiedKey === 'fs_path' ? <Check className="w-3 h-3 text-emerald-600" /> : <Copy className="w-3 h-3" />}
                             <span>{copiedKey === 'fs_path' ? 'Copied' : 'Copy'}</span>
@@ -1352,7 +1352,7 @@ export const FileSystemView: React.FC<FileSystemViewProps> = ({
                           setCopiedKey('strings_all');
                           setTimeout(() => setCopiedKey(null), 1500);
                         }}
-                        className="px-2 py-0.5 rounded border border-[#cbd5e1] dark:border-[#334155] bg-white dark:bg-[#1e293b] hover:bg-slate-50 disabled:opacity-40 text-[11px] font-semibold flex items-center gap-1 cursor-pointer"
+                        className="px-2 py-0.5 rounded border border-[#cbd5e1] dark:border-[#334155] bg-white dark:bg-[#1e293b] hover:bg-slate-50 dark:hover:bg-[#334155] disabled:opacity-40 text-[11px] font-semibold flex items-center gap-1 cursor-pointer"
                       >
                         {copiedKey === 'strings_all' ? <Check className="w-3 h-3 text-emerald-600" /> : <Copy className="w-3 h-3" />}
                         <span>{copiedKey === 'strings_all' ? 'Copied' : 'Copy'}</span>

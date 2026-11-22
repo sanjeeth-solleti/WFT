@@ -42,6 +42,20 @@ export const ConnectionsDrawer: React.FC<ConnectionsDrawerProps> = ({
   const [searchInput, setSearchInput] = useState('');
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [layoutName, setLayoutName] = useState<'concentric' | 'cose' | 'circle' | 'breadthfirst'>('concentric');
+  const [isDark, setIsDark] = useState<boolean>(() =>
+    typeof document !== 'undefined' && document.documentElement.classList.contains('dark')
+  );
+
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+    const syncTheme = () => {
+      setIsDark(document.documentElement.classList.contains('dark'));
+    };
+    syncTheme();
+    const observer = new MutationObserver(syncTheme);
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] });
+    return () => observer.disconnect();
+  }, []);
 
   // Fetch connections data
   useEffect(() => {
@@ -134,16 +148,16 @@ export const ConnectionsDrawer: React.FC<ConnectionsDrawerProps> = ({
           {
             selector: 'node[type = "PRIMARY_ENTITY"]',
             style: {
-              'background-color': '#0284c7', // WFT Blue
-              'border-color': '#0369a1',
+              'background-color': isDark ? '#0284c7' : '#0284c7',
+              'border-color': isDark ? '#38bdf8' : '#0369a1',
               'border-width': 2,
               label: 'data(label)',
-              color: '#0f172a',
+              color: isDark ? '#f8fafc' : '#0f172a',
               'font-size': '11px',
               'font-family': 'monospace',
               'text-valign': 'center',
               'text-halign': 'center',
-              'text-outline-color': '#ffffff',
+              'text-outline-color': isDark ? '#0f172a' : '#ffffff',
               'text-outline-width': 2,
               width: 48,
               height: 48,
@@ -153,16 +167,16 @@ export const ConnectionsDrawer: React.FC<ConnectionsDrawerProps> = ({
           {
             selector: 'node[type = "ARTIFACT_NODE"]',
             style: {
-              'background-color': '#475569',
-              'border-color': '#334155',
+              'background-color': isDark ? '#334155' : '#475569',
+              'border-color': isDark ? '#64748b' : '#334155',
               'border-width': 1.5,
               label: 'data(label)',
-              color: '#334155',
+              color: isDark ? '#e2e8f0' : '#334155',
               'font-size': '10px',
               'font-family': 'monospace',
               'text-valign': 'bottom',
               'text-margin-y': 4,
-              'text-outline-color': '#ffffff',
+              'text-outline-color': isDark ? '#0f172a' : '#ffffff',
               'text-outline-width': 1.5,
               width: 30,
               height: 30,
@@ -173,16 +187,16 @@ export const ConnectionsDrawer: React.FC<ConnectionsDrawerProps> = ({
             selector: 'edge',
             style: {
               width: 1.5,
-              'line-color': '#94a3b8',
+              'line-color': isDark ? '#475569' : '#94a3b8',
               'curve-style': 'bezier',
               'target-arrow-shape': 'triangle',
-              'target-arrow-color': '#64748b',
+              'target-arrow-color': isDark ? '#64748b' : '#64748b',
               'arrow-scale': 0.8,
               label: 'data(label)',
               'font-size': '8.5px',
               'font-family': 'monospace',
-              color: '#475569',
-              'text-outline-color': '#ffffff',
+              color: isDark ? '#cbd5e1' : '#475569',
+              'text-outline-color': isDark ? '#0f172a' : '#ffffff',
               'text-outline-width': 1,
             },
           },
@@ -190,7 +204,7 @@ export const ConnectionsDrawer: React.FC<ConnectionsDrawerProps> = ({
           {
             selector: 'node:selected',
             style: {
-              'border-color': '#0284c7',
+              'border-color': isDark ? '#38bdf8' : '#0284c7',
               'border-width': 3,
             },
           },
@@ -237,7 +251,7 @@ export const ConnectionsDrawer: React.FC<ConnectionsDrawerProps> = ({
         cyRef.current = null;
       }
     };
-  }, [data, layoutName, activeEntity, onSelectEntity]);
+  }, [data, layoutName, activeEntity, onSelectEntity, isDark]);
 
   const handleSearchSubmit = (e: React.FormEvent) => {
     e.preventDefault();

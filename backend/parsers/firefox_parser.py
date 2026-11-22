@@ -330,9 +330,12 @@ class FirefoxParser(BaseParser):
 
     def _rel_parts_under_staging(self, fp: Path) -> Tuple[str, ...]:
         try:
-            return fp.resolve().relative_to(self.staging_dir).parts
-        except Exception:
-            return fp.parts
+            return fp.relative_to(self.staging_dir).parts
+        except ValueError:
+            try:
+                return fp.resolve().relative_to(self.staging_dir.resolve()).parts
+            except Exception:
+                return fp.parts
 
     def _extract_provenance(self, fp: Path) -> Tuple[Optional[str], str]:
         rel_parts = list(self._rel_parts_under_staging(fp))
@@ -1060,8 +1063,20 @@ class FirefoxParser(BaseParser):
                 prio = 1
             return (prio, str(fp))
 
+        _FF_CANDIDATE_SUFFIXES = (
+            "places.sqlite",
+            "downloads.sqlite",
+            "cookies.sqlite",
+            "formhistory.sqlite",
+            "signons.sqlite",
+            "logins.json",
+        )
         try:
-            all_files = [p for p in self.staging_dir.rglob("*") if p.is_file()]
+            all_files = [
+                p
+                for p in self.staging_dir.rglob("*")
+                if p.name.lower().endswith(_FF_CANDIDATE_SUFFIXES) and p.is_file()
+            ]
             all_files.sort(key=_ff_priority)
 
             for idx, fp in enumerate(all_files):

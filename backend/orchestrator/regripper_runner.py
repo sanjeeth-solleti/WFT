@@ -378,7 +378,13 @@ class RegRipperRunner:
             if not s_dir.is_dir():
                 continue
             s_dir_res = s_dir.resolve()
-            all_files = [p for p in s_dir_res.rglob("*") if p.is_file()]
+            all_files: List[Path] = []
+            for p in s_dir_res.rglob("*"):
+                fn_low = p.name.lower()
+                if fn_low.endswith(bad_suffixes) or "regtrans-ms" in fn_low or ".tmcontainer" in fn_low:
+                    continue
+                if any(re.search(pat, p.name, re.IGNORECASE) for _, pat in hive_specs) and p.is_file():
+                    all_files.append(p)
             # Deeper structured paths (Users/<User>/NTUSER.DAT) sort BEFORE flat root copies
             all_files.sort(key=lambda p: (-len(p.relative_to(s_dir_res).parts), str(p).lower()))
 

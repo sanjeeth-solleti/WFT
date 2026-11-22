@@ -1530,26 +1530,28 @@ class ChatParser(BaseParser):
         candidate_wpn_dbs: List[Path] = []
 
         if self.staging_dir.exists():
-            staging_resolved = self.staging_dir.resolve()
             for p in self.staging_dir.rglob("*"):
-                if not p.is_file():
-                    continue
                 name_lower = p.name.lower()
-                try:
-                    path_lower = p.resolve().relative_to(staging_resolved).as_posix().lower()
-                except Exception:
-                    path_lower = p.name.lower()
-                suffix_lower = p.suffix.lower()
-
                 if any(name_lower.endswith(sfx) for sfx in ("-wal", "-shm", "-journal")):
                     continue
+                suffix_lower = p.suffix.lower()
+                is_wpn_cand = "wpndatabase" in name_lower and (suffix_lower in (".db", "") or "wpndatabase.db" in name_lower)
+                is_ldb_cand = suffix_lower in (".ldb", ".log", ".sst") and name_lower not in ("log", "log.old")
+                is_sql_cand = suffix_lower in (".sqlite", ".sqlite3", ".db")
+                if not (is_wpn_cand or is_ldb_cand or is_sql_cand):
+                    continue
+                if not p.is_file():
+                    continue
+                try:
+                    path_lower = p.relative_to(self.staging_dir).as_posix().lower()
+                except ValueError:
+                    path_lower = str(p).replace("\\", "/").lower()
 
-                if "wpndatabase" in name_lower and (suffix_lower in (".db", "") or "wpndatabase.db" in name_lower):
+                if is_wpn_cand:
                     candidate_wpn_dbs.append(p)
-                elif suffix_lower in (".ldb", ".log", ".sst") and any(k in path_lower for k in _CHAT_PATH_KEYWORDS):
-                    if name_lower not in ("log", "log.old"):
-                        candidate_leveldb.append(p)
-                elif suffix_lower in (".sqlite", ".sqlite3", ".db") and any(k in path_lower for k in _CHAT_PATH_KEYWORDS):
+                elif is_ldb_cand and any(k in path_lower for k in _CHAT_PATH_KEYWORDS):
+                    candidate_leveldb.append(p)
+                elif is_sql_cand and any(k in path_lower for k in _CHAT_PATH_KEYWORDS):
                     candidate_chat_sqlite.append(p)
 
         # Sort WPN copies so Notifications/<User>/wpndatabase.db is preferred over flat SQLite/wpndatabase.db

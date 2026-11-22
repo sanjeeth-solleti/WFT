@@ -33,12 +33,40 @@ import { KeywordManager, StagedKeywordItem } from './KeywordManagerModal';
 import { FileBrowserModal } from './FileBrowserModal';
 import { useResizable, ResizeHandle } from './ResizeHandle';
 
+export interface ProcessWizardPersistedState {
+  currentStep: number;
+  caseName: string;
+  caseNumber: string;
+  examinerName: string;
+  caseNotes: string;
+  sourceType: 'folder' | 'live_triage' | 'image' | 'directory';
+  sourcePath: string;
+  targetStorageDir: string;
+  selectedPreset: 'quick' | 'comprehensive' | 'malware' | 'custom';
+  selectedCategory: string;
+  selectedArtifactIds: string[];
+  enableYara: boolean;
+  enableIoc: boolean;
+  enableOcr: boolean;
+  enableStinger: boolean;
+  enableHindsight: boolean;
+  maxWorkers: number;
+  initialKeywords: StagedKeywordItem[];
+  activeCaseId: string;
+  statusData: CaseStatusResponse | null;
+  hasCustomCaseName?: boolean;
+}
+
 interface ProcessWizardProps {
   currentCaseId: string;
   onCaseCreated: (newCaseId: string) => void;
   isOpenAsModal?: boolean;
   onCloseModal?: () => void;
   onNavigateToExamine?: () => void;
+  persistedState?: ProcessWizardPersistedState | null;
+  onPersistState?: (state: ProcessWizardPersistedState, commitForCaseId?: string) => void;
+  onProcessingComplete?: (caseId: string) => void;
+  initialStep?: number;
 }
 
 interface CatalogItem {
@@ -225,20 +253,55 @@ export const ProcessWizard: React.FC<ProcessWizardProps> = ({
   isOpenAsModal = false,
   onCloseModal,
   onNavigateToExamine,
+  persistedState = null,
+  onPersistState,
+  onProcessingComplete,
+  initialStep,
 }) => {
-  const [currentStep, setCurrentStep] = useState<number>(1);
+  const defaultDateCaseName = `Incident_${new Date().toISOString().slice(0, 10).replace(/-/g, '')}`;
+  const defaultCaseNumber = `DFIR-${new Date().getFullYear()}-${Math.floor(1000 + Math.random() * 9000)}`;
 
-  const [caseName, setCaseName] = useState(`Incident_${new Date().toISOString().slice(0, 10).replace(/-/g, '')}`);
-  const [caseNumber, setCaseNumber] = useState(`DFIR-${new Date().getFullYear()}-${Math.floor(1000 + Math.random() * 9000)}`);
-  const [examinerName, setExaminerName] = useState('');
-  const [caseNotes, setCaseNotes] = useState('');
+  const [currentStep, setCurrentStep] = useState<number>(() => {
+    if (persistedState && typeof persistedState.currentStep === 'number') {
+      return persistedState.currentStep;
+    }
+    if (typeof initialStep === 'number') {
+      return initialStep;
+    }
+    if (!isOpenAsModal && currentCaseId) {
+      return 4;
+    }
+    return 1;
+  });
 
-  const [sourceType, setSourceType] = useState<'folder' | 'live_triage' | 'image' | 'directory'>('image');
-  const [sourcePath, setSourcePath] = useState('');
+  const [hasCustomCaseName, setHasCustomCaseName] = useState<boolean>(
+    () => Boolean(persistedState?.hasCustomCaseName)
+  );
+  const [caseName, setCaseName] = useState<string>(
+    () => persistedState?.caseName || (!isOpenAsModal && currentCaseId ? currentCaseId : defaultDateCaseName)
+  );
+  const [caseNumber, setCaseNumber] = useState<string>(
+    () => persistedState?.caseNumber || defaultCaseNumber
+  );
+  const [examinerName, setExaminerName] = useState<string>(
+    () => persistedState?.examinerName || ''
+  );
+  const [caseNotes, setCaseNotes] = useState<string>(
+    () => persistedState?.caseNotes || ''
+  );
+
+  const [sourceType, setSourceType] = useState<'folder' | 'live_triage' | 'image' | 'directory'>(
+    () => persistedState?.sourceType || 'image'
+  );
+  const [sourcePath, setSourcePath] = useState<string>(
+    () => persistedState?.sourcePath || ''
+  );
 
   const [pathValidation, setPathValidation] = useState<ValidatePathResponse | null>(null);
   const [isValidatingPath, setIsValidatingPath] = useState<boolean>(false);
-  const [targetStorageDir, setTargetStorageDir] = useState<string>('');
+  const [targetStorageDir, setTargetStorageDir] = useState<string>(
+    () => persistedState?.targetStorageDir || ''
+  );
 
   const [fileBrowserOpen, setFileBrowserOpen] = useState<boolean>(false);
   const [fileBrowserMode, setFileBrowserMode] = useState<'file' | 'folder'>('file');
@@ -304,9 +367,16 @@ export const ProcessWizard: React.FC<ProcessWizardProps> = ({
     return () => clearTimeout(timer);
   }, [sourcePath]);
 
-  const [selectedPreset, setSelectedPreset] = useState<'quick' | 'comprehensive' | 'malware' | 'custom'>('custom');
-  const [selectedCategory, setSelectedCategory] = useState<string>('Operating System');
+  const [selectedPreset, setSelectedPreset] = useState<'quick' | 'comprehensive' | 'malware' | 'custom'>(
+    () => persistedState?.selectedPreset || 'custom'
+  );
+  const [selectedCategory, setSelectedCategory] = useState<string>(
+    () => persistedState?.selectedCategory || 'Operating System'
+  );
   const [selectedArtifactIds, setSelectedArtifactIds] = useState<Set<string>>(() => {
+    if (persistedState?.selectedArtifactIds && persistedState.selectedArtifactIds.length > 0) {
+      return new Set(persistedState.selectedArtifactIds);
+    }
     const std = new Set<string>();
     ARTIFACT_CATEGORIES_CATALOG.forEach((cat) =>
       cat.items.forEach((item) => {
@@ -318,13 +388,27 @@ export const ProcessWizard: React.FC<ProcessWizardProps> = ({
     std.add('web_hindsight');
     return std;
   });
-  const [enableYara, setEnableYara] = useState(true);
-  const [enableIoc, setEnableIoc] = useState(true);
-  const [enableOcr, setEnableOcr] = useState(true);
-  const [enableStinger, setEnableStinger] = useState(true);
-  const [enableHindsight, setEnableHindsight] = useState(true);
-  const [maxWorkers, setMaxWorkers] = useState<number>(25);
-  const [initialKeywords, setInitialKeywords] = useState<StagedKeywordItem[]>([]);
+  const [enableYara, setEnableYara] = useState<boolean>(
+    () => persistedState?.enableYara ?? true
+  );
+  const [enableIoc, setEnableIoc] = useState<boolean>(
+    () => persistedState?.enableIoc ?? true
+  );
+  const [enableOcr, setEnableOcr] = useState<boolean>(
+    () => persistedState?.enableOcr ?? true
+  );
+  const [enableStinger, setEnableStinger] = useState<boolean>(
+    () => persistedState?.enableStinger ?? true
+  );
+  const [enableHindsight, setEnableHindsight] = useState<boolean>(
+    () => persistedState?.enableHindsight ?? true
+  );
+  const [maxWorkers, setMaxWorkers] = useState<number>(
+    () => persistedState?.maxWorkers ?? 25
+  );
+  const [initialKeywords, setInitialKeywords] = useState<StagedKeywordItem[]>(
+    () => persistedState?.initialKeywords || []
+  );
   const [step3SubTab, setStep3SubTab] = useState<'artifacts' | 'keywords'>('artifacts');
 
   // Strictly synchronized booleans & catalog count from Step 3 checkboxes:
@@ -348,19 +432,54 @@ export const ProcessWizard: React.FC<ProcessWizardProps> = ({
     minCenterWidth: 320,
   });
 
-  const [activeCaseId, setActiveCaseId] = useState<string>(currentCaseId);
-  const [statusData, setStatusData] = useState<CaseStatusResponse | null>(null);
+  const [activeCaseId, setActiveCaseId] = useState<string>(
+    () => persistedState?.activeCaseId || (isOpenAsModal ? '' : currentCaseId)
+  );
+  const [statusData, setStatusData] = useState<CaseStatusResponse | null>(
+    () => persistedState?.statusData || null
+  );
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submissionError, setSubmissionError] = useState<string | null>(null);
   const [logSearch, setLogSearch] = useState('');
   const [moduleFilter, setModuleFilter] = useState('ALL');
   const [isLogDrawerExpanded, setIsLogDrawerExpanded] = useState(false);
+  const prevStatusRef = useRef<string | undefined>(persistedState?.statusData?.status);
+  const prevCurrentCaseIdRef = useRef<string>(currentCaseId);
 
   useEffect(() => {
-    if (currentCaseId) {
+    const prevPropCaseId = prevCurrentCaseIdRef.current;
+    prevCurrentCaseIdRef.current = currentCaseId;
+    if (
+      !isOpenAsModal &&
+      currentCaseId &&
+      currentCaseId !== prevPropCaseId &&
+      currentCaseId !== activeCaseId &&
+      statusData?.status !== 'RUNNING' &&
+      !isSubmitting
+    ) {
       setActiveCaseId(currentCaseId);
+      if (persistedState && persistedState.activeCaseId === currentCaseId) {
+        setCaseName(persistedState.caseName || currentCaseId);
+        setCaseNumber(persistedState.caseNumber || '');
+        setExaminerName(persistedState.examinerName || '');
+        setCaseNotes(persistedState.caseNotes || '');
+        setSourcePath(persistedState.sourcePath || '');
+        setSourceType(persistedState.sourceType || 'image');
+        setTargetStorageDir(persistedState.targetStorageDir || '');
+        setHasCustomCaseName(Boolean(persistedState.hasCustomCaseName));
+        setStatusData(persistedState.statusData || null);
+      } else {
+        setHasCustomCaseName(false);
+        setCaseName(currentCaseId);
+        setCaseNumber('');
+        setExaminerName('');
+        setCaseNotes('');
+        setSourcePath('');
+        setTargetStorageDir('');
+        setStatusData(null);
+      }
     }
-  }, [currentCaseId]);
+  }, [currentCaseId, isOpenAsModal, activeCaseId, statusData?.status, isSubmitting, persistedState]);
 
   useEffect(() => {
     if (!activeCaseId) return;
@@ -370,8 +489,54 @@ export const ProcessWizard: React.FC<ProcessWizardProps> = ({
     const fetchStatus = async () => {
       try {
         const res = await apiClient.getCaseStatus(activeCaseId);
-        if (isMounted) {
-          setStatusData(res);
+        if (!isMounted) return;
+        setStatusData((prev) => {
+          if (
+            prev &&
+            prev.case_id === res.case_id &&
+            res.status === 'RUNNING' &&
+            (!res.logs || res.logs.length === 0) &&
+            prev.logs &&
+            prev.logs.length > 0
+          ) {
+            return { ...res, logs: prev.logs, total_logs: prev.total_logs };
+          }
+          return res;
+        });
+
+        // Hydrate case details from backend metadata if available and not overwritten by an active unsaved draft
+        if (!isOpenAsModal && res.case_metadata && Object.keys(res.case_metadata).length > 0) {
+          const meta = res.case_metadata;
+          if (!hasCustomCaseName && (meta.case_name || res.case_name)) {
+            setCaseName(String(meta.case_name || res.case_name));
+          }
+          if (meta.case_number && !caseNumber) {
+            setCaseNumber(String(meta.case_number));
+          }
+          if (meta.examiner && !examinerName) {
+            setExaminerName(String(meta.examiner));
+          }
+          if (meta.notes && !caseNotes) {
+            setCaseNotes(String(meta.notes));
+          }
+          if (meta.source_path && !sourcePath) {
+            setSourcePath(String(meta.source_path));
+          }
+          if (meta.source_type && !sourcePath) {
+            const st = String(meta.source_type);
+            if (st === 'folder' || st === 'image' || st === 'live_triage' || st === 'directory') {
+              setSourceType(st);
+            }
+          }
+        }
+
+        const prevStatus = prevStatusRef.current;
+        prevStatusRef.current = res.status;
+        if (
+          prevStatus === 'RUNNING' &&
+          (res.status === 'SUCCESS' || res.status === 'COMPLETED')
+        ) {
+          onProcessingComplete?.(activeCaseId);
         }
       } catch (err) {
         console.warn(`Failed to fetch status for case ${activeCaseId}:`, err);
@@ -392,41 +557,76 @@ export const ProcessWizard: React.FC<ProcessWizardProps> = ({
     };
   }, [activeCaseId, statusData?.status, isSubmitting]);
 
-  const syncEngineBooleansFromSet = (ids: Set<string>, includeHindsight = false) => {
+  const buildPersistedSnapshot = (
+    overrides?: Partial<ProcessWizardPersistedState>
+  ): ProcessWizardPersistedState => ({
+    currentStep,
+    caseName,
+    caseNumber,
+    examinerName,
+    caseNotes,
+    sourceType,
+    sourcePath,
+    targetStorageDir,
+    selectedPreset,
+    selectedCategory,
+    selectedArtifactIds: Array.from(selectedArtifactIds),
+    enableYara,
+    enableIoc,
+    enableOcr,
+    enableStinger,
+    enableHindsight,
+    maxWorkers,
+    initialKeywords,
+    activeCaseId,
+    statusData,
+    hasCustomCaseName,
+    ...overrides,
+  });
+
+  // Persist wizard state in tab mode and for any active/started modal session so closing the modal never leaves stale RUNNING status
+  useEffect(() => {
+    if (!onPersistState) return;
+    if (!isOpenAsModal || (activeCaseId && statusData && statusData.case_id === activeCaseId)) {
+      onPersistState(buildPersistedSnapshot());
+    }
+  }, [
+    isOpenAsModal,
+    currentStep,
+    caseName,
+    caseNumber,
+    examinerName,
+    caseNotes,
+    sourceType,
+    sourcePath,
+    targetStorageDir,
+    selectedPreset,
+    selectedCategory,
+    selectedArtifactIds,
+    enableYara,
+    enableIoc,
+    enableOcr,
+    enableStinger,
+    enableHindsight,
+    maxWorkers,
+    initialKeywords,
+    activeCaseId,
+    statusData,
+    hasCustomCaseName,
+  ]);
+
+  const syncEngineBooleansFromSet = (ids: Set<string>, includeHindsight = true) => {
     setEnableYara(ids.has('artifact_yara_hits'));
     setEnableStinger(ids.has('artifact_stinger_hits'));
     setEnableOcr(ids.has('artifact_ocr_results'));
     setEnableIoc(ids.has('file_enrichment'));
     if (includeHindsight) {
-      setEnableHindsight(ids.has('web_hindsight'));
+      const hasWeb =
+        ids.has('browser_history') ||
+        ids.has('browser_downloads') ||
+        ids.has('browser_logins');
+      setEnableHindsight(hasWeb);
     }
-  };
-
-  const handleEngineSwitchChange = (
-    engine: 'yara' | 'stinger' | 'ocr' | 'ioc' | 'hindsight',
-    checked: boolean
-  ) => {
-    setSelectedPreset('custom');
-    const idMap: Record<'yara' | 'stinger' | 'ocr' | 'ioc' | 'hindsight', string> = {
-      yara: 'artifact_yara_hits',
-      stinger: 'artifact_stinger_hits',
-      ocr: 'artifact_ocr_results',
-      ioc: 'file_enrichment',
-      hindsight: 'web_hindsight',
-    };
-    const targetId = idMap[engine];
-    if (engine === 'yara') setEnableYara(checked);
-    else if (engine === 'stinger') setEnableStinger(checked);
-    else if (engine === 'ocr') setEnableOcr(checked);
-    else if (engine === 'ioc') setEnableIoc(checked);
-    else if (engine === 'hindsight') setEnableHindsight(checked);
-
-    setSelectedArtifactIds((prev) => {
-      const next = new Set(prev);
-      if (checked) next.add(targetId);
-      else next.delete(targetId);
-      return next;
-    });
   };
 
   const applyPreset = (preset: 'quick' | 'comprehensive' | 'malware') => {
@@ -490,7 +690,7 @@ export const ProcessWizard: React.FC<ProcessWizardProps> = ({
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
       else next.add(id);
-      syncEngineBooleansFromSet(next, false);
+      syncEngineBooleansFromSet(next, true);
       return next;
     });
   };
@@ -505,7 +705,7 @@ export const ProcessWizard: React.FC<ProcessWizardProps> = ({
         if (select) next.add(item.id);
         else next.delete(item.id);
       });
-      syncEngineBooleansFromSet(next, false);
+      syncEngineBooleansFromSet(next, true);
       return next;
     });
   };
@@ -588,16 +788,32 @@ export const ProcessWizard: React.FC<ProcessWizardProps> = ({
       };
 
       const res = await apiClient.processCase(req);
-      setStatusData({
+      const initialRunningStatus: CaseStatusResponse = {
         case_id: res.case_id,
+        case_name: caseName.trim() || res.case_name || res.case_id,
         status: 'RUNNING',
         progress: 5,
         current_step: 'Initializing forensic evidence pipeline...',
         logs: [],
         total_logs: 0,
-      });
+      };
+      prevStatusRef.current = 'RUNNING';
+      setStatusData(initialRunningStatus);
       setActiveCaseId(res.case_id);
+      setHasCustomCaseName(true);
       setCurrentStep(4);
+      if (onPersistState) {
+        onPersistState(
+          buildPersistedSnapshot({
+            currentStep: 4,
+            activeCaseId: res.case_id,
+            caseName: caseName.trim() || res.case_name || res.case_id,
+            statusData: initialRunningStatus,
+            hasCustomCaseName: true,
+          }),
+          res.case_id
+        );
+      }
       onCaseCreated(res.case_id);
     } catch (err: unknown) {
       setSubmissionError(err instanceof Error ? err.message : String(err));
@@ -632,6 +848,18 @@ export const ProcessWizard: React.FC<ProcessWizardProps> = ({
     ? activeCategoryObj.items.filter((i) => selectedArtifactIds.has(i.id)).length
     : 0;
 
+  const isProcessingRunning = isSubmitting || statusData?.status === 'RUNNING';
+  const isProcessingCompleted =
+    statusData?.status === 'SUCCESS' || statusData?.status === 'COMPLETED';
+  const canExamineArtifacts = Boolean(
+    onNavigateToExamine && activeCaseId && !isProcessingRunning && isProcessingCompleted
+  );
+  const displayCaseName =
+    (hasCustomCaseName && caseName.trim()) ||
+    (activeCaseId && statusData?.case_id === activeCaseId && statusData?.case_name) ||
+    activeCaseId ||
+    caseName;
+
   return (
     <>
       <div className="flex flex-col h-full bg-[#f1f5f9] dark:bg-[#0f172a] text-[#0f172a] dark:text-[#f8fafc] overflow-hidden font-sans select-none">
@@ -665,23 +893,14 @@ export const ProcessWizard: React.FC<ProcessWizardProps> = ({
               <button
                 type="button"
                 onClick={handleStartProcessing}
-                disabled={isSubmitting || statusData?.status === 'RUNNING'}
-                className="flex items-center gap-1.5 px-3.5 py-1 bg-[#166534] hover:bg-emerald-800 text-white rounded text-xs font-bold transition-colors shadow-2xs cursor-pointer"
+                disabled={isProcessingRunning}
+                className="flex items-center gap-1.5 px-3.5 py-1 bg-[#166534] hover:bg-emerald-800 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded text-xs font-bold transition-colors shadow-2xs cursor-pointer"
               >
                 <Play className="w-3.5 h-3.5 fill-current" />
                 <span>Process Evidence Now</span>
               </button>
             )}
 
-            {onNavigateToExamine && (
-              <button
-                onClick={onNavigateToExamine}
-                className="flex items-center gap-1.5 px-3 py-1 bg-white hover:bg-slate-50 dark:bg-[#0f172a] dark:hover:bg-[#334155] border border-[#cbd5e1] dark:border-[#334155] text-[#0284c7] dark:text-[#38bdf8] rounded text-xs font-semibold transition-colors shadow-2xs cursor-pointer"
-              >
-                <Eye className="w-3.5 h-3.5" />
-                <span>Go to Examine</span>
-              </button>
-            )}
             {isOpenAsModal && onCloseModal && (
               <button
                 onClick={onCloseModal}
@@ -784,7 +1003,7 @@ export const ProcessWizard: React.FC<ProcessWizardProps> = ({
             {submissionError && currentStep !== 4 && (
               <div className="mx-8 mt-4 p-2.5 badge-status-error text-xs flex items-center justify-between gap-2 rounded shrink-0">
                 <div className="flex items-center gap-2">
-                  <AlertTriangle className="w-4 h-4 shrink-0 text-[#991b1b]" />
+                  <AlertTriangle className="w-4 h-4 shrink-0 text-[#991b1b] dark:text-red-400" />
                   <span>{submissionError}</span>
                 </div>
                 <button type="button" onClick={() => setSubmissionError(null)} className="p-0.5 hover:opacity-80 cursor-pointer">
@@ -871,7 +1090,10 @@ export const ProcessWizard: React.FC<ProcessWizardProps> = ({
                     <input
                       type="text"
                       value={caseName}
-                      onChange={(e) => setCaseName(e.target.value)}
+                      onChange={(e) => {
+                        setHasCustomCaseName(true);
+                        setCaseName(e.target.value);
+                      }}
                       placeholder="e.g. Incident_20261031_01"
                       className="w-full bg-white dark:bg-[#1e293b] border border-[#cbd5e1] dark:border-[#334155] rounded px-3 py-2 text-xs text-[#0f172a] dark:text-[#f8fafc] font-mono focus:border-[#0284c7] focus:outline-none"
                       required
@@ -1169,7 +1391,7 @@ export const ProcessWizard: React.FC<ProcessWizardProps> = ({
                             }`}
                           >
                             <span className="text-xs truncate">{cat.category}</span>
-                            <span className="text-[10px] font-mono px-1.5 py-0.5 rounded border bg-slate-100 dark:bg-[#0f172a]">
+                            <span className="text-[10px] font-mono px-1.5 py-0.5 rounded border border-[#cbd5e1] dark:border-[#334155] bg-slate-100 dark:bg-[#0f172a]">
                               {catSelectedCount}/{totalInCat}
                             </span>
                           </button>
@@ -1185,67 +1407,7 @@ export const ProcessWizard: React.FC<ProcessWizardProps> = ({
                     />
 
                     <div className="flex-1 overflow-y-auto p-6 bg-[#f1f5f9] dark:bg-[#0f172a] space-y-4 min-w-0">
-                      {/* Integrated Forensic & Threat Engines rendered ONLY in 'Malware & Threat Hunting' */}
-                      {selectedCategory === 'Malware & Threat Hunting' && (
-                        <div className="p-4 rounded border border-[#cbd5e1] dark:border-[#334155] bg-white dark:bg-[#1e293b] space-y-3 shadow-2xs">
-                          <div className="text-[11px] font-bold uppercase tracking-wider text-slate-600 dark:text-slate-300 font-mono">
-                            Integrated Forensic & Threat Engines
-                          </div>
-                          <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-xs">
-                            <label className="flex items-center justify-between p-2 rounded border border-[#cbd5e1] dark:border-[#334155] bg-[#f8fafc] dark:bg-[#0f172a] cursor-pointer">
-                              <span className="font-semibold text-[#0f172a] dark:text-[#f8fafc]">Enable YARA-X Malware Scanning</span>
-                              <input
-                                type="checkbox"
-                                checked={enableYara}
-                                onChange={(e) => handleEngineSwitchChange('yara', e.target.checked)}
-                                className="rounded border-[#cbd5e1] text-[#0284c7] focus:ring-0 w-4 h-4 cursor-pointer"
-                              />
-                            </label>
-
-                            <label className="flex items-center justify-between p-2 rounded border border-[#cbd5e1] dark:border-[#334155] bg-[#f8fafc] dark:bg-[#0f172a] cursor-pointer">
-                              <span className="font-semibold text-[#0f172a] dark:text-[#f8fafc]">Enable IOC & Entity Correlation</span>
-                              <input
-                                type="checkbox"
-                                checked={enableIoc}
-                                onChange={(e) => handleEngineSwitchChange('ioc', e.target.checked)}
-                                className="rounded border-[#cbd5e1] text-[#0284c7] focus:ring-0 w-4 h-4 cursor-pointer"
-                              />
-                            </label>
-
-                            <label className="flex items-center justify-between p-2 rounded border border-[#cbd5e1] dark:border-[#334155] bg-[#f8fafc] dark:bg-[#0f172a] cursor-pointer">
-                              <span className="font-semibold text-[#0f172a] dark:text-[#f8fafc]">Enable Trellix Stinger</span>
-                              <input
-                                type="checkbox"
-                                checked={enableStinger}
-                                onChange={(e) => handleEngineSwitchChange('stinger', e.target.checked)}
-                                className="rounded border-[#cbd5e1] text-[#0284c7] focus:ring-0 w-4 h-4 cursor-pointer"
-                              />
-                            </label>
-
-                            <label className="flex items-center justify-between p-2 rounded border border-[#cbd5e1] dark:border-[#334155] bg-[#f8fafc] dark:bg-[#0f172a] cursor-pointer">
-                              <span className="font-semibold text-[#0f172a] dark:text-[#f8fafc]">Enable Hindsight</span>
-                              <input
-                                type="checkbox"
-                                checked={enableHindsight}
-                                onChange={(e) => handleEngineSwitchChange('hindsight', e.target.checked)}
-                                className="rounded border-[#cbd5e1] text-[#0284c7] focus:ring-0 w-4 h-4 cursor-pointer"
-                              />
-                            </label>
-
-                            <label className="flex items-center justify-between p-2 rounded border border-[#cbd5e1] dark:border-[#334155] bg-[#f8fafc] dark:bg-[#0f172a] cursor-pointer md:col-span-2">
-                              <span className="font-semibold text-[#0f172a] dark:text-[#f8fafc]">Enable RapidOCR Text Extraction</span>
-                              <input
-                                type="checkbox"
-                                checked={enableOcr}
-                                onChange={(e) => handleEngineSwitchChange('ocr', e.target.checked)}
-                                className="rounded border-[#cbd5e1] text-[#0284c7] focus:ring-0 w-4 h-4 cursor-pointer"
-                              />
-                            </label>
-                          </div>
-                        </div>
-                      )}
-
-                      {/* Hidden DOM inputs keeping checkboxes accessible for unselected categories / engines */}
+                      {/* Hidden DOM inputs keeping catalog checkboxes accessible for unselected categories */}
                       {selectedCategory !== 'Recovery, Carving & Bulk Extractor' && (
                         <div className="hidden" aria-hidden="true" style={{ display: 'none' }}>
                           {ARTIFACT_CATEGORIES_CATALOG.find((c) => c.category === 'Recovery, Carving & Bulk Extractor')?.items.map((item) => {
@@ -1265,46 +1427,6 @@ export const ProcessWizard: React.FC<ProcessWizardProps> = ({
                       )}
                       {selectedCategory !== 'Malware & Threat Hunting' && (
                         <div className="hidden" aria-hidden="true" style={{ display: 'none' }}>
-                          <label>
-                            Enable YARA-X Malware Scanning
-                            <input
-                              type="checkbox"
-                              checked={enableYara}
-                              onChange={(e) => handleEngineSwitchChange('yara', e.target.checked)}
-                            />
-                          </label>
-                          <label>
-                            Enable Trellix Stinger
-                            <input
-                              type="checkbox"
-                              checked={enableStinger}
-                              onChange={(e) => handleEngineSwitchChange('stinger', e.target.checked)}
-                            />
-                          </label>
-                          <label>
-                            Enable IOC & Entity Correlation
-                            <input
-                              type="checkbox"
-                              checked={enableIoc}
-                              onChange={(e) => handleEngineSwitchChange('ioc', e.target.checked)}
-                            />
-                          </label>
-                          <label>
-                            Enable Hindsight
-                            <input
-                              type="checkbox"
-                              checked={enableHindsight}
-                              onChange={(e) => handleEngineSwitchChange('hindsight', e.target.checked)}
-                            />
-                          </label>
-                          <label>
-                            Enable RapidOCR Text Extraction
-                            <input
-                              type="checkbox"
-                              checked={enableOcr}
-                              onChange={(e) => handleEngineSwitchChange('ocr', e.target.checked)}
-                            />
-                          </label>
                           {ARTIFACT_CATEGORIES_CATALOG.find((c) => c.category === 'Malware & Threat Hunting')?.items.map((item) => {
                             const isChecked = selectedArtifactIds.has(item.id);
                             return (
@@ -1367,7 +1489,7 @@ export const ProcessWizard: React.FC<ProcessWizardProps> = ({
                                     data-testid={`artifact-checkbox-${item.id}`}
                                     checked={isChecked}
                                     onChange={() => toggleArtifact(item.id)}
-                                    className="mt-0.5 rounded border-[#cbd5e1] text-[#0284c7] focus:ring-0 w-4 h-4 cursor-pointer"
+                                    className="mt-0.5 rounded border-[#cbd5e1] dark:border-[#334155] text-[#0284c7] focus:ring-0 w-4 h-4 cursor-pointer"
                                   />
                                   <div className="flex-1 min-w-0">
                                     <div className="flex items-center gap-2">
@@ -1395,26 +1517,44 @@ export const ProcessWizard: React.FC<ProcessWizardProps> = ({
             {currentStep === 4 && (
               <div className="flex-1 flex flex-col overflow-hidden p-6 space-y-4">
                 <div className="p-4 bg-white dark:bg-[#1e293b] border border-[#cbd5e1] dark:border-[#334155] rounded space-y-3 shadow-2xs">
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-3">
-                      <span className="text-base font-bold text-[#0f172a] dark:text-[#f8fafc]">{caseName}</span>
-                      <span
-                        className={`text-[10px] font-mono px-2 py-0.5 rounded font-bold uppercase ${
-                          statusData?.status === 'SUCCESS' || statusData?.status === 'COMPLETED'
-                            ? 'badge-status-success'
-                            : statusData?.status === 'RUNNING'
-                            ? 'badge-status-running'
-                            : statusData?.status === 'FAILED' || statusData?.status === 'ERROR'
-                            ? 'badge-status-error'
-                            : 'badge-status-neutral'
-                        }`}
-                      >
-                        {statusData?.status || 'IDLE'}
-                      </span>
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-3">
+                        <span
+                          data-testid="processing-case-name"
+                          className="text-base font-bold text-[#0f172a] dark:text-[#f8fafc] truncate"
+                        >
+                          {displayCaseName}
+                        </span>
+                        <span
+                          data-testid="processing-status-badge"
+                          className={`text-[10px] font-mono px-2 py-0.5 rounded font-bold uppercase shrink-0 ${
+                            statusData?.status === 'SUCCESS' || statusData?.status === 'COMPLETED'
+                              ? 'badge-status-success'
+                              : statusData?.status === 'RUNNING'
+                              ? 'badge-status-running'
+                              : statusData?.status === 'FAILED' || statusData?.status === 'ERROR'
+                              ? 'badge-status-error'
+                              : 'badge-status-neutral'
+                          }`}
+                        >
+                          {statusData?.status || 'IDLE'}
+                        </span>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 mt-1 text-[11px] font-mono text-slate-500 dark:text-slate-400">
+                        {caseNumber && <span>Ticket: {caseNumber}</span>}
+                        {examinerName && <span>Examiner: {examinerName}</span>}
+                        {sourcePath && (
+                          <span className="truncate max-w-[380px]" title={sourcePath}>
+                            Source: {sourcePath}
+                          </span>
+                        )}
+                        <span>Threads: {maxWorkers}</span>
+                      </div>
                     </div>
 
-                    <div className="flex items-center gap-2">
-                      {statusData?.status !== 'RUNNING' && (
+                    <div className="flex items-center gap-2 shrink-0">
+                      {!isProcessingRunning && (
                         <button
                           type="button"
                           onClick={handleStartProcessing}
@@ -1423,17 +1563,6 @@ export const ProcessWizard: React.FC<ProcessWizardProps> = ({
                         >
                           <RefreshCw className="w-3.5 h-3.5" />
                           <span>Re-Run Pipeline</span>
-                        </button>
-                      )}
-
-                      {onNavigateToExamine && (
-                        <button
-                          type="button"
-                          onClick={onNavigateToExamine}
-                          className="px-3 py-1.5 bg-white dark:bg-[#0f172a] hover:bg-slate-50 dark:hover:bg-[#334155] text-[#0284c7] dark:text-[#38bdf8] rounded text-xs font-semibold flex items-center gap-1.5 border border-[#cbd5e1] dark:border-[#334155] transition-colors cursor-pointer"
-                        >
-                          <Eye className="w-3.5 h-3.5" />
-                          <span>View in Examine</span>
                         </button>
                       )}
                     </div>
@@ -1463,7 +1592,7 @@ export const ProcessWizard: React.FC<ProcessWizardProps> = ({
 
                   {(submissionError || statusData?.error) && (
                     <div className="p-2.5 badge-status-error text-xs flex items-center gap-2 rounded">
-                      <AlertTriangle className="w-4 h-4 shrink-0 text-[#991b1b]" />
+                      <AlertTriangle className="w-4 h-4 shrink-0 text-[#991b1b] dark:text-red-400" />
                       <span>{submissionError || statusData?.error}</span>
                     </div>
                   )}
@@ -1622,23 +1751,38 @@ export const ProcessWizard: React.FC<ProcessWizardProps> = ({
                     type="button"
                     id="wft-auto-start-process-btn"
                     onClick={handleStartProcessing}
-                    disabled={isSubmitting || statusData?.status === 'RUNNING'}
-                    className="px-5 py-2 rounded bg-[#0284c7] hover:bg-[#0369a1] disabled:opacity-50 text-white text-xs font-bold flex items-center gap-2 border border-[#0369a1] shadow-2xs transition-colors cursor-pointer"
+                    disabled={isProcessingRunning}
+                    className="px-5 py-2 rounded bg-[#0284c7] hover:bg-[#0369a1] disabled:opacity-50 disabled:cursor-not-allowed text-white text-xs font-bold flex items-center gap-2 border border-[#0369a1] shadow-2xs transition-colors cursor-pointer"
                   >
                     <Play className="w-4 h-4 fill-current" />
-                    <span>{statusData?.status === 'RUNNING' ? 'Processing...' : 'Process Evidence'}</span>
+                    <span>{isProcessingRunning ? 'Processing...' : 'Process Evidence'}</span>
                   </button>
                 )}
 
-                {currentStep === 4 && (
+                {currentStep === 4 && onNavigateToExamine && (
                   <button
                     type="button"
+                    data-testid="examine-artifacts-btn"
+                    disabled={!canExamineArtifacts}
                     onClick={() => {
-                      if (onNavigateToExamine) onNavigateToExamine();
+                      if (canExamineArtifacts && onNavigateToExamine) {
+                        onNavigateToExamine();
+                      }
                     }}
-                    className="px-5 py-1.5 rounded bg-[#0284c7] hover:bg-[#0369a1] text-white text-xs font-semibold flex items-center gap-1.5 border border-[#0369a1] shadow-2xs transition-colors cursor-pointer"
+                    title={
+                      isProcessingRunning
+                        ? 'Processing is in progress — Examine Artifacts will enable once processing completes'
+                        : !isProcessingCompleted
+                        ? 'Complete evidence processing to examine artifacts'
+                        : 'Open Examine Artifacts view for this case'
+                    }
+                    className="px-5 py-1.5 rounded bg-[#0284c7] hover:bg-[#0369a1] disabled:bg-slate-300 dark:disabled:bg-slate-700 disabled:text-slate-500 dark:disabled:text-slate-400 disabled:border-slate-300 dark:disabled:border-slate-600 disabled:cursor-not-allowed text-white text-xs font-semibold flex items-center gap-1.5 border border-[#0369a1] shadow-2xs transition-colors cursor-pointer"
                   >
-                    <Eye className="w-3.5 h-3.5" />
+                    {isProcessingRunning ? (
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <Eye className="w-3.5 h-3.5" />
+                    )}
                     <span>Examine Artifacts</span>
                   </button>
                 )}

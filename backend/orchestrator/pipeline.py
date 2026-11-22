@@ -500,10 +500,11 @@ class ProcessingPipeline:
         """Append timestamped logs to the case processing log file and console."""
         ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         print(f"[{ts}] [{level}] [Pipeline] {message}")
-        if self.log_file:
+        if self.log_file and not DuckDBManager.is_case_deleted(self.case_id):
             try:
-                with open(self.log_file, "a", encoding="utf-8") as f:
-                    f.write(f"[{ts}] [{level}] {message}\n")
+                if self.log_file.parent.exists():
+                    with open(self.log_file, "a", encoding="utf-8") as f:
+                        f.write(f"[{ts}] [{level}] {message}\n")
             except OSError as log_os_err:
                 print(f"[{ts}] [WARNING] [Pipeline] Could not write to log file {self.log_file}: {log_os_err}")
 
@@ -1342,6 +1343,7 @@ class ProcessingPipeline:
         self,
         selected_artifacts: Optional[Iterable[str]] = None,
         max_workers: Optional[int] = None,
+        progress_hook: Optional[Callable[[str, int, int, int], None]] = None,
     ) -> Dict[str, int]:
         """
         Execute custom forensic parsers concurrently via ThreadPoolExecutor,
@@ -1409,8 +1411,11 @@ class ProcessingPipeline:
 
         combined_results: Dict[str, int] = {}
         results_lock = threading.Lock()
+        total_enabled = len(enabled_instances)
+        completed_parsers = 0
 
         def _exec_single_parser(p_name: str, p_inst: Any) -> None:
+            nonlocal completed_parsers
             t0 = time.time()
             try:
                 res: Dict[str, int] = {}
@@ -1457,17 +1462,28 @@ class ProcessingPipeline:
                         res.update(_extract_table_counts_dict(raw_res))
 
                 dur = int((time.time() - t0) * 1000)
+                p_rows = sum(res.values())
                 with results_lock:
                     combined_results.update(res)
+                    completed_parsers += 1
+                    done_idx = completed_parsers
                 self._record_stage_telemetry(
                     f"Parser:{p_name}",
                     f"{p_name}.parse()",
                     "SUCCESS",
-                    rows=sum(res.values()),
+                    rows=p_rows,
                     duration_ms=dur,
                 )
+                if callable(progress_hook):
+                    try:
+                        progress_hook(p_name, p_rows, done_idx, total_enabled)
+                    except Exception:
+                        pass
             except Exception as exc:
                 dur = int((time.time() - t0) * 1000)
+                with results_lock:
+                    completed_parsers += 1
+                    done_idx = completed_parsers
                 self._record_stage_telemetry(
                     f"Parser:{p_name}",
                     f"{p_name}.parse()",
@@ -1477,6 +1493,11 @@ class ProcessingPipeline:
                     exit_code=1,
                     error=str(exc),
                 )
+                if callable(progress_hook):
+                    try:
+                        progress_hook(p_name, 0, done_idx, total_enabled)
+                    except Exception:
+                        pass
 
         pool_size = max(1, min(workers, len(enabled_instances)))
         with ThreadPoolExecutor(max_workers=pool_size) as pool:
@@ -1765,12 +1786,12 @@ class ProcessingPipeline:
             )
 
             # -------------------------------------------------------------
-            # STEP 3: Concurrent Runners, Carving & Application Parsers
+            # STEP 3: Structured Concurrent Artifact Engines & Carving
             # -------------------------------------------------------------
             self._update_status(
                 "RUNNING",
                 40,
-                f"Extraction complete ({files_staged} files staged). Running concurrent artifact engines...",
+                f"Extraction complete ({files_staged} files staged). Replaying Registry transaction logs (RLA)...",
                 progress_callback=progress_callback,
             )
 
@@ -1795,9 +1816,32 @@ class ProcessingPipeline:
             carver_res: Dict[str, Any] = {}
             parser_results: Dict[str, int] = {}
 
+            progress_state_lock = threading.Lock()
+            current_pct = 42
+
+            def _advance_step3_progress(delta: int, step_msg: str) -> None:
+                nonlocal current_pct
+                with progress_state_lock:
+                    current_pct = min(70, max(current_pct, current_pct + delta))
+                    pct_snapshot = current_pct
+                self._update_status(
+                    "RUNNING",
+                    pct_snapshot,
+                    step_msg,
+                    progress_callback=progress_callback,
+                )
+
+            def _on_parser_done(p_name: str, p_rows: int, done_idx: int, total_enabled: int) -> None:
+                _advance_step3_progress(
+                    1,
+                    f"Parsed {p_name} artifacts ({p_rows} rows) [{done_idx}/{total_enabled} parsers complete]...",
+                )
+
             def _ez_and_fallbacks_worker() -> Tuple[Dict[str, int], Dict[str, int], Dict[str, int]]:
                 ez_r = self._run_ez_stage(selected_set=selected_set, workers=workers, enable_hindsight=enable_hindsight)
+                _advance_step3_progress(4, f"EZ Tools completed ({sum(ez_r.values())} rows). Running Native OS Fallbacks...")
                 nfp_r = self._run_native_fallbacks_stage(selected_set=selected_set, workers=workers)
+                _advance_step3_progress(3, f"Native OS & Registry parsers completed ({sum(nfp_r.values())} rows)...")
                 hs_r = self._run_hindsight_stage(
                     selected_set=selected_set,
                     enable_hindsight=enable_hindsight,
@@ -1806,34 +1850,77 @@ class ProcessingPipeline:
                 )
                 return ez_r, nfp_r, hs_r
 
+            def _regripper_worker() -> Dict[str, Any]:
+                rr_r = self._run_regripper_stage(selected_set, workers)
+                _advance_step3_progress(3, f"RegRipper 4.0 completed ({_extract_row_count(rr_r)} plugin reports)...")
+                return rr_r
+
+            self._update_status(
+                "RUNNING",
+                42,
+                f"Running structured artifact parsers & EZ Tools ({files_staged} staged files)...",
+                progress_callback=progress_callback,
+            )
+
+            # Phase 3A: Execute fast structured artifact engines (EZ Tools, Native Fallbacks, RegRipper, Custom Parsers)
+            # first without raw disk-image carvers starving the Python GIL or disk I/O.
             stage_workers = max(1, min(workers, 32))
             with ThreadPoolExecutor(max_workers=stage_workers) as stage_pool:
                 f_ez = stage_pool.submit(_ez_and_fallbacks_worker)
-                f_rr = stage_pool.submit(self._run_regripper_stage, selected_set, workers)
-                f_be = stage_pool.submit(
-                    self._run_bulk_extractor_stage,
-                    should_run_bulk_extractor,
-                    effective_evidence_target,
-                    should_run_carving,
-                    workers,
-                )
-                f_dc = stage_pool.submit(
-                    self._run_data_carver_stage,
-                    should_run_carving,
-                    effective_evidence_target,
-                    workers,
-                )
+                f_rr = stage_pool.submit(_regripper_worker)
                 f_parsers = stage_pool.submit(
                     self.run_custom_parsers,
                     sorted(selected_set) if selected_set is not None else None,
                     workers,
+                    _on_parser_done,
                 )
 
                 ez_results, native_fallback_results, hindsight_results = f_ez.result()
                 regripper_res = f_rr.result()
-                bulk_extractor_res = f_be.result()
-                carver_res = f_dc.result()
                 parser_results = f_parsers.result()
+
+            # Phase 3B: Raw Image / Unallocated Scanners (Bulk Extractor & Data Carver)
+            if should_run_bulk_extractor or should_run_carving:
+                self._update_status(
+                    "RUNNING",
+                    max(current_pct, 62),
+                    "Structured artifacts ingested. Running unallocated Data Carver & Bulk Extractor...",
+                    progress_callback=progress_callback,
+                )
+
+                def _be_worker() -> Dict[str, Any]:
+                    be_r = self._run_bulk_extractor_stage(
+                        should_run_bulk_extractor,
+                        effective_evidence_target,
+                        should_run_carving,
+                        workers,
+                    )
+                    if should_run_bulk_extractor:
+                        _advance_step3_progress(4, f"Bulk Extractor completed ({_extract_row_count(be_r)} features)...")
+                    return be_r
+
+                def _dc_worker() -> Dict[str, Any]:
+                    dc_r = self._run_data_carver_stage(
+                        should_run_carving,
+                        effective_evidence_target,
+                        workers,
+                    )
+                    if should_run_carving:
+                        _advance_step3_progress(4, f"Data Carver completed ({_extract_row_count(dc_r)} carved files)...")
+                    return dc_r
+
+                with ThreadPoolExecutor(max_workers=2) as raw_pool:
+                    f_be = raw_pool.submit(_be_worker)
+                    f_dc = raw_pool.submit(_dc_worker)
+                    bulk_extractor_res = f_be.result()
+                    carver_res = f_dc.result()
+            else:
+                bulk_extractor_res = self._run_bulk_extractor_stage(
+                    False, effective_evidence_target, False, workers
+                )
+                carver_res = self._run_data_carver_stage(
+                    False, effective_evidence_target, workers
+                )
 
             # -------------------------------------------------------------
             # STEP 4: File Enrichment (IOC/SHA256, YARA-X, Stinger, RapidOCR)
@@ -1848,6 +1935,14 @@ class ProcessingPipeline:
                 )
                 t_enr = time.time()
                 try:
+                    def _on_enrich_progress(enr_pct: int, enr_msg: str) -> None:
+                        self._update_status(
+                            "RUNNING",
+                            enr_pct,
+                            enr_msg,
+                            progress_callback=progress_callback,
+                        )
+
                     enr_fn = getattr(self.enricher, "run_full_enrichment", None) or getattr(self.enricher, "run")
                     enr_raw = _call_with_supported_kwargs(
                         enr_fn,
@@ -1856,6 +1951,7 @@ class ProcessingPipeline:
                         enable_ocr=eff_ocr,
                         enable_ioc=eff_ioc,
                         max_workers=workers,
+                        progress_hook=_on_enrich_progress,
                     )
                     if isinstance(enr_raw, dict):
                         enrichment_results = _extract_table_counts_dict(enr_raw)

@@ -824,7 +824,7 @@ export const ArtifactGrid: React.FC<ArtifactGridProps> = ({
                 <strong>{colName}:</strong> {vals.length} selected
                 <button
                   onClick={() => handleClearColumnFilter(colName)}
-                  className="p-0.5 hover:bg-slate-100 dark:hover:bg-slate-800 rounded text-slate-500 hover:text-slate-800 cursor-pointer"
+                  className="p-0.5 hover:bg-slate-100 dark:hover:bg-slate-800 rounded text-slate-500 hover:text-slate-800 dark:hover:text-slate-200 cursor-pointer"
                   title="Remove filter"
                 >
                   <X className="w-3 h-3" />

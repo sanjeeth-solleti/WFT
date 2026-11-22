@@ -56,6 +56,14 @@ CARVE_MODE_NAMES: Tuple[str, ...] = (
     "zip_carved_carve_mode",
 )
 
+_ENABLED_CARVE_MODES: Set[str] = {
+    "jpeg_carve_mode",
+    "zip_carved_carve_mode",
+    "rar_carve_mode",
+    "unrar_carved_carve_mode",
+    "sqlite_carved_carve_mode",
+}
+
 CARVING_FLAGS: List[str] = [
     "-S",
     "jpeg_carve_mode=2",
@@ -67,6 +75,12 @@ CARVING_FLAGS: List[str] = [
     "unrar_carved_carve_mode=2",
     "-S",
     "sqlite_carved_carve_mode=2",
+    *[
+        flag
+        for _mode_name in CARVE_MODE_NAMES
+        if _mode_name not in _ENABLED_CARVE_MODES
+        for flag in ("-S", f"{_mode_name}=0")
+    ],
 ]
 
 DISABLE_CARVING_FLAGS: List[str] = [
@@ -80,6 +94,13 @@ EXCLUDED_TXT_FILES: Set[str] = {
     "alerts.txt",
     "rtti.txt",
     "aes_keys.txt",
+    "ntfsusn_carved.txt",
+    "ntfsmft_carved.txt",
+    "ntfsindx_carved.txt",
+    "ntfslogfile_carved.txt",
+    "winpe_carved.txt",
+    "evtx_carved.txt",
+    "utmp_carved.txt",
 }
 
 _BOGUS_FILE_TLDS: Set[str] = {

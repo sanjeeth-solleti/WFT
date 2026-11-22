@@ -26,6 +26,7 @@ import time
 import xml.etree.ElementTree as ET
 import zipfile
 import zlib
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
@@ -1674,41 +1675,48 @@ class DocumentParser(BaseParser):
         if not self.staging_dir.exists():
             return
 
-        for p in self.staging_dir.rglob("*"):
-            if not p.is_file():
-                continue
-            if not self._is_zone_identifier_filename(p):
-                fn_low = p.name.lower()
-                self.candidate_filename_counts[fn_low] = (
-                    self.candidate_filename_counts.get(fn_low, 0) + 1
-                )
-                continue
+        staging_res = self.staging_dir.resolve()
+        for walk_root, dirs, files in os.walk(staging_res):
+            root_p = Path(walk_root)
+            if root_p == staging_res:
+                dirs[:] = [
+                    d for d in dirs
+                    if d.lower() not in _NON_DOC_STAGING_SUBTREES
+                ]
+            for fname in files:
+                p = root_p / fname
+                if not self._is_zone_identifier_filename(p):
+                    fn_low = fname.lower()
+                    self.candidate_filename_counts[fn_low] = (
+                        self.candidate_filename_counts.get(fn_low, 0) + 1
+                    )
+                    continue
 
-            text = _read_zone_text(p)
-            if not text:
-                continue
-            meta = parse_zone_identifier(text)
-            if not meta.get("valid"):
-                continue
+                text = _read_zone_text(p)
+                if not text:
+                    continue
+                meta = parse_zone_identifier(text)
+                if not meta.get("valid"):
+                    continue
 
-            zone_key = str(p.resolve()).lower()
-            meta["source_file"] = self.resolve_evidence_path(p)
-            meta["_zone_path_key"] = zone_key
-            self.zone_by_zone_path[zone_key] = meta
+                zone_key = str(p.resolve()).lower()
+                meta["source_file"] = self.resolve_evidence_path(p)
+                meta["_zone_path_key"] = zone_key
+                self.zone_by_zone_path[zone_key] = meta
 
-            clean_name = re.sub(r"(?i)[:._]zone\.identifier.*$", "", p.name)
-            if clean_name:
-                same_dir_target = (p.parent / clean_name).resolve()
-                self.zone_by_target_path[str(same_dir_target).lower()] = meta
-                vss_prefix, part_prefix, _bkt, canonical_subpath, is_flat_zone = (
-                    self._normalize_staging_motw_subpath(p, override_leaf_name=clean_name)
-                )
-                if is_flat_zone:
-                    self.zone_staging_by_name.setdefault(
-                        (vss_prefix, clean_name.lower()), []
-                    ).append(meta)
-                elif canonical_subpath and "/" in canonical_subpath:
-                    self.zone_by_canonical_subpath[(vss_prefix, part_prefix, canonical_subpath)] = meta
+                clean_name = re.sub(r"(?i)[:._]zone\.identifier.*$", "", p.name)
+                if clean_name:
+                    same_dir_target = (p.parent / clean_name).resolve()
+                    self.zone_by_target_path[str(same_dir_target).lower()] = meta
+                    vss_prefix, part_prefix, _bkt, canonical_subpath, is_flat_zone = (
+                        self._normalize_staging_motw_subpath(p, override_leaf_name=clean_name)
+                    )
+                    if is_flat_zone:
+                        self.zone_staging_by_name.setdefault(
+                            (vss_prefix, clean_name.lower()), []
+                        ).append(meta)
+                    elif canonical_subpath and "/" in canonical_subpath:
+                        self.zone_by_canonical_subpath[(vss_prefix, part_prefix, canonical_subpath)] = meta
 
     def _get_zone_info_for_file(self, file_path: Path) -> Dict[str, Any]:
         """Path-scoped MOTW lookup supporting EvidenceExtractor Part_<N> trees with zero cross-folder/partition bleed."""
@@ -2384,13 +2392,14 @@ class DocumentParser(BaseParser):
             return None
         return None
 
-    def parse(self) -> Dict[str, int]:
+    def parse(self, max_workers: int = 16) -> Dict[str, int]:
         """
         Scan staging directory for Office/PDF documents, TXT/CSV/RTF files, and Zone.Identifier streams.
         Populates parsed_documents_metadata and parsed_text_documents safely under DuckDBManager.get_lock.
         """
         start_time = time.time()
-        self._log(f"Starting DocumentParser across staging directory: {self.staging_dir}")
+        workers = max(1, min(32, int(max_workers or 16)))
+        self._log(f"Starting DocumentParser across staging directory: {self.staging_dir} (workers={workers})")
 
         self._preload_vfs_time_cache()
         self._discover_and_cache_zone_identifiers()
@@ -2402,57 +2411,96 @@ class DocumentParser(BaseParser):
         candidate_txt_docs: List[Path] = []
         candidate_zones: List[Path] = []
 
+        # Known non-document binary extensions that never need disguised-doc header sniffing
+        _SKIP_DISGUISED_EXTS: Set[str] = {
+            ".evtx", ".etl", ".pf", ".dll", ".exe", ".sys", ".mui", ".cat", ".nls",
+            ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".ico", ".svg", ".tif", ".tiff",
+            ".mp4", ".mp3", ".wav", ".avi", ".mov", ".mkv", ".flac", ".ogg", ".webm",
+            ".sqlite", ".sqlite3", ".db", ".db-wal", ".db-shm", ".hve", ".regtrans-ms", ".blf",
+            ".log1", ".log2", ".lnk", ".ttf", ".otf", ".woff", ".woff2", ".eot", ".css", ".map",
+            ".duckdb", ".wal", ".pak", ".asar", ".vdm",
+        }
+
         if self.staging_dir.exists():
-            for p in self.staging_dir.rglob("*"):
-                if not p.is_file():
-                    continue
-                sfx = p.suffix.lower()
-                if self._is_zone_identifier_filename(p):
-                    candidate_zones.append(p)
-                elif sfx in self.DOC_EXTENSIONS:
-                    candidate_docs.append((p, None))
-                else:
-                    disguised_sfx = self._detect_disguised_office_or_pdf(p)
-                    if disguised_sfx is not None:
-                        candidate_docs.append((p, disguised_sfx))
-                    elif sfx in self.TXT_DOC_EXTENSIONS and self._is_eligible_text_document(p):
-                        candidate_txt_docs.append(p)
+            staging_res = self.staging_dir.resolve()
+            for walk_root, dirs, files in os.walk(staging_res):
+                root_p = Path(walk_root)
+                # Prune known non-document OS metadata staging roots at top level (keep ZoneIdentifier)
+                if root_p == staging_res:
+                    dirs[:] = [
+                        d for d in dirs
+                        if d.lower() not in _NON_DOC_STAGING_SUBTREES
+                    ]
+                for fname in files:
+                    p = root_p / fname
+                    sfx = p.suffix.lower()
+                    if self._is_zone_identifier_filename(p):
+                        candidate_zones.append(p)
+                    elif sfx in self.DOC_EXTENSIONS:
+                        candidate_docs.append((p, None))
+                    elif sfx not in _SKIP_DISGUISED_EXTS:
+                        disguised_sfx = self._detect_disguised_office_or_pdf(p)
+                        if disguised_sfx is not None:
+                            candidate_docs.append((p, disguised_sfx))
+                        elif sfx in self.TXT_DOC_EXTENSIONS and self._is_eligible_text_document(p):
+                            candidate_txt_docs.append(p)
 
         self._log(
             f"Found {len(candidate_docs)} Office/PDF docs, {len(candidate_txt_docs)} TXT/CSV/RTF docs, "
             f"and {len(candidate_zones)} candidate Zone.Identifier files."
         )
 
-        # 1. Parse Office & PDF documents
-        for doc_file, sfx_override in candidate_docs:
+        # 1. Parse Office & PDF documents concurrently
+        def _parse_one_doc(item: Tuple[Path, Optional[str]]) -> Optional[Dict[str, Any]]:
+            doc_file, sfx_override = item
             sfx = sfx_override or doc_file.suffix.lower()
             try:
                 if sfx == ".pdf":
-                    rec = self._parse_pdf(doc_file)
-                elif sfx in (".docx", ".docm"):
-                    rec = self._parse_docx(doc_file, ext_override=sfx_override)
-                elif sfx in (".xlsx", ".xlsm"):
-                    rec = self._parse_xlsx(doc_file, ext_override=sfx_override)
-                elif sfx in (".pptx", ".pptm"):
-                    rec = self._parse_pptx(doc_file, ext_override=sfx_override)
-                elif sfx in (".doc", ".xls", ".ppt"):
-                    rec = self._parse_ole_legacy(doc_file, ext_override=sfx_override)
-                else:
-                    continue
-                all_doc_records.append(rec)
+                    return self._parse_pdf(doc_file)
+                if sfx in (".docx", ".docm"):
+                    return self._parse_docx(doc_file, ext_override=sfx_override)
+                if sfx in (".xlsx", ".xlsm"):
+                    return self._parse_xlsx(doc_file, ext_override=sfx_override)
+                if sfx in (".pptx", ".pptm"):
+                    return self._parse_pptx(doc_file, ext_override=sfx_override)
+                if sfx in (".doc", ".xls", ".ppt"):
+                    return self._parse_ole_legacy(doc_file, ext_override=sfx_override)
+                return None
             except Exception as ex:
                 self._log(f"Error parsing document {doc_file}: {ex}", "WARNING")
+                return None
 
-        # 2. Parse TXT / CSV / RTF into BOTH parsed_text_documents and parsed_documents_metadata
-        for txt_file in candidate_txt_docs:
+        if workers > 1 and len(candidate_docs) > 2:
+            with ThreadPoolExecutor(max_workers=min(workers, len(candidate_docs))) as pool:
+                for rec in pool.map(_parse_one_doc, candidate_docs):
+                    if rec is not None:
+                        all_doc_records.append(rec)
+        else:
+            for item in candidate_docs:
+                rec = _parse_one_doc(item)
+                if rec is not None:
+                    all_doc_records.append(rec)
+
+        # 2. Parse TXT / CSV / RTF concurrently into BOTH parsed_text_documents and parsed_documents_metadata
+        def _parse_one_txt(txt_file: Path) -> Optional[Tuple[Dict[str, Any], Dict[str, Any]]]:
             try:
-                parsed_pair = self._parse_text_csv_rtf(txt_file)
-                if parsed_pair is not None:
-                    doc_rec, txt_rec = parsed_pair
-                    all_doc_records.append(doc_rec)
-                    all_txt_records.append(txt_rec)
+                return self._parse_text_csv_rtf(txt_file)
             except Exception as ex:
                 self._log(f"Error parsing text document {txt_file}: {ex}", "WARNING")
+                return None
+
+        if workers > 1 and len(candidate_txt_docs) > 2:
+            with ThreadPoolExecutor(max_workers=min(workers, len(candidate_txt_docs))) as pool:
+                for parsed_pair in pool.map(_parse_one_txt, candidate_txt_docs):
+                    if parsed_pair is not None:
+                        all_doc_records.append(parsed_pair[0])
+                        all_txt_records.append(parsed_pair[1])
+        else:
+            for txt_file in candidate_txt_docs:
+                parsed_pair = _parse_one_txt(txt_file)
+                if parsed_pair is not None:
+                    all_doc_records.append(parsed_pair[0])
+                    all_txt_records.append(parsed_pair[1])
 
         # 3. Parse strictly validated standalone Zone.Identifier files
         for zone_file in candidate_zones:

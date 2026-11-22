@@ -16,6 +16,7 @@ import email.utils
 import hashlib
 import json
 import math
+import os
 import re
 import shutil
 import sqlite3
@@ -332,9 +333,12 @@ class ChromiumParser(BaseParser):
 
     def _rel_parts_under_staging(self, file_path: Path) -> Tuple[str, ...]:
         try:
-            return file_path.resolve().relative_to(self.staging_dir).parts
-        except Exception:
-            return file_path.parts
+            return file_path.relative_to(self.staging_dir).parts
+        except ValueError:
+            try:
+                return file_path.resolve().relative_to(self.staging_dir.resolve()).parts
+            except Exception:
+                return file_path.parts
 
     def _should_skip_path(self, file_path: Path) -> bool:
         fname = file_path.name.lower()
@@ -906,8 +910,20 @@ class ChromiumParser(BaseParser):
                 prio = 1
             return (prio, str(fp))
 
+        _SKIP_BROWSER_ROOTS = {
+            "registry", "logs", "prefetch", "filesystem", "mft", "srum",
+            "jumplists", "tasks", "powershell", "rmm", "carved_thumbnails", "zoneidentifier",
+        }
         try:
-            all_files = [p for p in self.staging_dir.rglob("*") if p.is_file()]
+            all_files: List[Path] = []
+            if self.staging_dir.exists():
+                staging_res = self.staging_dir.resolve()
+                for walk_root, dirs, files in os.walk(staging_res):
+                    root_p = Path(walk_root)
+                    if root_p == staging_res:
+                        dirs[:] = [d for d in dirs if d.lower() not in _SKIP_BROWSER_ROOTS]
+                    for fname in files:
+                        all_files.append(root_p / fname)
             all_files.sort(key=_file_priority)
 
             for idx, file_path in enumerate(all_files):

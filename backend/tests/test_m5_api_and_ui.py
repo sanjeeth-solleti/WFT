@@ -884,21 +884,20 @@ def test_process_wizard_initial_options_presets_keywords_and_tool_paths(
     page.get_by_role("button", name="Quick Triage").click()
     assert page.get_by_text("Off").first.is_visible()
 
-    # Re-apply Comprehensive IR, then toggle Enable YARA-X & Enable Trellix Stinger OFF in Step 3 ->
-    # verify checkboxes uncheck and submitted POST /api/cases/process excludes both IDs!
+    # Re-apply Comprehensive IR, then toggle YARA-X & Trellix Stinger OFF in Step 3 ->
+    # verify redundant "Integrated Forensic & Threat Engines" panel is absent in every pane,
+    # checkboxes uncheck, and submitted POST /api/cases/process excludes both IDs!
     page.get_by_role("button", name="Comprehensive IR").click()
     page.get_by_text("Processing Options", exact=False).first.click()
+    assert page.get_by_text("Integrated Forensic & Threat Engines").count() == 0
     page.get_by_role("button", name="Malware & Threat Hunting").click()
-    yara_engine_toggle = page.locator("label", has_text="Enable YARA-X Malware Scanning").locator(
-        "input[type='checkbox']"
-    )
-    stinger_engine_toggle = page.locator("label", has_text="Enable Trellix Stinger").locator(
-        "input[type='checkbox']"
-    )
-    yara_engine_toggle.uncheck()
-    stinger_engine_toggle.uncheck()
-    assert not page.get_by_test_id("artifact-checkbox-artifact_yara_hits").is_checked()
-    assert not page.get_by_test_id("artifact-checkbox-artifact_stinger_hits").is_checked()
+    assert page.get_by_text("Integrated Forensic & Threat Engines").count() == 0
+    yara_box = page.get_by_test_id("artifact-checkbox-artifact_yara_hits")
+    stinger_box = page.get_by_test_id("artifact-checkbox-artifact_stinger_hits")
+    yara_box.uncheck()
+    stinger_box.uncheck()
+    assert not yara_box.is_checked()
+    assert not stinger_box.is_checked()
 
     # Step 3 Pre-run Keyword Staging -> stages locally with ZERO POST /keywords requests and ZERO pending_wizard_case DB
     page.get_by_role("button", name="Keyword Lists to Search (0)").click()
@@ -1461,6 +1460,325 @@ def test_challenger2_subview_dedup_malware_badge_zindex_and_source_row_id_bookma
     page.get_by_role("button", name="Clear filters").click()
     assert page_errors == []
     assert duplicate_key_errors == []
+
+
+def test_single_examine_button_disabled_until_complete_persisted_details_and_theme(
+    m5_server: Dict[str, Any],
+    ui_page,
+) -> None:
+    """
+    Verify:
+    1. Only a single Examine Artifacts button exists in ProcessWizard (no Go to Examine / View in Examine).
+    2. Examine Artifacts stays disabled while processing is RUNNING and enables only when COMPLETED/SUCCESS.
+    3. Processing details (case name, ticket, examiner, source path) persist when switching away and clicking Logs.
+    4. Light/Dark theme toggle applies `.dark` class and `color-scheme` cleanly without errors.
+    """
+    page, page_errors, duplicate_key_errors = ui_page
+    page.goto(m5_server["base_url"], wait_until="networkidle")
+
+    custom_case = "Custom_DFIR_Case_2026"
+    mock_status_state = {"status": "RUNNING", "progress": 35}
+
+    def _intercept_process(route) -> None:
+        if route.request.method == "POST":
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps({
+                    "case_id": custom_case,
+                    "case_name": custom_case,
+                    "status": "RUNNING",
+                    "message": "Started",
+                }),
+            )
+        else:
+            route.continue_()
+
+    def _intercept_status(route) -> None:
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({
+                "case_id": custom_case,
+                "case_name": custom_case,
+                "case_metadata": {
+                    "case_name": custom_case,
+                    "case_number": "INC-9999",
+                    "examiner": "Examiner_Alice",
+                    "source_path": str(m5_server["mock_evidence_dir"]),
+                },
+                "status": mock_status_state["status"],
+                "progress": mock_status_state["progress"],
+                "current_step": "Running parsers..." if mock_status_state["status"] == "RUNNING" else "Completed",
+                "logs": [],
+                "total_logs": 0,
+            }),
+        )
+
+    page.route("**/api/cases/process", _intercept_process)
+    page.route(f"**/api/cases/{custom_case}/status", _intercept_status)
+
+    # 1. Open Process modal & verify Step 4 before starting does NOT enable Examine Artifacts for an old case
+    page.locator("button[title='Create New Case / Process Evidence']").click()
+    assert page.get_by_role("button", name="Go to Examine").count() == 0
+    assert page.get_by_role("button", name="View in Examine").count() == 0
+    page.get_by_text("Execution Monitor", exact=False).first.click()
+    assert page.get_by_test_id("examine-artifacts-btn").is_disabled(), (
+        "Examine Artifacts must be disabled on a brand-new modal before processing starts"
+    )
+    page.get_by_text("Case Details", exact=False).first.click()
+
+    case_name_input = page.locator("input[placeholder*='Incident_']")
+    case_name_input.fill(custom_case)
+    ticket_input = page.locator("input[placeholder*='DFIR-']")
+    ticket_input.fill("INC-9999")
+    examiner_input = page.locator("input[placeholder*='Senior DFIR Specialist']")
+    examiner_input.fill("Examiner_Alice")
+
+    # Step 2: enter mock evidence path
+    page.get_by_text("Evidence Source", exact=False).first.click()
+    evidence_input = page.locator("input[placeholder*='TriageFolder']")
+    evidence_input.fill(str(m5_server["mock_evidence_dir"]))
+
+    # Start processing
+    page.get_by_role("button", name="Process Evidence Now").click()
+    page.get_by_test_id("processing-case-name").wait_for(state="visible", timeout=5000)
+
+    # 2. Verify only ONE Examine button exists and is DISABLED while RUNNING
+    assert page.get_by_role("button", name="Go to Examine").count() == 0
+    assert page.get_by_role("button", name="View in Examine").count() == 0
+    examine_btn = page.get_by_test_id("examine-artifacts-btn")
+    assert examine_btn.count() == 1
+    assert examine_btn.is_disabled(), "Examine Artifacts must be disabled while processing is RUNNING"
+    assert page.get_by_test_id("processing-case-name").inner_text().strip() == custom_case
+
+    # 3. Close modal, go to Artifacts, then click Logs -> verify details did NOT reset to default!
+    page.locator("button[title='Close Wizard']").click()
+    page.wait_for_timeout(200)
+    page.locator("button[title*='Execution Logs']").click()
+    page.get_by_test_id("processing-case-name").wait_for(state="visible", timeout=5000)
+
+    assert page.get_by_test_id("processing-case-name").inner_text().strip() == custom_case
+    assert page.get_by_text("INC-9999").first.is_visible()
+    assert page.get_by_text("Examiner_Alice").first.is_visible()
+    assert page.get_by_role("button", name="Go to Examine").count() == 0
+    assert page.get_by_role("button", name="View in Examine").count() == 0
+    examine_btn_tab = page.get_by_test_id("examine-artifacts-btn")
+    assert examine_btn_tab.count() == 1
+    assert examine_btn_tab.is_disabled(), "Examine Artifacts must remain disabled in Logs tab while RUNNING"
+
+    # Also verify Step 1 input kept custom_case instead of resetting to default Incident_YYYYMMDD
+    page.get_by_text("Case Details", exact=False).first.click()
+    assert page.locator("input[placeholder*='Incident_']").input_value() == custom_case
+    page.get_by_text("Execution Monitor", exact=False).first.click()
+
+    # 3b. Reload browser mid-processing -> verify sessionStorage restores RUNNING case & keeps Examine Artifacts disabled
+    page.reload(wait_until="networkidle")
+    assert page.locator("button[title*='Pipeline Running']").count() == 1, (
+        "Logs button should indicate pipeline is still RUNNING after browser reload"
+    )
+    page.locator("button[title*='Execution Logs']").click()
+    page.get_by_test_id("processing-case-name").wait_for(state="visible", timeout=5000)
+    assert page.get_by_test_id("processing-case-name").inner_text().strip() == custom_case
+    assert page.get_by_test_id("examine-artifacts-btn").is_disabled(), (
+        "Examine Artifacts must stay disabled after page reload while RUNNING"
+    )
+
+    # 4. Transition status to COMPLETED -> Examine Artifacts becomes ENABLED and navigates to Artifacts
+    mock_status_state["status"] = "COMPLETED"
+    mock_status_state["progress"] = 100
+    page.wait_for_function(
+        "() => { const b = document.querySelector('[data-testid=\"examine-artifacts-btn\"]'); return b && !b.disabled; }",
+        timeout=8000,
+    )
+    assert page.locator("button[title*='Pipeline Running']").count() == 0, (
+        "Running indicator on Logs button must clear once processing completes"
+    )
+    examine_btn_tab = page.get_by_test_id("examine-artifacts-btn")
+    examine_btn_tab.click()
+    page.wait_for_timeout(300)
+    assert page.get_by_test_id("processing-case-name").count() == 0
+
+    # 4b. Open Logs again -> verify it switches cleanly to the seeded case's real metadata case_name (not stuck on Custom_DFIR_Case_2026)
+    page.locator("button[title*='Execution Logs']").click()
+    page.get_by_test_id("processing-case-name").wait_for(state="visible", timeout=5000)
+    page.wait_for_function(
+        "(expected) => { const el = document.querySelector('[data-testid=\"processing-case-name\"]'); return el && el.textContent && el.textContent.trim() === expected; }",
+        arg="M5 AXIOM Verification Case",
+        timeout=8000,
+    )
+
+    # 5. Theme toggle verification (Light <-> Dark + color-scheme)
+    theme_btn = page.locator("button[aria-label*='Switch to Dark theme']").first
+    if theme_btn.is_visible():
+        theme_btn.click()
+        page.wait_for_timeout(150)
+        is_dark = page.evaluate("() => document.documentElement.classList.contains('dark')")
+        cs = page.evaluate("() => getComputedStyle(document.documentElement).colorScheme")
+        assert is_dark is True
+        assert "dark" in cs
+        page.locator("button[aria-label*='Switch to Light theme']").first.click()
+        page.wait_for_timeout(150)
+        assert page.evaluate("() => document.documentElement.classList.contains('dark')") is False
+
+    page.unroute("**/api/cases/process")
+    page.unroute(f"**/api/cases/{custom_case}/status")
+
+    assert page_errors == []
+    assert duplicate_key_errors == []
+
+
+def test_ost_v36_4k_zlib_and_case_deletion_permission_and_race_guarantees(tmp_path) -> None:
+    """
+    Verify:
+    1. Outlook 2013+ Unicode 4K OST (wVer=36) with deflate-compressed BBT leaf blocks AND multi-level XBLOCK/SLBLOCK attachments parses cleanly in _PurePythonPstNdb.
+    2. BulkExtractorRunner CARVING_FLAGS selectively disables the 10 noisy internal carvers while enabling the 5 user-facing carvers.
+    3. Target case folder deletion succeeds without PermissionError even with read-only/system attributes on directories,
+       an actively running child subprocess inside the case directory, and concurrent background threads attempting
+       log_processing_event / get_connection after delete_case.
+    """
+    import ctypes
+    import shutil
+    import struct
+    import subprocess
+    import zlib
+    from backend.config import register_case_dir
+    from backend.db.engine import DuckDBManager, init_case_db, log_processing_event
+    from backend.main import _release_transient_http_db_connections, delete_case
+    from backend.orchestrator.bulk_extractor_runner import CARVING_FLAGS
+    from backend.parsers.email_parser import _PurePythonPstNdb
+
+    # 1. BulkExtractorRunner CARVING_FLAGS check
+    flags_joined = " ".join(CARVING_FLAGS)
+    assert "jpeg_carve_mode=2" in flags_joined
+    assert "sqlite_carved_carve_mode=2" in flags_joined
+    assert "ntfsusn_carved_carve_mode=0" in flags_joined
+    assert "ntfsmft_carved_carve_mode=0" in flags_joined
+    assert "evtx_carved_carve_mode=0" in flags_joined
+
+    # 2. Outlook 2013+ Unicode 4K OST (wVer=36) with zlib-compressed BBT leaf blocks + XBLOCK + SLBLOCK
+    raw_block_part1 = b"Subject: NIST Informant Leak\r\nFrom: iaman.informant@nist.gov\r\nTo: handler@external.org\r\n\r\n"
+    raw_block_part2 = b"Confidential blueprint attached in XBLOCK multi-chunk body."
+    comp_part1 = zlib.compress(raw_block_part1)
+    comp_part2 = zlib.compress(raw_block_part2)
+
+    # XBLOCK (btype=0x01, cLevel=0x01, cEnt=2, lcbTotal=len(p1)+len(p2), child BIDs: 0x100, 0x104)
+    raw_xblock = struct.pack("<BBHIQQ", 0x01, 0x01, 2, len(raw_block_part1) + len(raw_block_part2), 0x100, 0x104)
+    comp_xblock = zlib.compress(raw_xblock)
+
+    # SLBLOCK (btype=0x02, cLevel=0x00, cEnt=1, dwPadding=0, entry: sub_nid=0x8005 (attachment type 0x05), sub_bid_data=0x100, sub_bid_sub=0)
+    raw_slblock = struct.pack("<BBHIQQQ", 0x02, 0x00, 1, 0, 0x8005, 0x100, 0)
+    comp_slblock = zlib.compress(raw_slblock)
+
+    ost_buf = bytearray(4096 * 6)
+    # Header: '!BDN', wMagicClient='SO' (0x4F53), wVer=36, bPlatformCreate=1, bPlatformAccess=1
+    struct.pack_into("<I", ost_buf, 0, 0x4E444221)
+    struct.pack_into("<H", ost_buf, 8, 0x4F53)
+    struct.pack_into("<H", ost_buf, 10, 36)
+    ost_buf[14] = 1
+    ost_buf[15] = 1
+    # Root BREFNBT at 180..216 (ib at 224 -> page at 4096), BREFBBT (ib at 240 -> page at 8192)
+    struct.pack_into("<Q", ost_buf, 224, 4096)
+    struct.pack_into("<Q", ost_buf, 240, 8192)
+    ost_buf[513] = 0  # bCryptMethod = NDB_CRYPT_NONE
+
+    # 4K NBT Leaf Page at offset 4096 (trailer at 4096 + 4056)
+    # 1 NBT entry (32 bytes): nid=0x200024 (message type 0x04), bidData=0x202 (XBLOCK internal bit 0x02), bidSub=0x302 (SLBLOCK internal bit 0x02), nidParent=0x122
+    struct.pack_into("<QQQII", ost_buf, 4096, 0x200024, 0x202, 0x302, 0x122, 0)
+    struct.pack_into("<H", ost_buf, 4096 + 4056, 1)    # cEnt = 1
+    struct.pack_into("<H", ost_buf, 4096 + 4058, 126)  # cEntMax = 126
+    ost_buf[4096 + 4060] = 32  # cbEnt = 32
+    ost_buf[4096 + 4061] = 0   # cLevel = 0 (leaf)
+
+    # 4K BBT Leaf Page at offset 8192 (4 BBT entries: 0x100, 0x104, 0x202, 0x302)
+    struct.pack_into("<QQHHI", ost_buf, 8192 + 0 * 24, 0x100, 12288, len(comp_part1), len(raw_block_part1), 0)
+    struct.pack_into("<QQHHI", ost_buf, 8192 + 1 * 24, 0x104, 13000, len(comp_part2), len(raw_block_part2), 0)
+    struct.pack_into("<QQHHI", ost_buf, 8192 + 2 * 24, 0x202, 14000, len(comp_xblock), len(raw_xblock), 0)
+    struct.pack_into("<QQHHI", ost_buf, 8192 + 3 * 24, 0x302, 15000, len(comp_slblock), len(raw_slblock), 0)
+    struct.pack_into("<H", ost_buf, 8192 + 4056, 4)    # cEnt = 4
+    struct.pack_into("<H", ost_buf, 8192 + 4058, 169)  # cEntMax = 169
+    ost_buf[8192 + 4060] = 24  # cbEnt = 24
+    ost_buf[8192 + 4061] = 0   # cLevel = 0 (leaf)
+
+    ost_buf[12288 : 12288 + len(comp_part1)] = comp_part1
+    ost_buf[13000 : 13000 + len(comp_part2)] = comp_part2
+    ost_buf[14000 : 14000 + len(comp_xblock)] = comp_xblock
+    ost_buf[15000 : 15000 + len(comp_slblock)] = comp_slblock
+
+    ndb = _PurePythonPstNdb(bytes(ost_buf))
+    assert ndb.valid is True
+    assert ndb.is_unicode is True
+    assert ndb.is_4k is True
+    assert any(entry[0] == 0x200024 for entry in ndb.nbt)
+    # Direct leaf decompression
+    assert ndb._read_bbt_block(0x100) == raw_block_part1
+    # Multi-block XBLOCK tree decompression
+    xblock_chunks = ndb.read_block_list(0x202)
+    assert b"".join(xblock_chunks) == raw_block_part1 + raw_block_part2
+    # SLBLOCK attachment subnode tree decompression
+    subnodes = ndb.read_subnodes(0x302)
+    assert 0x8005 in subnodes
+    assert subnodes[0x8005][0] == 0x100
+
+    # 3. Target case folder deletion with read-only directory attributes, active child subprocess & concurrent worker race
+    del_cid = "test_del_perm_case"
+    custom_target = (tmp_path / "CustomTargetFolder" / del_cid).resolve()
+    custom_target.mkdir(parents=True, exist_ok=True)
+    register_case_dir(del_cid, custom_target)
+    init_case_db(del_cid)
+
+    ro_subdir = custom_target / "staging" / "$Recycle.Bin" / "S-1-5-21-1000"
+    ro_subdir.mkdir(parents=True, exist_ok=True)
+    ro_file = ro_subdir / "$R12345.txt"
+    ro_file.write_text("evidence", encoding="utf-8")
+    if sys.platform == "win32":
+        # Set FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_HIDDEN on both file and directory
+        ctypes.windll.kernel32.SetFileAttributesW(str(ro_file), 0x01 | 0x02 | 0x04)
+        ctypes.windll.kernel32.SetFileAttributesW(str(ro_subdir), 0x01 | 0x02 | 0x04)
+
+    # Spawn a live child subprocess holding a file handle and cwd inside custom_target (simulating active tool execution)
+    locked_child_file = custom_target / "staging" / "child_locked.tmp"
+    child_proc = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import time, sys; f = open(sys.argv[1], 'wb'); f.write(b'LOCKED'); f.flush(); time.sleep(30)",
+            str(locked_child_file),
+        ],
+        cwd=str(custom_target),
+    )
+    try:
+        # Wait until child process actually creates & locks the file
+        for _ in range(30):
+            if locked_child_file.exists():
+                break
+            time.sleep(0.05)
+        assert locked_child_file.exists()
+
+        res = delete_case(del_cid)
+        assert res["status"] == "SUCCESS"
+        assert not custom_target.exists()
+        assert child_proc.poll() is not None, "_terminate_case_subprocesses must terminate active child subprocesses!"
+        assert DuckDBManager.is_case_deleted(del_cid) is True
+    finally:
+        if child_proc.poll() is None:
+            child_proc.kill()
+
+    # Simulate late background thread calling log_processing_event and get_connection after delete_case
+    log_processing_event(del_cid, "LateWorker", "cmd", 0, 0, 10, "SUCCESS")
+    with pytest.raises(FileNotFoundError):
+        DuckDBManager.get_connection(del_cid, read_only=False)
+    assert not custom_target.exists(), "Late worker thread must NEVER resurrect deleted case folder!"
+
+    # Re-initializing the same case ID later must unmark deleted status and succeed
+    custom_target.mkdir(parents=True, exist_ok=True)
+    register_case_dir(del_cid, custom_target)
+    init_case_db(del_cid)
+    assert DuckDBManager.is_case_deleted(del_cid) is False
+    DuckDBManager.close_connection(del_cid)
+    _release_transient_http_db_connections()
+    shutil.rmtree(custom_target)
+    assert not custom_target.exists()
 
 
 if __name__ == "__main__":

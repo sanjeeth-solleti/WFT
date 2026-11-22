@@ -199,18 +199,129 @@ app = FastAPI(
 )
 
 
+_http_req_lock = threading.Lock()
+_active_http_requests = 0
+_pre_http_open_db_keys: set[str] = set()
+_pre_http_snapshot_taken = False
+_idle_release_timer: Optional[threading.Timer] = None
+_IDLE_DB_RELEASE_DELAY_SEC = 1.5
+
+
+def _release_transient_http_db_connections() -> None:
+    """
+    Close transient DuckDB connections opened during HTTP requests for idle cases
+    (not in _running_cases and not pre-opened by direct Python test fixtures),
+    preventing lingering OS file locks on case.duckdb when deleting case folders in Windows Explorer.
+    """
+    try:
+        with _http_req_lock:
+            if _active_http_requests > 0:
+                return
+        with _running_cases_lock:
+            running_cids = set(_running_cases)
+        running_db_keys: set[str] = set()
+        for rcid in running_cids:
+            try:
+                _, r_key = DuckDBManager._resolve_db_key(rcid)
+                running_db_keys.add(r_key)
+            except Exception:
+                pass
+
+        with DuckDBManager._instance_lock:
+            candidate_keys = [
+                k
+                for k in list(DuckDBManager._connections.keys())
+                if k not in _pre_http_open_db_keys and k not in running_db_keys
+            ]
+            lock_pairs = [
+                (k, DuckDBManager._case_locks.get(k))
+                for k in candidate_keys
+            ]
+
+        for db_key, case_lock in lock_pairs:
+            if case_lock is None:
+                continue
+            with _http_req_lock:
+                if _active_http_requests > 0:
+                    return
+            acquired = case_lock.acquire(timeout=0.02)
+            if not acquired:
+                continue
+            try:
+                with DuckDBManager._instance_lock:
+                    if db_key in _pre_http_open_db_keys or db_key in running_db_keys:
+                        continue
+                    is_ro = db_key in DuckDBManager._ro_connections or DuckDBManager._is_read_only.get(db_key, False)
+                    conn = DuckDBManager._connections.pop(db_key, None)
+                    DuckDBManager._is_read_only.pop(db_key, None)
+                    DuckDBManager._ro_connections.discard(db_key)
+                    DuckDBManager._case_threads.pop(db_key, None)
+                if conn is not None:
+                    try:
+                        if not is_ro:
+                            conn.cursor().execute("CHECKPOINT;")
+                    except Exception:
+                        pass
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+            finally:
+                case_lock.release()
+    except Exception:
+        pass
+
+
+def _schedule_idle_db_release(delay_sec: float = _IDLE_DB_RELEASE_DELAY_SEC) -> None:
+    global _idle_release_timer
+    with _http_req_lock:
+        if _idle_release_timer is not None:
+            try:
+                _idle_release_timer.cancel()
+            except Exception:
+                pass
+            _idle_release_timer = None
+        if _active_http_requests == 0:
+            t = threading.Timer(delay_sec, _release_transient_http_db_connections)
+            t.daemon = True
+            _idle_release_timer = t
+            t.start()
+
+
 @app.middleware("http")
 async def add_pna_and_cors_headers(request, call_next):
-    if request.method == "OPTIONS":
-        response = JSONResponse(content={})
-    else:
-        response = await call_next(request)
-    response.headers["Access-Control-Allow-Origin"] = "*"
-    response.headers["Access-Control-Allow-Methods"] = "*"
-    response.headers["Access-Control-Allow-Headers"] = "*"
-    if request.headers.get("access-control-request-private-network") == "true":
-        response.headers["Access-Control-Allow-Private-Network"] = "true"
-    return response
+    global _active_http_requests, _pre_http_open_db_keys, _pre_http_snapshot_taken, _idle_release_timer
+    with _http_req_lock:
+        if _idle_release_timer is not None:
+            try:
+                _idle_release_timer.cancel()
+            except Exception:
+                pass
+            _idle_release_timer = None
+        if not _pre_http_snapshot_taken:
+            _pre_http_snapshot_taken = True
+            with DuckDBManager._instance_lock:
+                _pre_http_open_db_keys = set(DuckDBManager._connections.keys())
+        _active_http_requests += 1
+    try:
+        if request.method == "OPTIONS":
+            response = JSONResponse(content={})
+        else:
+            response = await call_next(request)
+        response.headers["Access-Control-Allow-Origin"] = "*"
+        response.headers["Access-Control-Allow-Methods"] = "*"
+        response.headers["Access-Control-Allow-Headers"] = "*"
+        if request.headers.get("access-control-request-private-network") == "true":
+            response.headers["Access-Control-Allow-Private-Network"] = "true"
+        return response
+    finally:
+        should_schedule = False
+        with _http_req_lock:
+            _active_http_requests = max(0, _active_http_requests - 1)
+            if _active_http_requests == 0:
+                should_schedule = True
+        if should_schedule:
+            _schedule_idle_db_release()
 
 
 app.add_middleware(ForensicSecurityHeadersMiddleware)
@@ -692,6 +803,7 @@ def _persist_case_intake_metadata_and_keywords(
     case_id: str,
     meta_dict: Dict[str, Any],
     keyword_specs: List[Dict[str, Any]],
+    close_after: bool = False,
 ) -> None:
     with DuckDBManager.get_lock(case_id):
         init_case_db(case_id)
@@ -750,11 +862,22 @@ def _persist_case_intake_metadata_and_keywords(
             if keyword_specs:
                 _upsert_case_keywords(cursor, keyword_specs, ensure_schema=False)
             cursor.execute("COMMIT;")
+            if close_after:
+                try:
+                    cursor.execute("CHECKPOINT;")
+                except Exception:
+                    pass
+                DuckDBManager.close_connection(case_id)
         except Exception:
             try:
                 cursor.execute("ROLLBACK;")
             except Exception:
                 pass
+            if close_after:
+                try:
+                    DuckDBManager.close_connection(case_id)
+                except Exception:
+                    pass
             raise
 
 
@@ -895,6 +1018,7 @@ def list_cases() -> Dict[str, Any]:
             if not acquired:
                 has_case_activity = True
             else:
+                was_open_before = DuckDBManager.has_connection(cid)
                 try:
                     conn = DuckDBManager.get_connection(cid, read_only=True)
                     cursor = conn.cursor()
@@ -926,6 +1050,11 @@ def list_cases() -> Dict[str, Any]:
                 except Exception as ex:
                     print(f"[API] Warning reading metadata for case {cid}: {ex}")
                 finally:
+                    if not was_open_before and not is_running_cid:
+                        try:
+                            DuckDBManager.close_connection(cid)
+                        except Exception:
+                            pass
                     case_lk.release()
 
         # Skip and clean up empty 0-row phantom target folders that have never processed a case
@@ -964,19 +1093,81 @@ _running_cases: set[str] = set()
 _running_cases_lock = threading.Lock()
 
 
+def _terminate_case_subprocesses(clean_cid: str, dirs_to_delete: List[Path]) -> None:
+    """Terminate any lingering forensic tool child processes locking files inside dirs_to_delete."""
+    try:
+        import psutil
+        dir_prefixes = [str(d.resolve()).lower() for d in dirs_to_delete if d]
+        cid_low = clean_cid.lower()
+        curr_proc = psutil.Process(os.getpid())
+        for child in curr_proc.children(recursive=True):
+            try:
+                cmdline_str = " ".join(child.cmdline() or []).lower()
+                cwd_str = ""
+                try:
+                    cwd_str = (child.cwd() or "").lower()
+                except Exception:
+                    pass
+                matched = False
+                for dp in dir_prefixes:
+                    if dp and (dp in cmdline_str or dp in cwd_str):
+                        matched = True
+                        break
+                if not matched and f"\\{cid_low}\\" in cmdline_str:
+                    matched = True
+                if matched:
+                    child.kill()
+                    try:
+                        child.wait(timeout=1.5)
+                    except Exception:
+                        pass
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+
+def _clear_tree_readonly_attributes(root_dir: Path) -> None:
+    """Recursively clear Windows Read-Only/System/Hidden attributes on all files and directories."""
+    if not root_dir.exists():
+        return
+    win32_set_attr = getattr(getattr(ctypes, "windll", None), "kernel32", None) if sys.platform == "win32" else None
+    for cur_root, dirs, files in os.walk(root_dir, topdown=False):
+        for name in files:
+            fp = os.path.join(cur_root, name)
+            try:
+                if win32_set_attr is not None:
+                    win32_set_attr.SetFileAttributesW(str(fp), 0x80)
+                os.chmod(fp, 0o600)
+            except Exception:
+                pass
+        for name in dirs:
+            dp = os.path.join(cur_root, name)
+            try:
+                if win32_set_attr is not None:
+                    win32_set_attr.SetFileAttributesW(str(dp), 0x80)
+                os.chmod(dp, 0o700)
+            except Exception:
+                pass
+    try:
+        if win32_set_attr is not None:
+            win32_set_attr.SetFileAttributesW(str(root_dir), 0x80)
+        os.chmod(str(root_dir), 0o700)
+    except Exception:
+        pass
+
+
 @app.delete("/api/cases/{case_id}", summary="Delete an entire case and its storage cleanly")
 def delete_case(case_id: str) -> Dict[str, Any]:
     clean_cid = case_id.strip()
     if not clean_cid or ".." in clean_cid or "/" in clean_cid or "\\" in clean_cid:
         raise HTTPException(status_code=400, detail="Invalid case_id")
 
+    # 1. Mark case deleted immediately so background worker threads cannot resurrect case.duckdb or processing.log
     try:
-        DuckDBManager.close_connection(clean_cid)
+        DuckDBManager.mark_case_deleted(clean_cid)
     except Exception as ex:
-        print(f"[delete_case] Warning closing DuckDB connection for {clean_cid}: {ex}")
-
-    import gc
-    gc.collect()
+        print(f"[delete_case] Warning marking/closing DuckDB connection for {clean_cid}: {ex}")
 
     with _running_cases_lock:
         _running_cases.discard(clean_cid)
@@ -1016,14 +1207,19 @@ def delete_case(case_id: str) -> Dict[str, Any]:
     except Exception:
         pass
 
+    _terminate_case_subprocesses(clean_cid, dirs_to_delete)
+
+    import gc
+    gc.collect()
+
     def _handle_remove_readonly(func, path, exc_info):
         try:
-            os.chmod(path, 0o700 if Path(path).is_dir() else 0o600)
             if sys.platform == "win32":
                 try:
                     ctypes.windll.kernel32.SetFileAttributesW(str(path), 0x80)
                 except Exception:
                     pass
+            os.chmod(path, 0o700 if Path(path).is_dir() else 0o600)
             time.sleep(0.05)
             func(path)
         except Exception as retry_err:
@@ -1033,14 +1229,26 @@ def delete_case(case_id: str) -> Dict[str, Any]:
     errors: List[str] = []
 
     for c_dir in dirs_to_delete:
-        try:
-            shutil.rmtree(c_dir, onerror=_handle_remove_readonly)
+        last_rm_err: Optional[Exception] = None
+        for attempt in range(8):
             if not c_dir.exists():
-                deleted_paths.append(str(c_dir))
-            else:
-                errors.append(f"Directory '{c_dir}' could not be deleted")
-        except Exception as rm_err:
-            errors.append(f"Failed deleting '{c_dir}': {rm_err}")
+                break
+            try:
+                DuckDBManager.close_connection(clean_cid)
+                gc.collect()
+                _clear_tree_readonly_attributes(c_dir)
+                shutil.rmtree(c_dir, onerror=_handle_remove_readonly)
+            except Exception as rm_err:
+                last_rm_err = rm_err
+            if c_dir.exists():
+                time.sleep(0.15 * (attempt + 1))
+
+        if not c_dir.exists():
+            deleted_paths.append(str(c_dir))
+        elif last_rm_err is not None:
+            errors.append(f"Failed deleting '{c_dir}': {last_rm_err}")
+        else:
+            errors.append(f"Directory '{c_dir}' could not be deleted")
 
     try:
         unregister_case_dir(clean_cid)
@@ -1067,6 +1275,8 @@ def safe_background_pipeline(
     run_kwargs: Optional[Dict[str, Any]] = None,
 ):
     try:
+        if DuckDBManager.is_case_deleted(case_id):
+            return
         if target_dir and str(target_dir).strip():
             register_case_dir(case_id, str(target_dir).strip())
         _invoke_pipeline_compat(
@@ -1079,6 +1289,11 @@ def safe_background_pipeline(
     finally:
         try:
             with DuckDBManager.get_lock(case_id):
+                if not DuckDBManager.is_case_deleted(case_id) and DuckDBManager.has_rw_connection(case_id):
+                    try:
+                        DuckDBManager.get_connection(case_id, read_only=False).cursor().execute("CHECKPOINT;")
+                    except Exception:
+                        pass
                 DuckDBManager.close_connection(case_id)
         except Exception:
             pass
@@ -1095,6 +1310,7 @@ def process_case(
     background_tasks: BackgroundTasks,
 ) -> Dict[str, Any]:
     case_id = sanitize_case_id(request.case_id) if (request.case_id and request.case_id.strip()) else sanitize_case_id(request.case_name)
+    DuckDBManager.unmark_case_deleted(case_id)
     clean_source = request.source_path.strip().strip('"').strip("'").strip() if (request.source_path and request.source_path.strip()) else None
     clean_target = request.target_dir.strip().strip('"').strip("'").strip() if (request.target_dir and request.target_dir.strip()) else None
 
@@ -1380,6 +1596,7 @@ def process_case(
                 case_id=case_id,
                 meta_dict=meta_dict,
                 keyword_specs=normalized_keywords,
+                close_after=True,
             )
             return {
                 "status": "SUCCESS",
@@ -1423,7 +1640,8 @@ def get_case_status(case_id: str) -> Dict[str, Any]:
     is_running = case_id in _running_cases or status_info.get("status") == "RUNNING"
 
     logs_list = []
-    if not is_running and db_path.exists():
+    case_meta: Dict[str, Any] = {}
+    if db_path.exists():
         case_lk = DuckDBManager.get_lock(case_id)
         acquired = case_lk.acquire(timeout=0.25 if is_running else 5.0)
         if acquired:
@@ -1450,6 +1668,12 @@ def get_case_status(case_id: str) -> Dict[str, Any]:
                     "error_message",
                 ]
                 logs_list = serialize_rows(log_cols, raw_logs)
+                try:
+                    for mk, mv in cursor.execute("SELECT key, value FROM case_metadata;").fetchall():
+                        if mk is not None and mv is not None:
+                            case_meta[str(mk)] = str(mv)
+                except Exception:
+                    pass
             except Exception as ex:
                 if not is_running:
                     print(f"[API] Error reading processing_logs for {case_id}: {ex}")
@@ -1458,6 +1682,8 @@ def get_case_status(case_id: str) -> Dict[str, Any]:
 
     return {
         "case_id": case_id,
+        "case_name": case_meta.get("case_name") or case_id,
+        "case_metadata": case_meta,
         "status": status_info.get("status", "UNKNOWN"),
         "progress": status_info.get("progress", 0),
         "current_step": status_info.get("current_step", ""),
@@ -1727,7 +1953,7 @@ def get_artifact_registry(
     pipeline_running = status_info.get("status") == "RUNNING"
 
     with DuckDBManager.get_lock(case_id):
-        was_rw = case_id in DuckDBManager._connections and case_id not in DuckDBManager._ro_connections
+        was_rw = DuckDBManager.has_rw_connection(case_id)
         if force_sync and not pipeline_running:
             conn = ensure_case_exists(case_id, auto_create=False, read_only=False)
             cursor = conn.cursor()
@@ -1784,7 +2010,7 @@ def get_artifact_registry(
         timeline_total = int(tl_row[0] or 0) if tl_row else 0
         ent_row = cursor.execute("SELECT COUNT(*) FROM entity_connections;").fetchone() if "entity_connections" in tables_set else (0,)
         connections_total = int(ent_row[0] or 0) if ent_row else 0
-        if not was_rw and not pipeline_running and case_id in DuckDBManager._connections and case_id not in DuckDBManager._ro_connections:
+        if not was_rw and not pipeline_running and DuckDBManager.has_rw_connection(case_id):
             try:
                 cursor.execute("CHECKPOINT;")
             except Exception:
@@ -3048,13 +3274,13 @@ def get_regripper_plugin_detail(
 @app.post("/api/cases/{case_id}/regripper/run", summary="Trigger RegRipper analysis on demand")
 def trigger_regripper_analysis(case_id: str) -> Dict[str, Any]:
     from backend.orchestrator.regripper_runner import RegRipperRunner
-    was_rw = case_id in DuckDBManager._connections and case_id not in DuckDBManager._ro_connections
+    was_rw = DuckDBManager.has_rw_connection(case_id)
     case_dir = get_case_dir(case_id)
     runner = RegRipperRunner(case_id=case_id, case_dir=case_dir)
     res = runner.run()
     if not was_rw and case_id not in _running_cases:
         with DuckDBManager.get_lock(case_id):
-            if case_id in DuckDBManager._connections and case_id not in DuckDBManager._ro_connections:
+            if DuckDBManager.has_rw_connection(case_id):
                 try:
                     DuckDBManager.get_connection(case_id, read_only=False).cursor().execute("CHECKPOINT;")
                 except Exception:
@@ -6127,7 +6353,7 @@ def get_filesystem_files(
 
 def _release_transient_rw_if_idle(case_id: str, was_rw: bool) -> None:
     if not was_rw and case_id not in _running_cases:
-        if case_id in DuckDBManager._connections and case_id not in DuckDBManager._ro_connections:
+        if DuckDBManager.has_rw_connection(case_id):
             try:
                 DuckDBManager.get_connection(case_id, read_only=False).cursor().execute("CHECKPOINT;")
             except Exception:
@@ -6138,7 +6364,7 @@ def _release_transient_rw_if_idle(case_id: str, was_rw: bool) -> None:
 @app.post("/api/cases/{case_id}/bookmarks", summary="Bookmark / Tag evidence row")
 def create_bookmark(case_id: str, payload: BookmarkCreateRequest) -> Dict[str, Any]:
     with DuckDBManager.get_lock(case_id):
-        was_rw = case_id in DuckDBManager._connections and case_id not in DuckDBManager._ro_connections
+        was_rw = DuckDBManager.has_rw_connection(case_id)
         conn = ensure_case_exists(case_id, auto_create=False, read_only=False)
         cursor = conn.cursor()
         _ensure_bookmarks_table_canonical(cursor)
@@ -6227,7 +6453,7 @@ def list_case_tags(case_id: str) -> Dict[str, Any]:
 @app.delete("/api/cases/{case_id}/bookmarks/{bookmark_id}", summary="Delete examiner bookmark")
 def delete_bookmark(case_id: str, bookmark_id: str) -> Dict[str, Any]:
     with DuckDBManager.get_lock(case_id):
-        was_rw = case_id in DuckDBManager._connections and case_id not in DuckDBManager._ro_connections
+        was_rw = DuckDBManager.has_rw_connection(case_id)
         conn = ensure_case_exists(case_id, auto_create=False, read_only=False)
         cursor = conn.cursor()
         _ensure_bookmarks_table_canonical(cursor)
@@ -6244,7 +6470,7 @@ def delete_bookmark_by_row(
     tag_name: Optional[str] = Query(None),
 ) -> Dict[str, Any]:
     with DuckDBManager.get_lock(case_id):
-        was_rw = case_id in DuckDBManager._connections and case_id not in DuckDBManager._ro_connections
+        was_rw = DuckDBManager.has_rw_connection(case_id)
         conn = ensure_case_exists(case_id, auto_create=False, read_only=False)
         cursor = conn.cursor()
         _ensure_bookmarks_table_canonical(cursor)
@@ -6361,7 +6587,7 @@ def add_case_keywords(case_id: str, payload: KeywordAddRequest) -> Dict[str, Any
         default_category=payload.category or "General",
         default_source=payload.source_file or "Manual",
     )
-    was_rw = case_id in DuckDBManager._connections and case_id not in DuckDBManager._ro_connections
+    was_rw = DuckDBManager.has_rw_connection(case_id)
     with DuckDBManager.get_lock(case_id):
         conn = ensure_case_exists(case_id, auto_create=False, read_only=False)
         cursor = conn.cursor()
@@ -6414,7 +6640,7 @@ async def upload_case_keywords(
         default_category=category or "Uploaded",
         default_source=eff_source,
     )
-    was_rw = case_id in DuckDBManager._connections and case_id not in DuckDBManager._ro_connections
+    was_rw = DuckDBManager.has_rw_connection(case_id)
     with DuckDBManager.get_lock(case_id):
         conn = ensure_case_exists(case_id, auto_create=False, read_only=False)
         cursor = conn.cursor()
@@ -6427,7 +6653,7 @@ async def upload_case_keywords(
 
 @app.post("/api/cases/{case_id}/keywords/scan", summary="Re-scan case keywords across DuckDB and staged files")
 def trigger_case_keyword_scan(case_id: str) -> Dict[str, Any]:
-    was_rw = case_id in DuckDBManager._connections and case_id not in DuckDBManager._ro_connections
+    was_rw = DuckDBManager.has_rw_connection(case_id)
     with DuckDBManager.get_lock(case_id):
         ensure_case_exists(case_id, auto_create=False, read_only=False)
     scan_res = _scan_keywords_safe(case_id)
@@ -6445,7 +6671,7 @@ def trigger_case_keyword_scan(case_id: str) -> Dict[str, Any]:
 
 @app.delete("/api/cases/{case_id}/keywords/{keyword_id}", summary="Delete specific keyword from case")
 def delete_case_keyword(case_id: str, keyword_id: str) -> Dict[str, Any]:
-    was_rw = case_id in DuckDBManager._connections and case_id not in DuckDBManager._ro_connections
+    was_rw = DuckDBManager.has_rw_connection(case_id)
     with DuckDBManager.get_lock(case_id):
         conn = ensure_case_exists(case_id, auto_create=False, read_only=False)
         cursor = conn.cursor()
@@ -7708,7 +7934,7 @@ def trigger_malware_scan(case_id: str, req: MalwareScanRequest) -> Dict[str, Any
     global FileEnrichmentEngine
     scan_lock = _get_malware_scan_lock(case_id)
     with scan_lock:
-        was_rw = case_id in DuckDBManager._connections and case_id not in DuckDBManager._ro_connections
+        was_rw = DuckDBManager.has_rw_connection(case_id)
         # Phase 1: Pre-scan check & targeted clear under DuckDBManager lock (never held across engine.run!)
         with DuckDBManager.get_lock(case_id):
             conn = ensure_case_exists(case_id, auto_create=False, read_only=False)

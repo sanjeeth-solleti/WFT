@@ -1,11 +1,19 @@
 using System;
 using System.IO;
 using System.Diagnostics;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
 using System.Threading;
 using System.Collections.Generic;
 using Microsoft.Win32;
+
+[assembly: AssemblyTitle("Windows Forensic Toolkit (WFT)")]
+[assembly: AssemblyDescription("Windows Forensic Toolkit (WFT) Enterprise Workstation")]
+[assembly: AssemblyProduct("Windows Forensic Toolkit (WFT)")]
+[assembly: AssemblyCompany("Windows Forensic Toolkit")]
+[assembly: AssemblyVersion("2.0.0.0")]
+[assembly: AssemblyFileVersion("2.0.0.0")]
 
 namespace WFTLauncher
 {
@@ -140,17 +148,22 @@ namespace WFTLauncher
             string progFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
             string progFilesX86 = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
             string localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            string profileDir = Path.Combine(localAppData, "WFT", "browser_profile");
+            try { Directory.CreateDirectory(profileDir); } catch { }
 
-            string[] appCandidates = new string[] {
-                Path.Combine(progFilesX86, @"Microsoft\Edge\Application\msedge.exe"),
-                Path.Combine(progFiles, @"Microsoft\Edge\Application\msedge.exe"),
+            var candidates = new List<string> {
                 Path.Combine(progFiles, @"Google\Chrome\Application\chrome.exe"),
                 Path.Combine(progFilesX86, @"Google\Chrome\Application\chrome.exe"),
-                Path.Combine(localAppData, @"Google\Chrome\Application\chrome.exe"),
-                Path.Combine(localAppData, @"Microsoft\Edge\Application\msedge.exe")
+                Path.Combine(localAppData, @"Google\Chrome\Application\chrome.exe")
             };
+            if (EnvBool("WFT_ALLOW_EDGE"))
+            {
+                candidates.Add(Path.Combine(progFilesX86, @"Microsoft\Edge\Application\msedge.exe"));
+                candidates.Add(Path.Combine(progFiles, @"Microsoft\Edge\Application\msedge.exe"));
+                candidates.Add(Path.Combine(localAppData, @"Microsoft\Edge\Application\msedge.exe"));
+            }
 
-            foreach (var browser in appCandidates)
+            foreach (var browser in candidates)
             {
                 if (File.Exists(browser))
                 {
@@ -158,7 +171,7 @@ namespace WFTLauncher
                     {
                         ProcessStartInfo psi = new ProcessStartInfo();
                         psi.FileName = browser;
-                        psi.Arguments = "--app=\"" + url + "\" --new-window";
+                        psi.Arguments = "--app=\"" + url + "\" --user-data-dir=\"" + profileDir + "\" --no-first-run --no-default-browser-check --disable-background-mode --no-service-autorun --new-window";
                         psi.UseShellExecute = false;
                         Process.Start(psi);
                         return true;
@@ -781,7 +794,9 @@ namespace WFTLauncher
 
             try
             {
-                launchPsi.EnvironmentVariables["WFT_LAUNCHED_FROM_EXE"] = "1";
+                // Delegate desktop window creation and lifecycle tracking to wft_launcher.py
+                // so the native WFT desktop shell (or isolated Chrome app window) closes the backend cleanly on exit.
+                launchPsi.EnvironmentVariables["WFT_EXIT_ON_UI_CLOSE"] = "1";
             }
             catch { }
 
@@ -798,8 +813,8 @@ namespace WFTLauncher
                         }
 
                         // Monitor early initialization (up to 15.0s)
-                        // If port becomes active, startup succeeded: open desktop app window and return 0 immediately
-                        // If process crashes, capture exit code and show diagnostic dialog
+                        // wft_launcher.py opens the native desktop window once services are healthy.
+                        // If process crashes during startup, capture exit code and show diagnostic dialog.
                         int waitedMs = 0;
                         const int pollIntervalMs = 150;
                         const int maxWaitMs = 15000;
@@ -830,10 +845,6 @@ namespace WFTLauncher
 
                             if (IsTcpPortListening(targetPort))
                             {
-                                if (!isHeadless && passthroughArgs.Count == 0)
-                                {
-                                    LaunchDesktopApp(targetPort);
-                                }
                                 return 0;
                             }
 

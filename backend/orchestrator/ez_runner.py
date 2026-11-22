@@ -827,9 +827,10 @@ class EZToolRunner:
             try:
                 cursor.execute(ingest_sql)
             except Exception as exc:
-                print(
-                    f"[EZToolRunner] Warning: all_varchar=false ingestion failed ({exc}). Retrying with all_varchar=true..."
-                )
+                if "Conversion Error" not in str(exc) or "out of range for the destination type INT32" not in str(exc):
+                    print(
+                        f"[EZToolRunner] Warning: all_varchar=false ingestion failed ({exc}). Retrying with all_varchar=true..."
+                    )
                 fallback_sql = f"""
                 CREATE OR REPLACE TABLE "{table_name}" AS
                 SELECT
@@ -1363,10 +1364,9 @@ class EZToolRunner:
                                 str(src_root),
                                 "--out",
                                 str(rla_tmp),
-                                "--ca",
                                 "--nop",
                                 "false",
-                                "--co",
+                                "--cn",
                                 "false",
                             ]
                             self._execute_subprocess("rla", cmd, timeout=300)
@@ -1379,19 +1379,20 @@ class EZToolRunner:
                                 else (rla_tmp / anchor_rel)
                             )
 
-                            out_iter_root = reconstructed_root if reconstructed_root.is_dir() else rla_tmp
-                            for out_f in out_iter_root.rglob("*"):
-                                if not out_f.is_file():
-                                    continue
-                                low_n = out_f.name.lower()
-                                if low_n.endswith("_consolelog.txt") or low_n.endswith(
-                                    (".log", ".log1", ".log2", ".txt")
+                            for f in cands:
+                                rel_sub = f.relative_to(src_root) if src_root.is_dir() else Path(f.name)
+                                flat_full = str(f.resolve()).replace(":", "").replace("\\", "_").replace("/", "_")
+                                flat_dir = str(f.parent.resolve()).replace(":", "").replace("\\", "_").replace("/", "_")
+                                for cand_out in (
+                                    reconstructed_root / rel_sub,
+                                    rla_tmp / flat_dir / f.name,
+                                    rla_tmp / flat_full,
                                 ):
-                                    continue
-                                rel_sub = out_f.relative_to(out_iter_root)
-                                dest = (build_dir / rel_prefix / rel_sub).resolve()
-                                dest.parent.mkdir(parents=True, exist_ok=True)
-                                shutil.move(str(out_f), str(dest))
+                                    if cand_out.is_file() and cand_out.stat().st_size > 0:
+                                        dest = (build_dir / rel_prefix / rel_sub).resolve()
+                                        dest.parent.mkdir(parents=True, exist_ok=True)
+                                        shutil.move(str(cand_out), str(dest))
+                                        break
                         except Exception as rla_ex:
                             self._log(f"rla replay notice for '{src_root}': {rla_ex}", "WARNING")
                         finally:
@@ -2333,13 +2334,26 @@ class EZToolRunner:
 
         try:
             for idx, db_file in enumerate(unique_dbs):
-                db_slot = staged_inputs / f"db_{idx:04d}"
-                db_slot.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(db_file, db_slot / db_file.name)
-                for sidecar_sfx in ("-wal", "-shm", "-journal"):
-                    sidecar = db_file.parent / f"{db_file.name}{sidecar_sfx}"
-                    if sidecar.is_file():
-                        shutil.copy2(sidecar, db_slot / sidecar.name)
+                sidecars = [
+                    db_file.parent / f"{db_file.name}{sidecar_sfx}"
+                    for sidecar_sfx in ("-wal", "-shm", "-journal")
+                    if (db_file.parent / f"{db_file.name}{sidecar_sfx}").is_file()
+                ]
+                flat_dest = staged_inputs / db_file.name
+                if not flat_dest.exists() and not any(
+                    (staged_inputs / sc.name).exists() for sc in sidecars
+                ):
+                    shutil.copy2(db_file, flat_dest)
+                    for sc in sidecars:
+                        shutil.copy2(sc, staged_inputs / sc.name)
+                elif not sidecars:
+                    shutil.copy2(db_file, staged_inputs / f"db_{idx:04d}_{db_file.name}")
+                else:
+                    db_slot = staged_inputs / f"db_{idx:04d}"
+                    db_slot.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(db_file, db_slot / db_file.name)
+                    for sc in sidecars:
+                        shutil.copy2(sc, db_slot / sc.name)
 
             effective_maps: Optional[Path] = None
             cached_maps_dir: Optional[Path] = None

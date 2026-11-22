@@ -51,6 +51,7 @@ interface TopNavBarProps {
   onExportHtmlReport?: () => void;
   onRefresh: () => void;
   isRefreshing?: boolean;
+  isProcessingRunning?: boolean;
   totalArtifacts?: number;
   totalTimeline?: number;
   totalEvtx?: number;
@@ -76,6 +77,7 @@ export const TopNavBar: React.FC<TopNavBarProps> = ({
   onExportHtmlReport,
   onRefresh,
   isRefreshing = false,
+  isProcessingRunning = false,
   totalArtifacts = 0,
   totalTimeline = 0,
   totalEvtx = 0,
@@ -258,7 +260,7 @@ export const TopNavBar: React.FC<TopNavBarProps> = ({
                 }}
                 className="font-sans select-none"
               >
-                <HardDrive className="w-3.5 h-3.5 absolute left-2 top-2 text-slate-400 pointer-events-none" />
+                <HardDrive className="w-3.5 h-3.5 absolute left-2 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
                 <select
                   aria-label="Active Evidence Case"
                   value={currentCaseId}
@@ -476,10 +478,16 @@ export const TopNavBar: React.FC<TopNavBarProps> = ({
               ? 'bg-[#0284c7] text-white border-[#0369a1]'
               : 'bg-white hover:bg-slate-50 dark:bg-[#0f172a] dark:hover:bg-[#334155] text-[#0f172a] dark:text-[#f8fafc] border-[#cbd5e1] dark:border-[#334155]'
           }`}
-          title="View Pipeline Execution Logs"
+          title={isProcessingRunning ? 'Pipeline Running — Click to View Live Execution Logs' : 'View Pipeline Execution Logs'}
         >
           <Terminal className="w-3.5 h-3.5 shrink-0" />
           <span>Logs</span>
+          {isProcessingRunning && (
+            <span
+              className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse shrink-0"
+              title="Processing in progress"
+            />
+          )}
         </button>
 
         <button

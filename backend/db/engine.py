@@ -268,12 +268,60 @@ class DuckDBManager:
     _case_locks: Dict[str, threading.RLock] = {}
     _keyword_scan_locks: Dict[str, threading.Lock] = {}
     _case_threads: Dict[str, int] = {}
+    _deleted_cases: Set[str] = set()
 
     @classmethod
     def _resolve_db_key(cls, case_id: str) -> Tuple[Path, str]:
         db_path = get_case_db_path(case_id)
         db_key = str(db_path.resolve()).lower()
         return db_path, db_key
+
+    @classmethod
+    def mark_case_deleted(cls, case_id: str) -> None:
+        cid_clean = str(case_id or "").strip().lower()
+        if cid_clean:
+            with cls._instance_lock:
+                cls._deleted_cases.add(cid_clean)
+        cls.close_connection(case_id)
+
+    @classmethod
+    def unmark_case_deleted(cls, case_id: str) -> None:
+        cid_clean = str(case_id or "").strip().lower()
+        if cid_clean:
+            with cls._instance_lock:
+                cls._deleted_cases.discard(cid_clean)
+
+    @classmethod
+    def is_case_deleted(cls, case_id: str) -> bool:
+        cid_clean = str(case_id or "").strip().lower()
+        if not cid_clean:
+            return False
+        with cls._instance_lock:
+            return cid_clean in cls._deleted_cases
+
+    @classmethod
+    def has_connection(cls, case_id: str) -> bool:
+        with cls._instance_lock:
+            _, db_key = cls._resolve_db_key(case_id)
+            return db_key in cls._connections
+
+    @classmethod
+    def has_rw_connection(cls, case_id: str) -> bool:
+        with cls._instance_lock:
+            _, db_key = cls._resolve_db_key(case_id)
+            return (
+                db_key in cls._connections
+                and db_key not in cls._ro_connections
+                and not cls._is_read_only.get(db_key, False)
+            )
+
+    @classmethod
+    def has_ro_connection(cls, case_id: str) -> bool:
+        with cls._instance_lock:
+            _, db_key = cls._resolve_db_key(case_id)
+            return db_key in cls._connections and (
+                db_key in cls._ro_connections or cls._is_read_only.get(db_key, False)
+            )
 
     @classmethod
     def get_keyword_scan_lock(cls, case_id: str) -> threading.Lock:
@@ -293,8 +341,12 @@ class DuckDBManager:
 
     @classmethod
     def get_connection(cls, case_id: str, read_only: bool = False) -> duckdb.DuckDBPyConnection:
+        if cls.is_case_deleted(case_id):
+            raise FileNotFoundError(f"Case '{case_id}' has been deleted.")
         case_lock = cls.get_lock(case_id)
         with case_lock:
+            if cls.is_case_deleted(case_id):
+                raise FileNotFoundError(f"Case '{case_id}' has been deleted.")
             ro_conn_to_close: Optional[duckdb.DuckDBPyConnection] = None
             with cls._instance_lock:
                 db_path, db_key = cls._resolve_db_key(case_id)
@@ -433,6 +485,7 @@ class DuckDBManager:
 
 
 def init_case_db(case_id: str) -> Path:
+    DuckDBManager.unmark_case_deleted(case_id)
     db_path, db_key = DuckDBManager._resolve_db_key(case_id)
     schema_key = (case_id.lower(), db_key)
     with DuckDBManager.get_lock(case_id):
@@ -615,7 +668,11 @@ def log_processing_event(
     status: str,
     error_message: Optional[str] = None,
 ) -> None:
+    if DuckDBManager.is_case_deleted(case_id):
+        return
     with DuckDBManager.get_lock(case_id):
+        if DuckDBManager.is_case_deleted(case_id):
+            return
         conn = DuckDBManager.get_connection(case_id, read_only=False)
         cursor = conn.cursor()
 
@@ -654,8 +711,12 @@ def log_processing_event(
             ],
         )
 
+    if DuckDBManager.is_case_deleted(case_id):
+        return
     try:
-        log_file = get_case_dir(case_id) / "processing.log"
+        log_file = get_case_dir(case_id, create_if_missing=False) / "processing.log"
+        if DuckDBManager.is_case_deleted(case_id):
+            return
         log_file.parent.mkdir(parents=True, exist_ok=True)
         log_entry = (
             f"[{module_name}] Status={status} ExitCode={exit_code} "
@@ -801,12 +862,23 @@ def _scan_single_raw_file(
                 )
             )
             if has_utf16_signal:
+                prev_u16_char_idx = 0
+                prev_u16_byte_off = u16_bom
                 for m in pattern.finditer(text_u16):
                     matched_txt = m.group(0)
                     if not matched_txt:
                         continue
-                    byte_off = u16_bom + len(text_u16[:m.start()].encode("utf-16-le", errors="replace"))
-                    byte_end = u16_bom + len(text_u16[:m.end()].encode("utf-16-le", errors="replace"))
+                    m_start = m.start()
+                    m_end = m.end()
+                    if m_start >= prev_u16_char_idx:
+                        byte_off = prev_u16_byte_off + len(
+                            text_u16[prev_u16_char_idx:m_start].encode("utf-16-le", errors="replace")
+                        )
+                    else:
+                        byte_off = u16_bom + len(text_u16[:m_start].encode("utf-16-le", errors="replace"))
+                    byte_end = byte_off + len(matched_txt.encode("utf-16-le", errors="replace"))
+                    prev_u16_char_idx = m_end
+                    prev_u16_byte_off = byte_end
                     if byte_off in seen_byte_offsets:
                         continue
                     seen_byte_offsets.add(byte_off)
@@ -832,6 +904,8 @@ def _scan_single_raw_file(
         # Pass 2: UTF-8 scan
         if text_u8:
             search_cursor_byte = 0
+            prev_u8_char_idx = 0
+            prev_u8_byte_off = u8_bom
             for m in pattern.finditer(text_u8):
                 matched_txt = m.group(0)
                 if not matched_txt:
@@ -845,7 +919,15 @@ def _scan_single_raw_file(
                     byte_off = found_idx
                     search_cursor_byte = found_idx + max(1, len(encoded_match))
                 else:
-                    byte_off = u8_bom + len(text_u8[:m.start()].encode("utf-8", errors="replace"))
+                    m_start = m.start()
+                    if m_start >= prev_u8_char_idx:
+                        byte_off = prev_u8_byte_off + len(
+                            text_u8[prev_u8_char_idx:m_start].encode("utf-8", errors="replace")
+                        )
+                    else:
+                        byte_off = u8_bom + len(text_u8[:m_start].encode("utf-8", errors="replace"))
+                    prev_u8_char_idx = m.end()
+                    prev_u8_byte_off = byte_off + len(encoded_match)
 
                 if byte_off in seen_byte_offsets:
                     continue
@@ -1699,17 +1781,67 @@ def scan_keywords_for_case(
             cursor.execute("DELETE FROM parsed_keyword_hits;")
 
             if all_emitted_hits:
-                cursor.executemany(
-                    """
-                    INSERT INTO parsed_keyword_hits (
-                        _row_id, keyword_id, keyword, is_regex, is_case_sensitive,
-                        artifact_name, source_table, source_row_id,
-                        matched_column, match_offset, encoding,
-                        matched_snippet, source_file
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
-                    """,
-                    all_emitted_hits,
-                )
+                inserted_fast = False
+                if len(all_emitted_hits) >= 250:
+                    try:
+                        import pyarrow as pa
+
+                        pa_hits = pa.table(
+                            {
+                                "_row_id": [int(r[0]) for r in all_emitted_hits],
+                                "keyword_id": [str(r[1]) for r in all_emitted_hits],
+                                "keyword": [str(r[2]) for r in all_emitted_hits],
+                                "is_regex": [bool(r[3]) for r in all_emitted_hits],
+                                "is_case_sensitive": [bool(r[4]) for r in all_emitted_hits],
+                                "artifact_name": [str(r[5]) for r in all_emitted_hits],
+                                "source_table": [str(r[6]) for r in all_emitted_hits],
+                                "source_row_id": [int(r[7]) for r in all_emitted_hits],
+                                "matched_column": [str(r[8]) for r in all_emitted_hits],
+                                "match_offset": [int(r[9]) for r in all_emitted_hits],
+                                "encoding": [str(r[10]) for r in all_emitted_hits],
+                                "matched_snippet": [str(r[11]) for r in all_emitted_hits],
+                                "source_file": [str(r[12]) for r in all_emitted_hits],
+                            }
+                        )
+                        cursor.register("_tmp_kw_hits", pa_hits)
+                        try:
+                            cursor.execute(
+                                """
+                                INSERT INTO parsed_keyword_hits (
+                                    _row_id, keyword_id, keyword, is_regex, is_case_sensitive,
+                                    artifact_name, source_table, source_row_id,
+                                    matched_column, match_offset, encoding,
+                                    matched_snippet, source_file
+                                )
+                                SELECT
+                                    _row_id, keyword_id, keyword, is_regex, is_case_sensitive,
+                                    artifact_name, source_table, source_row_id,
+                                    matched_column, match_offset, encoding,
+                                    matched_snippet, source_file
+                                FROM _tmp_kw_hits;
+                                """
+                            )
+                            inserted_fast = True
+                        finally:
+                            try:
+                                cursor.unregister("_tmp_kw_hits")
+                            except Exception:
+                                pass
+                    except Exception:
+                        inserted_fast = False
+
+                if not inserted_fast:
+                    cursor.executemany(
+                        """
+                        INSERT INTO parsed_keyword_hits (
+                            _row_id, keyword_id, keyword, is_regex, is_case_sensitive,
+                            artifact_name, source_table, source_row_id,
+                            matched_column, match_offset, encoding,
+                            matched_snippet, source_file
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                        """,
+                        all_emitted_hits,
+                    )
 
             for kw_id_str, exact_cnt in hit_counts_by_id.items():
                 cursor.execute(

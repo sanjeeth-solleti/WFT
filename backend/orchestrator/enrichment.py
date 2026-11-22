@@ -9,7 +9,7 @@ Combines:
 from __future__ import annotations
 
 import base64
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import hashlib
 import html
 import json
@@ -396,10 +396,11 @@ class FileEnrichmentEngine:
 
     YARA_EXTENSIONS: Set[str] = {
         ".exe", ".dll", ".sys", ".scr", ".cpl", ".ocx", ".com", ".msi", ".cab",
-        ".ps1", ".bat", ".cmd", ".vbs", ".vbe", ".js", ".jse", ".wsf", ".wsh",
+        ".ps1", ".psm1", ".psd1", ".ps1xml", ".bat", ".cmd", ".vbs", ".vbe", ".js", ".jse", ".wsf", ".wsh",
         ".sct", ".hta", ".lnk", ".dmp", ".jsp", ".jspx", ".war", ".jar", ".class",
         ".aspx", ".ashx", ".asmx", ".asp", ".php", ".phtml", ".py", ".sh", ".elf",
-        ".bin", ".conf", ".ini", ".toml", ".xml", ".json", ".txt", ".doc", ".xls",
+        ".bin", ".conf", ".cfg", ".ini", ".toml", ".yaml", ".yml", ".xml", ".json", ".txt",
+        ".profile", ".reg", ".url", ".doc", ".xls",
         ".ppt", ".docm", ".xlsm", ".pptm", ".payloads",
     }
     YARA_SCAN_EXTENSIONS: Set[str] = YARA_EXTENSIONS
@@ -913,7 +914,9 @@ class FileEnrichmentEngine:
         raw_entries.sort(key=lambda item: (item[0], str(item[1]).lower()))
         return [(p, logical) for _, p, logical in raw_entries]
 
-    def _is_yara_candidate(self, file_path: Path, data: bytes, logical_path: str = "") -> bool:
+    def _is_yara_candidate(
+        self, file_path: Path, data: bytes, logical_path: str = "", file_size: Optional[int] = None
+    ) -> bool:
         if not data:
             return False
 
@@ -948,7 +951,8 @@ class FileEnrichmentEngine:
             return True
 
         # Only scan extensionless files if small and mostly printable text (e.g. scripts/configs)
-        if ext == "" and len(data) <= 512 * 1024:
+        actual_size = file_size if file_size is not None else len(data)
+        if ext == "" and actual_size <= 512 * 1024:
             sample = data[:4096]
             if b"\x00" not in sample:
                 return True
@@ -1081,19 +1085,42 @@ class FileEnrichmentEngine:
         def _scan_single_file(item: Tuple[Path, str]) -> Optional[Dict[str, Any]]:
             file_path, logical_path = item
             try:
-                data = file_path.read_bytes()
+                file_size = file_path.stat().st_size
             except OSError:
                 return None
 
-            file_size = len(data)
-            sha256 = hashlib.sha256(data).hexdigest().lower()
             ext = file_path.suffix.lower()
+            if file_size == 0:
+                data = b""
+                sha256 = hashlib.sha256(b"").hexdigest().lower()
+                is_candidate = False
+            else:
+                try:
+                    with open(file_path, "rb") as fh:
+                        header_sample = fh.read(4096)
+                except OSError:
+                    return None
+                is_candidate = self._is_yara_candidate(file_path, header_sample, logical_path, file_size=file_size)
+                if not is_candidate:
+                    # Avoid loading up to 150 MiB non-YARA files into RAM across 32 threads; stream-hash in O(1) memory
+                    data = b""
+                    if file_size <= 4096:
+                        sha256 = hashlib.sha256(header_sample).hexdigest().lower()
+                    else:
+                        sha256 = self.compute_sha256(file_path)
+                else:
+                    try:
+                        data = header_sample if file_size <= 4096 else file_path.read_bytes()
+                    except OSError:
+                        return None
+                    file_size = len(data)
+                    sha256 = hashlib.sha256(data).hexdigest().lower()
 
             yara_hit_rows: List[List[Any]] = []
             matched_rule_names: List[str] = []
             file_offsets_list: List[Dict[str, Any]] = []
 
-            if self._is_yara_candidate(file_path, data, logical_path) and file_size > 0:
+            if is_candidate and file_size > 0:
                 with sha_cache_lock:
                     cached = sha_yara_cache.get(sha256)
 
@@ -1219,7 +1246,7 @@ class FileEnrichmentEngine:
                 "matched": bool(matched_rule_names),
             }
 
-        with ThreadPoolExecutor(max_workers=max(1, min(workers, 6))) as pool:
+        with ThreadPoolExecutor(max_workers=max(1, min(workers, 32))) as pool:
             worker_results = list(pool.map(_scan_single_file, scan_items))
 
         # Deduplicate identical staged copies (e.g. UserFiles/<u>/foo.ps1 vs flat Enrichment/foo.ps1)
@@ -1707,7 +1734,10 @@ class FileEnrichmentEngine:
                                 exceeds_threshold = True
                                 break
                     if exceeds_threshold:
-                        stinger_mirror_dir = Path(tempfile.mkdtemp(prefix="wft_stinger_in_")).resolve()
+                        # Create mirror inside case_dir (same volume as staging_dir) so os.link() hardlinks with zero disk copy
+                        mirror_parent = get_case_dir(self.case_id).resolve()
+                        mirror_parent.mkdir(parents=True, exist_ok=True)
+                        stinger_mirror_dir = Path(tempfile.mkdtemp(prefix="wft_stinger_in_", dir=str(mirror_parent))).resolve()
                         skip_stinger_exts = {
                             ".evtx",
                             ".mzz",
@@ -1848,7 +1878,10 @@ class FileEnrichmentEngine:
                 if stinger_mirror_dir is not None:
                     shutil.rmtree(stinger_mirror_dir, ignore_errors=True)
 
-        # 2. Parallel Multi-Indicator PE & Script Heuristics
+        # 2. Parallel Multi-Indicator PE & Script Heuristics (deduplicated by SHA-256 cache)
+        heur_sha_cache: Dict[str, List[Tuple[str, str, str, str, str]]] = {}
+        heur_cache_lock = threading.Lock()
+
         def _eval_heuristics(item: Tuple[Path, str]) -> Optional[Tuple[str, str, str, List[List[Any]]]]:
             file_path, logical_path = item
             ext = file_path.suffix.lower()
@@ -1866,13 +1899,29 @@ class FileEnrichmentEngine:
                 return None
 
             sha256 = hashlib.sha256(data).hexdigest().lower()
-            local_hits: List[List[Any]] = []
-            if len(data) >= 64 and data[:2] == b"MZ":
-                local_hits.extend(self._analyze_pe_bytes(file_path, logical_path, data, sha256))
-            elif ext in self.SCRIPT_EXTENSIONS:
-                local_hits.extend(self._analyze_script_bytes(file_path, logical_path, data, sha256))
-            if not local_hits:
+            with heur_cache_lock:
+                cached_templates = heur_sha_cache.get(sha256)
+
+            if cached_templates is None:
+                raw_hits: List[List[Any]] = []
+                if len(data) >= 64 and data[:2] == b"MZ":
+                    raw_hits.extend(self._analyze_pe_bytes(file_path, logical_path, data, sha256))
+                elif ext in self.SCRIPT_EXTENSIONS:
+                    raw_hits.extend(self._analyze_script_bytes(file_path, logical_path, data, sha256))
+                cached_templates = [
+                    (str(h[3]), str(h[4]), str(h[5]), str(h[6]), str(h[7]), str(h[8]))
+                    for h in raw_hits
+                ]
+                with heur_cache_lock:
+                    heur_sha_cache[sha256] = cached_templates
+
+            if not cached_templates:
                 return None
+
+            local_hits = [
+                [logical_path, file_path.name, sha256, *tmpl]
+                for tmpl in cached_templates
+            ]
             return (sha256, logical_path, file_path.name.lower(), local_hits)
 
         if scan_items:
@@ -2064,43 +2113,100 @@ class FileEnrichmentEngine:
 
         ocr_records: List[Dict[str, Any]] = []
         seen_ocr_keys: Set[Tuple[str, str]] = set()
+        workers = self._resolve_workers(max_workers)
 
         if candidate_images:
-            ocr_engine = self._get_or_create_ocr()
-            if ocr_engine is None:
+            base_engine = self._get_or_create_ocr()
+            if base_engine is None:
                 return 0
+            ocr_cls = _get_rapidocr_cls()
+            is_standard_rapidocr = bool(ocr_cls is not None and isinstance(base_engine, ocr_cls))
 
-            ocr_sha_cache: Dict[str, Optional[Tuple[str, float, int]]] = {}
-            for img_path, logical_path in candidate_images:
+            # Phase 1: Parallel pre-filter (size/dimensions/RecycleBin $I metadata) + SHA-256 deduplication across workers
+            def _prep_image(item: Tuple[Path, str]) -> Optional[Tuple[Path, str, str, str]]:
+                img_path, logical_path = item
                 try:
-                    if img_path.stat().st_size < 100:
-                        continue
+                    fname_up = img_path.name.upper()
+                    if fname_up.startswith("$I") and (
+                        "recyclebin" in str(img_path).lower() or "$recycle.bin" in logical_path.lower()
+                    ):
+                        return None
+                    st_size = img_path.stat().st_size
+                    if st_size < 100:
+                        return None
+                    if is_standard_rapidocr and logical_path.startswith("[Carved]") and st_size < 16384:
+                        return None
                     dim_str = "unknown"
                     try:
                         with Image.open(img_path) as img:
                             w, h = img.size
                             if (w < 30 and h < 30) or (w * h < 1200):
-                                continue
+                                return None
+                            if is_standard_rapidocr and logical_path.startswith("[Carved]") and (w < 80 or h < 40 or (w * h < 6400)):
+                                return None
                             dim_str = f"{w}x{h}"
                     except Exception:
-                        # Fallback: let RapidOCR attempt to read directly
-                        pass
-
+                        if is_standard_rapidocr:
+                            return None
                     sha256 = self.compute_sha256(img_path)
-                    key = (sha256, logical_path.lower())
-                    if key in seen_ocr_keys:
-                        continue
+                    return (img_path, logical_path, dim_str, sha256)
+                except Exception as exc:
+                    self._log(f"Warning: Failed OCR pre-check on {img_path}: {exc}", level="WARNING")
+                    return None
 
-                    if sha256 in ocr_sha_cache:
-                        cached_ocr = ocr_sha_cache[sha256]
-                        if cached_ocr is None:
-                            continue
-                        extracted_text, avg_conf, non_empty_line_cnt = cached_ocr
-                    else:
-                        result, _ = ocr_engine(str(img_path))
+            if workers > 1 and len(candidate_images) > 1:
+                with ThreadPoolExecutor(max_workers=max(1, min(workers, 32, len(candidate_images)))) as prep_pool:
+                    prepped = [r for r in prep_pool.map(_prep_image, candidate_images) if r is not None]
+            else:
+                prepped = [r for r in (_prep_image(it) for it in candidate_images) if r is not None]
+
+            # Group by unique SHA-256 so duplicate images are only OCR'd once
+            unique_sha_samples: Dict[str, Path] = {}
+            for img_path, _lpath, _dim, sha256 in prepped:
+                if sha256 not in unique_sha_samples:
+                    unique_sha_samples[sha256] = img_path
+
+            if unique_sha_samples:
+                ocr_local = threading.local()
+
+                cpu_cnt = os.cpu_count() or 4
+                ocr_workers = max(1, min(workers, max(1, cpu_cnt // 2), 4, len(unique_sha_samples)))
+                intra_threads = max(1, cpu_cnt // ocr_workers)
+
+                def _get_worker_ocr() -> Any:
+                    eng = getattr(ocr_local, "engine", None)
+                    if eng is not None:
+                        return eng
+                    # Reuse base_engine if running single-threaded or if RapidOCR class isn't standard
+                    if ocr_workers <= 1 or ocr_cls is None or not isinstance(base_engine, ocr_cls):
+                        ocr_local.engine = base_engine
+                        return base_engine
+                    try:
+                        eng = ocr_cls(
+                            intra_op_num_threads=intra_threads,
+                            inter_op_num_threads=1,
+                        )
+                    except TypeError:
+                        try:
+                            eng = ocr_cls()
+                        except Exception:
+                            eng = base_engine
+                    except Exception:
+                        eng = base_engine
+                    ocr_local.engine = eng
+                    return eng
+
+                def _run_ocr_on_sample(pair: Tuple[str, Path]) -> Tuple[str, Optional[Tuple[str, float, int]]]:
+                    sha256, img_path = pair
+                    try:
+                        eng = _get_worker_ocr()
+                        if eng is base_engine and ocr_workers > 1:
+                            with self._ocr_lock:
+                                result, _ = eng(str(img_path))
+                        else:
+                            result, _ = eng(str(img_path))
                         if not result:
-                            ocr_sha_cache[sha256] = None
-                            continue
+                            return (sha256, None)
 
                         extracted_lines: List[str] = []
                         confidences: List[float] = []
@@ -2109,16 +2215,22 @@ class FileEnrichmentEngine:
                                 continue
                             txt_val: Optional[str] = None
                             raw_conf: Optional[float] = None
-                            if len(line) >= 3 and isinstance(line[1], str):
-                                txt_val = line[1]
-                                raw_conf = float(line[2])
-                            elif (
-                                len(line) >= 2
-                                and isinstance(line[1], (list, tuple))
-                                and len(line[1]) >= 2
-                            ):
-                                txt_val = str(line[1][0])
-                                raw_conf = float(line[1][1])
+                            try:
+                                if len(line) >= 3 and isinstance(line[1], str):
+                                    txt_val = line[1]
+                                    raw_conf = float(line[2])
+                                elif (
+                                    len(line) >= 2
+                                    and isinstance(line[1], (list, tuple))
+                                    and len(line[1]) >= 2
+                                ):
+                                    txt_val = str(line[1][0])
+                                    raw_conf = float(line[1][1])
+                                elif len(line) == 2 and isinstance(line[0], str):
+                                    txt_val = line[0]
+                                    raw_conf = float(line[1])
+                            except (TypeError, ValueError, IndexError):
+                                continue
 
                             if txt_val is not None and raw_conf is not None:
                                 if 1.0 < raw_conf <= 100.0:
@@ -2129,8 +2241,7 @@ class FileEnrichmentEngine:
 
                         extracted_text = "\n".join(extracted_lines).strip()
                         if not extracted_text:
-                            ocr_sha_cache[sha256] = None
-                            continue
+                            return (sha256, None)
 
                         avg_conf = (
                             max(0.0, min(1.0, sum(confidences) / len(confidences)))
@@ -2138,8 +2249,29 @@ class FileEnrichmentEngine:
                             else 1.0
                         )
                         non_empty_line_cnt = len([ln for ln in extracted_text.splitlines() if ln.strip()])
-                        ocr_sha_cache[sha256] = (extracted_text, avg_conf, non_empty_line_cnt)
+                        return (sha256, (extracted_text, avg_conf, non_empty_line_cnt))
+                    except Exception as exc:
+                        self._log(f"Warning: Failed OCR on {img_path}: {exc}", level="WARNING")
+                        return (sha256, None)
 
+                ocr_sha_cache: Dict[str, Optional[Tuple[str, float, int]]] = {}
+                if ocr_workers > 1:
+                    with ThreadPoolExecutor(max_workers=ocr_workers) as ocr_pool:
+                        for sha_k, ocr_val in ocr_pool.map(_run_ocr_on_sample, list(unique_sha_samples.items())):
+                            ocr_sha_cache[sha_k] = ocr_val
+                else:
+                    for pair in unique_sha_samples.items():
+                        sha_k, ocr_val = _run_ocr_on_sample(pair)
+                        ocr_sha_cache[sha_k] = ocr_val
+
+                for img_path, logical_path, dim_str, sha256 in prepped:
+                    key = (sha256, logical_path.lower())
+                    if key in seen_ocr_keys:
+                        continue
+                    cached_ocr = ocr_sha_cache.get(sha256)
+                    if cached_ocr is None:
+                        continue
+                    extracted_text, avg_conf, non_empty_line_cnt = cached_ocr
                     seen_ocr_keys.add(key)
                     ocr_records.append(
                         {
@@ -2157,8 +2289,6 @@ class FileEnrichmentEngine:
                             "source_file": logical_path,
                         }
                     )
-                except Exception as exc:
-                    self._log(f"Warning: Failed OCR on {img_path}: {exc}", level="WARNING")
 
         with DuckDBManager.get_lock(self.case_id):
             conn = DuckDBManager.get_connection(self.case_id, read_only=False)
@@ -2197,11 +2327,10 @@ class FileEnrichmentEngine:
                         use_seq_id=False,
                         row_id_offset=max_m_id,
                     )
-                for rec in ocr_records:
-                    cur.execute(
-                        "UPDATE file_enrichment SET ocr_extracted_text = ? WHERE file_path = ?;",
-                        [rec["extracted_text"], rec["file_path"]],
-                    )
+                cur.executemany(
+                    "UPDATE file_enrichment SET ocr_extracted_text = ? WHERE file_path = ?;",
+                    [[rec["extracted_text"], rec["file_path"]] for rec in ocr_records],
+                )
 
             reg_table = "media_ocr_results" if has_media_ocr else "artifact_ocr_results"
             ocr_count = cur.execute(f'SELECT COUNT(*) FROM "{reg_table}";').fetchone()[0]
@@ -2247,7 +2376,7 @@ class FileEnrichmentEngine:
             except OSError:
                 return None
 
-        with ThreadPoolExecutor(max_workers=max(1, min(workers, 6))) as pool:
+        with ThreadPoolExecutor(max_workers=max(1, min(workers, 32))) as pool:
             hashed = [r for r in pool.map(_hash_item, scan_items) if r is not None]
 
         deduped: List[List[Any]] = []
@@ -2298,34 +2427,94 @@ class FileEnrichmentEngine:
         enable_ioc: bool = True,
         max_workers: Optional[int] = None,
         target_dir: Optional[Union[str, Path]] = None,
+        progress_hook: Optional[Any] = None,
     ) -> Dict[str, int]:
         workers = self._resolve_workers(max_workers)
         results: Dict[str, int] = {}
+        if callable(progress_hook):
+            try:
+                progress_hook(73, "Indexing staged files for File Enrichment (IOC / YARA-X / Stinger / RapidOCR)...")
+            except Exception:
+                pass
         vfs_lookup, mft_lookup = self._load_path_lookups()
         scan_items = self._collect_scan_files(target_dir, vfs_lookup, mft_lookup)
         precollected = (vfs_lookup, mft_lookup, scan_items)
 
-        if enable_yara:
-            yara_hits, _ = self.scan_yara(
-                target_dir=target_dir, max_workers=workers, _precollected=precollected
-            )
-            results["artifact_yara_hits"] = yara_hits
-        else:
+        def _run_yara_or_hash() -> Tuple[str, Optional[int]]:
+            if enable_yara:
+                yara_hits, _ = self.scan_yara(
+                    target_dir=target_dir, max_workers=workers, _precollected=precollected
+                )
+                if callable(progress_hook):
+                    try:
+                        progress_hook(76, f"YARA-X & IOC hashing complete ({yara_hits} YARA detections).")
+                    except Exception:
+                        pass
+                return ("artifact_yara_hits", yara_hits)
             self._hash_all_files_only(
                 target_dir=target_dir, max_workers=workers, _precollected=precollected
             )
+            if callable(progress_hook):
+                try:
+                    progress_hook(76, "IOC & SHA-256 file hashing complete.")
+                except Exception:
+                    pass
+            return ("_hashed", None)
 
+        tasks_to_run: List[Any] = [_run_yara_or_hash]
         if enable_stinger:
-            stinger_hits = self.scan_stinger(
-                target_dir=target_dir, max_workers=workers, _precollected=precollected
-            )
-            results["artifact_stinger_hits"] = stinger_hits
+            def _run_stinger_task() -> Tuple[str, int]:
+                st_hits = self.scan_stinger(target_dir=target_dir, max_workers=workers, _precollected=precollected)
+                if callable(progress_hook):
+                    try:
+                        progress_hook(79, f"Trellix Stinger & PE Heuristics complete ({st_hits} detections).")
+                    except Exception:
+                        pass
+                return ("artifact_stinger_hits", st_hits)
 
+            tasks_to_run.append(_run_stinger_task)
         if enable_ocr:
-            ocr_hits = self.scan_ocr(
-                target_dir=target_dir, max_workers=workers, _precollected=precollected
-            )
-            results["artifact_ocr_results"] = ocr_hits
+            def _run_ocr_task() -> Tuple[str, int]:
+                ocr_cnt = self.scan_ocr(target_dir=target_dir, max_workers=workers, _precollected=precollected)
+                if callable(progress_hook):
+                    try:
+                        progress_hook(82, f"RapidOCR image text extraction complete ({ocr_cnt} images with text).")
+                    except Exception:
+                        pass
+                return ("artifact_ocr_results", ocr_cnt)
+
+            tasks_to_run.append(_run_ocr_task)
+
+        if len(tasks_to_run) > 1 and workers > 1:
+            with ThreadPoolExecutor(max_workers=len(tasks_to_run)) as stage_pool:
+                futs = [stage_pool.submit(fn) for fn in tasks_to_run]
+                for fut in as_completed(futs):
+                    k, v = fut.result()
+                    if v is not None:
+                        results[k] = v
+        else:
+            for fn in tasks_to_run:
+                k, v = fn()
+                if v is not None:
+                    results[k] = v
+
+        # Ensure OCR text is synced into file_enrichment even when scan_ocr finished before scan_yara
+        if enable_ocr and results.get("artifact_ocr_results", 0) > 0:
+            with DuckDBManager.get_lock(self.case_id):
+                conn = DuckDBManager.get_connection(self.case_id, read_only=False)
+                cur = conn.cursor()
+                try:
+                    cur.execute(
+                        """
+                        UPDATE file_enrichment
+                        SET ocr_extracted_text = o.extracted_text
+                        FROM artifact_ocr_results o
+                        WHERE file_enrichment.file_path = o.file_path
+                          AND (file_enrichment.ocr_extracted_text IS NULL OR file_enrichment.ocr_extracted_text = '');
+                        """
+                    )
+                except Exception:
+                    pass
 
         self._ensure_all_malware_view()
 

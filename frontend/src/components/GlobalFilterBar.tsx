@@ -877,7 +877,7 @@ export const GlobalFilterBar: React.FC<GlobalFilterBarProps> = ({
                         type="checkbox"
                         checked={isChecked}
                         onChange={() => toggleContentType(ct.id)}
-                        className="rounded border-[#cbd5e1] text-[#0284c7] mt-0.5 cursor-pointer"
+                        className="rounded border-[#cbd5e1] dark:border-[#334155] text-[#0284c7] mt-0.5 cursor-pointer"
                       />
                       <span className="truncate leading-tight text-[#0f172a] dark:text-[#f8fafc]">
                         {ct.label}
@@ -1034,7 +1034,7 @@ export const GlobalFilterBar: React.FC<GlobalFilterBarProps> = ({
                               type="checkbox"
                               checked={isChecked}
                               onChange={() => toggleKeyword(kw.keyword)}
-                              className="rounded border-[#cbd5e1] text-[#0284c7] cursor-pointer"
+                              className="rounded border-[#cbd5e1] dark:border-[#334155] text-[#0284c7] cursor-pointer"
                             />
                             <span className="font-mono truncate">{kw.keyword}</span>
                           </div>
@@ -1088,7 +1088,7 @@ export const GlobalFilterBar: React.FC<GlobalFilterBarProps> = ({
                     onChange={(e) =>
                       onFilterChange({ ...filterState, bookmarkedOnly: e.target.checked })
                     }
-                    className="rounded border-[#cbd5e1] text-[#0284c7] cursor-pointer"
+                    className="rounded border-[#cbd5e1] dark:border-[#334155] text-[#0284c7] cursor-pointer"
                   />
                   <span>Bookmarked Rows Only</span>
                 </span>
@@ -1109,7 +1109,7 @@ export const GlobalFilterBar: React.FC<GlobalFilterBarProps> = ({
                         type="checkbox"
                         checked={isChecked}
                         onChange={() => toggleTag(tag.id)}
-                        className="rounded border-[#cbd5e1] text-[#0284c7] cursor-pointer"
+                        className="rounded border-[#cbd5e1] dark:border-[#334155] text-[#0284c7] cursor-pointer"
                       />
                       <span className={`px-2 py-0.5 rounded text-[11px] font-semibold border ${tag.color}`}>
                         {tag.label}

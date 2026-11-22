@@ -9,6 +9,7 @@
    Root Theme Variables & Base Application Defaults
    ========================================================================== */
 :root {
+  color-scheme: light;
   --wft-bg: #f1f5f9;
   --wft-panel: #ffffff;
   --wft-border: #cbd5e1;
@@ -20,6 +21,7 @@
 }
 
 .dark {
+  color-scheme: dark;
   --wft-bg: #0f172a;
   --wft-panel: #1e293b;
   --wft-border: #334155;
@@ -28,6 +30,23 @@
   --wft-blue: #38bdf8;
   --wft-blue-hover: #0284c7;
   --wft-row-selected: #0c4a6e;
+}
+
+.dark select option {
+  background-color: #0f172a;
+  color: #f8fafc;
+}
+
+@layer utilities {
+  .shadow-2xs {
+    box-shadow: 0 1px 1px 0 rgb(0 0 0 / 0.04);
+  }
+  .shadow-xs {
+    box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.06);
+  }
+  .backdrop-blur-xs {
+    backdrop-filter: blur(2px);
+  }
 }
 
 body {
@@ -344,8 +363,17 @@ body {
   --ag-background-color: #0f172a !important;
   --ag-odd-row-background-color: #131c31 !important;
   --ag-header-background-color: #1e293b !important;
+  --ag-header-cell-hover-background-color: #334155 !important;
   --ag-foreground-color: #f8fafc !important;
+  --ag-secondary-foreground-color: #94a3b8 !important;
   --ag-header-foreground-color: #38bdf8 !important;
+  --ag-icon-font-color: #94a3b8 !important;
+  --ag-control-panel-background-color: #1e293b !important;
+  --ag-modal-overlay-background-color: rgba(15, 23, 42, 0.72) !important;
+  --ag-input-border-color: #334155 !important;
+  --ag-input-focus-border-color: #38bdf8 !important;
+  --ag-checkbox-unchecked-color: #64748b !important;
+  --ag-checkbox-background-color: #0f172a !important;
   --ag-cell-horizontal-border: 1px solid #334155 !important;
   --ag-row-border-color: #334155 !important;
   --ag-border-color: #334155 !important;
@@ -480,6 +508,9 @@ tbody td {
   align-items: center !important;
   justify-content: center !important;
   overflow: hidden !important;
+  background: #f1f5f9;
+}
+.dark .wft-thumb-media {
   background: rgba(15, 23, 42, 0.65);
 }
 .wft-thumb-media img {

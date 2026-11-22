@@ -41,7 +41,8 @@ rule C2_CobaltStrike_Beacon_Indicators {
         $ref = "ReflectiveLoader" ascii wide
         $bcn1 = "beacon.dll" ascii wide nocase
         $bcn2 = "beacon.x64.dll" ascii wide nocase
-        $cfg = { 00 01 00 01 00 02 00 01 00 02 00 02 }$cradle_cs = "DownloadString('http://127.0.0.1:" ascii wide nocase
+        $cfg = { 00 01 00 01 00 02 00 01 00 02 00 02 }
+        $cradle_cs = "DownloadString('http://127.0.0.1:" ascii wide nocase
         $iex1 = "IEX" ascii wide nocase
         $iex2 = "Invoke-Expression" ascii wide nocase
     condition:

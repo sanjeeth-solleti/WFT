@@ -886,7 +886,7 @@ def get_browser_profile_dir() -> Path:
 
 
 def build_browser_app_args(url: str, profile_dir: Optional[Path] = None) -> List[str]:
-    use_isolated = os.environ.get("WFT_ISOLATED_BROWSER_PROFILE") == "1"
+    use_isolated = os.environ.get("WFT_ISOLATED_BROWSER_PROFILE", "1").strip() != "0"
     if not use_isolated:
         return [f"--app={url}", "--new-window"]
 
@@ -905,70 +905,180 @@ def build_browser_app_args(url: str, profile_dir: Optional[Path] = None) -> List
         "--no-first-run",
         "--no-default-browser-check",
         "--disable-background-mode",
+        "--no-service-autorun",
+        "--disable-features=msEdgeStartupBoost",
         "--new-window",
     ]
 
 
+def run_native_qt_window(url: str) -> int:
+    """
+    Launches a native Windows Forensic Toolkit (WFT) desktop workstation window
+    using PySide6 QtWebEngineWidgets so Task Manager displays 'Windows Forensic Toolkit (WFT)'
+    rather than Microsoft Edge (msedge.exe).
+    """
+    try:
+        if sys.platform == "win32":
+            try:
+                import ctypes
+                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+                    "WindowsForensicToolkit.WFT.Workstation.2.0"
+                )
+            except Exception:
+                pass
+
+        from PySide6.QtCore import QUrl, Qt
+        from PySide6.QtGui import QColor, QIcon
+        from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile, QWebEngineSettings
+        from PySide6.QtWebEngineWidgets import QWebEngineView
+        from PySide6.QtWidgets import QApplication, QFileDialog, QMainWindow
+
+        app = QApplication(sys.argv)
+        app.setApplicationName("Windows Forensic Toolkit (WFT)")
+        app.setApplicationDisplayName("Windows Forensic Toolkit (WFT)")
+        app.setOrganizationName("Windows Forensic Toolkit")
+
+        icon_path = get_base_dir() / "assets" / "wft.ico"
+        if icon_path.is_file():
+            app.setWindowIcon(QIcon(str(icon_path)))
+
+        win = QMainWindow()
+        win.setWindowTitle("Windows Forensic Toolkit (WFT)")
+        if icon_path.is_file():
+            win.setWindowIcon(QIcon(str(icon_path)))
+        win.resize(1440, 900)
+        win.setMinimumSize(1024, 680)
+
+        view = QWebEngineView(win)
+        view.page().setBackgroundColor(QColor("#0f172a"))
+        settings = view.settings()
+        settings.setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True)
+        settings.setAttribute(QWebEngineSettings.WebAttribute.JavascriptCanAccessClipboard, True)
+        settings.setAttribute(QWebEngineSettings.WebAttribute.FullScreenSupportEnabled, True)
+
+        profile = QWebEngineProfile.defaultProfile()
+
+        def _on_download_requested(download):
+            try:
+                suggested = download.downloadFileName() or "wft_export.bin"
+                downloads_dir = Path.home() / "Downloads"
+                default_path = str((downloads_dir / suggested) if downloads_dir.is_dir() else (get_base_dir() / suggested))
+                save_path, _ = QFileDialog.getSaveFileName(
+                    win,
+                    "Save Forensic Export",
+                    default_path,
+                )
+                if save_path:
+                    p = Path(save_path)
+                    download.setDownloadDirectory(str(p.parent))
+                    download.setDownloadFileName(p.name)
+                    download.accept()
+                else:
+                    download.cancel()
+            except Exception:
+                try:
+                    download.accept()
+                except Exception:
+                    pass
+
+        profile.downloadRequested.connect(_on_download_requested)
+
+        view.setUrl(QUrl(url))
+        win.setCentralWidget(view)
+        win.show()
+        return int(app.exec())
+    except Exception as ex:
+        write_log(f"Native QtWebEngine window initialization failed: {ex}", tag="WARN")
+        return 2
+
+
 def launch_desktop_window(url: str) -> Optional[subprocess.Popen]:
     """
-    Opens the UI inside a standalone application frame
-    (Google Chrome App mode, Microsoft Edge App mode, or system default browser).
+    Opens the UI inside a standalone application frame:
+    1. Native PySide6 QtWebEngine desktop shell ('Windows Forensic Toolkit (WFT)')
+    2. Google Chrome App mode with isolated profile (build_browser_app_args)
+    3. System default browser fallback (never forces Microsoft Edge unless WFT_ALLOW_EDGE=1).
     """
     if os.environ.get("WFT_NO_BROWSER") == "1" or any(a.lower() == "--no-browser" for a in sys.argv[1:]):
-        write_log("Skipping desktop browser window (--no-browser / WFT_NO_BROWSER=1).", tag="LAUNCHER")
+        write_log("Skipping desktop window (--no-browser / WFT_NO_BROWSER=1).", tag="LAUNCHER")
         return None
 
     if os.environ.get("WFT_LAUNCHED_FROM_EXE") == "1":
-        write_log("Desktop browser window opening handled by WFT.exe parent launcher.", tag="LAUNCHER")
+        write_log("Desktop window opening handled by WFT.exe parent launcher.", tag="LAUNCHER")
         return None
 
     write_log(f"Launching desktop application window for {url}...", tag="LAUNCHER")
 
-    # 1. Try Google Chrome App Mode first (most reliable chromeless app frame on Windows)
+    # 1. Try Native PySide6 Desktop Shell first (unless WFT_UI_MODE=browser)
+    ui_mode = os.environ.get("WFT_UI_MODE", "native").strip().lower()
+    if ui_mode != "browser":
+        try:
+            import PySide6.QtWebEngineWidgets  # noqa: F401
+            if getattr(sys, "frozen", False):
+                native_cmd = [sys.executable, "--native-ui", url]
+            else:
+                py_bin = os.environ.get("WFT_PYTHON_EXE", "").strip() or sys.executable
+                native_cmd = [py_bin, str(Path(__file__).resolve()), "--native-ui", url]
+            proc = subprocess.Popen(
+                native_cmd,
+                cwd=str(get_base_dir()),
+            )
+            time.sleep(0.8)
+            if proc.poll() is None:
+                write_log("Native Windows Forensic Toolkit (WFT) QtWebEngine desktop window launched.", tag="LAUNCHER")
+                return proc
+        except Exception as qt_ex:
+            write_log(f"Native PySide6 desktop shell unavailable ({qt_ex}); falling back to Chrome App mode.", tag="LAUNCHER")
+
+    # 2. Try Google Chrome App Mode with isolated profile args (never delegates to Edge)
+    local_app_data = os.environ.get("LOCALAPPDATA", "")
     chrome_candidates = [
         Path(r"C:\Program Files\Google\Chrome\Application\chrome.exe"),
         Path(r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"),
     ]
+    if local_app_data:
+        chrome_candidates.append(Path(local_app_data) / "Google" / "Chrome" / "Application" / "chrome.exe")
     which_chrome = shutil.which("chrome.exe") or shutil.which("chrome")
     if which_chrome:
         chrome_candidates.insert(0, Path(which_chrome))
 
+    app_args = build_browser_app_args(url)
     for cp in chrome_candidates:
         if cp.exists():
             try:
                 write_log(f"Attempting Google Chrome App Mode: {cp}", tag="LAUNCHER")
-                proc = subprocess.Popen([str(cp), f"--app={url}", "--new-window"])
+                proc = subprocess.Popen([str(cp)] + app_args)
                 time.sleep(0.6)
                 if proc.poll() is None or proc.returncode == 0:
                     write_log("Google Chrome App window successfully launched.", tag="LAUNCHER")
                     return proc
-                write_log(f"Chrome exited immediately with code {proc.returncode}; trying Edge fallback.", tag="WARN")
+                write_log(f"Chrome exited immediately with code {proc.returncode}.", tag="WARN")
             except Exception as ex:
                 write_log(f"Failed to launch Chrome: {ex}", tag="LAUNCHER")
 
-    # 2. Try Microsoft Edge App Mode
-    edge_candidates = [
-        Path(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"),
-        Path(r"C:\Program Files\Microsoft\Edge\Application\msedge.exe"),
-    ]
-    which_edge = shutil.which("msedge.exe") or shutil.which("msedge")
-    if which_edge:
-        edge_candidates.insert(0, Path(which_edge))
+    # 3. Optional Microsoft Edge App Mode ONLY if explicitly opted in via WFT_ALLOW_EDGE=1
+    if os.environ.get("WFT_ALLOW_EDGE", "").strip() == "1":
+        edge_candidates = [
+            Path(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"),
+            Path(r"C:\Program Files\Microsoft\Edge\Application\msedge.exe"),
+        ]
+        which_edge = shutil.which("msedge.exe") or shutil.which("msedge")
+        if which_edge:
+            edge_candidates.insert(0, Path(which_edge))
 
-    for ep in edge_candidates:
-        if ep.exists():
-            try:
-                write_log(f"Attempting Microsoft Edge App Mode: {ep}", tag="LAUNCHER")
-                proc = subprocess.Popen([str(ep), f"--app={url}", "--new-window"])
-                time.sleep(0.6)
-                if proc.poll() is None or proc.returncode == 0:
-                    write_log("Microsoft Edge App window successfully launched.", tag="LAUNCHER")
-                    return proc
-                write_log(f"Edge exited immediately with code {proc.returncode}; trying ShellExecute fallback.", tag="WARN")
-            except Exception as ex:
-                write_log(f"Failed to launch Edge: {ex}", tag="LAUNCHER")
+        for ep in edge_candidates:
+            if ep.exists():
+                try:
+                    write_log(f"Attempting Microsoft Edge App Mode (WFT_ALLOW_EDGE=1): {ep}", tag="LAUNCHER")
+                    proc = subprocess.Popen([str(ep)] + app_args)
+                    time.sleep(0.6)
+                    if proc.poll() is None or proc.returncode == 0:
+                        write_log("Microsoft Edge App window successfully launched.", tag="LAUNCHER")
+                        return proc
+                except Exception as ex:
+                    write_log(f"Failed to launch Edge: {ex}", tag="LAUNCHER")
 
-    # 3. System Default Web Browser Fallback (ShellExecute / webbrowser)
+    # 4. System Default Web Browser Fallback (ShellExecute / webbrowser)
     write_log("Opening system default web browser via Windows Shell...", tag="LAUNCHER")
     try:
         if hasattr(os, "startfile"):
@@ -1135,6 +1245,9 @@ def main() -> None:
                 sys.stderr.flush()
                 sys.exit(1)
             sys.exit(0)
+        elif first_arg in ["--native-ui", "-native-ui"]:
+            target_url = argv[1] if len(argv) > 1 else f"http://127.0.0.1:{api_port}"
+            sys.exit(run_native_qt_window(target_url))
         elif first_arg in ["--stop", "-stop", "/stop"]:
             stop_all_services(api_port=api_port)
             print(f"WFT services on ports {api_port} and 5173 stopped.")
@@ -1460,15 +1573,16 @@ def main() -> None:
                 ui_code = ui_proc.poll()
                 if ui_code is not None:
                     elapsed_ui = time.time() - ui_launch_ts
-                    if ui_code == 0:
+                    exit_on_close = os.environ.get("WFT_EXIT_ON_UI_CLOSE", "1").strip() != "0"
+                    if ui_code == 0 and elapsed_ui < 2.0:
                         write_log(
                             f"Browser launcher process completed/delegated ({elapsed_ui:.2f}s); keeping FastAPI backend alive.",
                             tag="WATCHDOG",
                         )
                         ui_proc = None
-                    elif ui_code != 0 and elapsed_ui < 10.0:
+                    elif ui_code != 0 and elapsed_ui < 2.5:
                         write_log(
-                            f"Browser launcher process exited prematurely with code {ui_code} ({elapsed_ui:.2f}s). "
+                            f"Desktop UI process exited prematurely with code {ui_code} ({elapsed_ui:.2f}s). "
                             f"Falling back to system default web browser...",
                             tag="WARN",
                         )
@@ -1480,10 +1594,10 @@ def main() -> None:
                         except Exception as wb_err:
                             write_log(f"webbrowser fallback error: {wb_err}", tag="WARN")
                         ui_proc = None
-                    elif os.environ.get("WFT_EXIT_ON_UI_CLOSE") == "1":
+                    elif exit_on_close:
                         write_log(
-                            f"Desktop application window closed by user (exit code: {ui_code}). "
-                            f"Terminating all WFT background services...",
+                            f"Desktop application window closed by user (exit code: {ui_code}, open {elapsed_ui:.1f}s). "
+                            f"Terminating all WFT background services and releasing database locks...",
                             tag="SHUTDOWN",
                         )
                         cleanup_children()

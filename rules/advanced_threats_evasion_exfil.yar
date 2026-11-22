@@ -125,14 +125,14 @@ rule Loader_Process_Hollowing_And_APC_Injection {
         $h9 = "SetThreadContext" ascii wide
         $h10 = "Wow64SetThreadContext" ascii wide
         $h11 = "ResumeThread" ascii wide
-        $h12 = "ReadProcessMemory" ascii wide
         $apc1 = "NtQueueApcThread" ascii wide
         $apc2 = "NtTestAlert" ascii wide
     condition:
         _wft_adv_is_pe and filesize < 3MB and
         not ($ms_corp and ($ms_os1 or $ms_os2)) and
         not any of ($excl*) and (
-            (($h1 or $h2) and ($h3 or $h4) and $h5 and $h6 and $h12 and ($h7 or $h8) and ($h9 or $h10) and $h11) or
+            (($h3 or $h4) and $h5 and $h6 and ($h9 or $h10) and $h11) or
+            (($h1 or $h2) and ($h7 or $h8) and $h5 and $h6 and ($h9 or $h10) and $h11) or
             (($h1 or $h2) and $h5 and $h6 and $apc1 and $apc2 and $h11)
         )
 }

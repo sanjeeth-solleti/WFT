@@ -204,7 +204,7 @@ export const ColumnFilterPopover: React.FC<ColumnFilterPopoverProps> = ({
               type="checkbox"
               checked={areAllFilteredSelected}
               onChange={toggleSelectAll}
-              className="w-3.5 h-3.5 rounded border-[#cbd5e1] text-[#0284c7] focus:ring-0 cursor-pointer"
+              className="w-3.5 h-3.5 rounded border-[#cbd5e1] dark:border-[#334155] text-[#0284c7] focus:ring-0 cursor-pointer"
             />
             <span className="font-semibold text-[11.5px] text-[#0f172a] dark:text-[#f8fafc]">
               (Select All)
@@ -248,7 +248,7 @@ export const ColumnFilterPopover: React.FC<ColumnFilterPopoverProps> = ({
                       type="checkbox"
                       checked={isChecked}
                       onChange={() => toggleItem(item.value)}
-                      className="w-3.5 h-3.5 rounded border-[#cbd5e1] text-[#0284c7] focus:ring-0 cursor-pointer shrink-0"
+                      className="w-3.5 h-3.5 rounded border-[#cbd5e1] dark:border-[#334155] text-[#0284c7] focus:ring-0 cursor-pointer shrink-0"
                     />
                     <span
                       className={`truncate font-mono text-[11.5px] ${

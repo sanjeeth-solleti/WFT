@@ -24,6 +24,7 @@ import os
 import re
 import struct
 import time
+import zlib
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
@@ -319,9 +320,9 @@ def _pst_decrypt_cyclic(data: bytes, bid: int) -> bytes:
 class _PurePythonPstNdb:
     """
     Pure-Python [MS-PST] !BDN NDB & LTP Property Context reader supporting:
-    - ANSI 32-bit PST/OST (wVer 14, 15) and Unicode 64-bit PST/OST (wVer 21, 23)
-    - NDB_CRYPT_NONE (0), NDB_CRYPT_PERMUTE (1), NDB_CRYPT_CYCLIC (2)
-    - Recursive NBT & BBT 512-byte BTree traversal
+    - ANSI 32-bit PST/OST (wVer 14, 15), Unicode 64-bit PST/OST (wVer 21, 23), and Outlook 2013+ 4K Unicode OST (wVer 36, 37)
+    - NDB_CRYPT_NONE (0), NDB_CRYPT_PERMUTE (1), NDB_CRYPT_CYCLIC (2), and deflate block compression
+    - Recursive NBT & BBT 512-byte / 4096-byte BTree traversal
     - Multi-block XBLOCK / XXBLOCK data trees and SLBLOCK / SIBLOCK subnode trees
     - Heap-on-Node (HN), BTree-on-Heap (BTH), and Property Context (0xBC) MAPI properties & attachments
     """
@@ -330,8 +331,9 @@ class _PurePythonPstNdb:
         self.raw = raw
         self.valid = False
         self.is_unicode = False
+        self.is_4k = False
         self.crypt_method = 0
-        self.bbt: Dict[int, Tuple[int, int]] = {}
+        self.bbt: Dict[int, Tuple[int, int, int]] = {}
         self.nbt: List[Tuple[int, int, int, int]] = []
 
         if len(raw) < 564 or raw[:4] != b"!BDN":
@@ -340,16 +342,24 @@ class _PurePythonPstNdb:
         w_ver = struct.unpack_from("<H", raw, 10)[0]
         if w_ver in (14, 15):
             self.is_unicode = False
+            self.is_4k = False
             self.crypt_method = raw[461]
             bid_nbt, ib_nbt, bid_bbt, ib_bbt = struct.unpack_from("<IIII", raw, 184)
         elif w_ver in (21, 23):
             self.is_unicode = True
+            self.is_4k = False
+            self.crypt_method = raw[513]
+            bid_nbt, ib_nbt, bid_bbt, ib_bbt = struct.unpack_from("<QQQQ", raw, 216)
+        elif w_ver in (36, 37):
+            self.is_unicode = True
+            self.is_4k = True
             self.crypt_method = raw[513]
             bid_nbt, ib_nbt, bid_bbt, ib_bbt = struct.unpack_from("<QQQQ", raw, 216)
         else:
             return
 
-        if ib_nbt <= 0 or ib_bbt <= 0 or ib_nbt + 512 > len(raw) or ib_bbt + 512 > len(raw):
+        page_sz = 4096 if self.is_4k else 512
+        if ib_nbt <= 0 or ib_bbt <= 0 or ib_nbt + page_sz > len(raw) or ib_bbt + page_sz > len(raw):
             return
 
         self._walk_btree_page(ib_bbt, is_nbt=False, depth=0, visited_pages=set(), parent_c_level=None)
@@ -370,18 +380,24 @@ class _PurePythonPstNdb:
     ) -> None:
         if visited_pages is None:
             visited_pages = set()
+        page_sz = 4096 if self.is_4k else 512
         if (
             depth > 16
             or ib < 0
-            or ib + 512 > len(self.raw)
+            or ib + page_sz > len(self.raw)
             or ib in visited_pages
             or len(visited_pages) >= 65536
         ):
             return
         visited_pages.add(ib)
 
-        page = self.raw[ib : ib + 512]
-        if self.is_unicode:
+        page = self.raw[ib : ib + page_sz]
+        if self.is_4k:
+            c_ent = struct.unpack_from("<H", page, 4056)[0]
+            cb_ent = page[4060]
+            c_level = page[4061]
+            max_bytes = 4056
+        elif self.is_unicode:
             c_ent = page[488]
             cb_ent = page[490]
             c_level = page[491]
@@ -432,14 +448,32 @@ class _PurePythonPstNdb:
                 if len(self.bbt) >= 262144:
                     break
                 off = i * cb_ent
-                if self.is_unicode and cb_ent >= 24:
+                if self.is_4k and cb_ent >= 24:
+                    bid, blk_ib, cb_raw, cb_inflated, _ = struct.unpack_from("<QQHHI", page, off)
+                    cb = cb_raw
+                elif self.is_unicode and cb_ent >= 24:
                     bid, blk_ib, cb, _, _ = struct.unpack_from("<QQHHI", page, off)
+                    cb_inflated = cb
                 elif not self.is_unicode and cb_ent >= 12:
                     bid, blk_ib, cb, _ = struct.unpack_from("<IIHH", page, off)
+                    cb_inflated = cb
                 else:
                     break
                 if blk_ib >= 0 and cb > 0 and blk_ib + cb <= len(self.raw):
-                    self.bbt[self._norm_bid(bid)] = (blk_ib, cb)
+                    self.bbt[self._norm_bid(bid)] = (blk_ib, cb, cb_inflated)
+
+    def _read_bbt_block(self, norm: int) -> bytes:
+        ib, cb, cb_inflated = self.bbt[norm]
+        blk = self.raw[ib : ib + cb]
+        if self.is_4k and cb_inflated > 0 and len(blk) >= 2:
+            if cb_inflated != cb or (blk[0] == 0x78 and (blk[0] * 256 + blk[1]) % 31 == 0):
+                try:
+                    inflated = zlib.decompress(blk)
+                    if len(inflated) == cb_inflated:
+                        blk = inflated
+                except Exception:
+                    pass
+        return blk
 
     def read_block_list(
         self,
@@ -471,8 +505,7 @@ class _PurePythonPstNdb:
         visited_bids.add(norm)
         budget[1] += 1
 
-        ib, cb = self.bbt[norm]
-        blk = self.raw[ib : ib + cb]
+        blk = self._read_bbt_block(norm)
         # Internal block flag is bit 1 (0x02) of BID
         if (norm & 0x02) != 0:
             if len(blk) >= 8 and blk[0] == 0x01:  # btype == 0x01: XBLOCK / XXBLOCK
@@ -532,8 +565,7 @@ class _PurePythonPstNdb:
             return {}
         visited_sl_bids.add(norm)
 
-        ib, cb = self.bbt[norm]
-        blk = self.raw[ib : ib + cb]
+        blk = self._read_bbt_block(norm)
         if len(blk) < 8 or blk[0] != 0x02:
             return {}
         c_level = blk[1]

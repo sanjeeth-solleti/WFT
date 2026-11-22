@@ -13,6 +13,7 @@ import re
 import struct
 import time
 import zlib
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, BinaryIO, Dict, List, Optional, Tuple, Union
@@ -1548,19 +1549,27 @@ class MediaParser(BaseParser):
 
         return records
 
-    def _parse_snipping_tool_screenshots(self) -> List[Dict[str, Any]]:
+    def _parse_snipping_tool_screenshots(self, candidate_media: Optional[List[Path]] = None) -> List[Dict[str, Any]]:
         records: List[Dict[str, Any]] = []
         seen_hashes = set()
         seq = 0
 
         staging_resolved = self.staging_dir.resolve()
-        for p in sorted(self.staging_dir.rglob("*"), key=lambda item: str(item)):
-            if not p.is_file():
+        iter_paths = (
+            candidate_media
+            if candidate_media is not None
+            else sorted(self.staging_dir.rglob("*"), key=lambda item: str(item))
+        )
+        for p in iter_paths:
+            if candidate_media is None and not p.is_file():
                 continue
             try:
-                path_lower = p.resolve().relative_to(staging_resolved).as_posix().lower()
+                path_lower = p.relative_to(staging_resolved).as_posix().lower()
             except Exception:
-                path_lower = p.name.lower()
+                try:
+                    path_lower = p.resolve().relative_to(staging_resolved).as_posix().lower()
+                except Exception:
+                    path_lower = p.name.lower()
             if "carved_thumbnails" in path_lower:
                 continue
             if not any(k in path_lower for k in ("screensketch", "snippingtool", "screenshots")):
@@ -1622,9 +1631,10 @@ class MediaParser(BaseParser):
 
         return records
 
-    def parse(self) -> Dict[str, int]:
+    def parse(self, max_workers: int = 16) -> Dict[str, int]:
         start_time = time.time()
-        self._log(f"Starting MediaParser across staging directory: {self.staging_dir}")
+        workers = max(1, min(32, int(max_workers or 16)))
+        self._log(f"Starting MediaParser across staging directory: {self.staging_dir} (workers={workers})")
 
         exif_records: List[Dict[str, Any]] = []
         picture_records: List[Dict[str, Any]] = []
@@ -1634,20 +1644,26 @@ class MediaParser(BaseParser):
         candidate_media: List[Path] = []
         candidate_thumbcache: List[Path] = []
 
-        for p in self.staging_dir.rglob("*"):
-            if not p.is_file():
-                continue
-            p_lower = p.as_posix().lower()
-            if "carved_thumbnails" in p_lower:
-                continue
-
-            name_lower = p.name.lower()
-            sfx = p.suffix.lower()
-
-            if sfx in self.IMAGE_EXTS or sfx in self.VIDEO_EXTS:
-                candidate_media.append(p)
-            elif ("thumbcache_" in name_lower or "iconcache_" in name_lower) and sfx in (".db", ".db2", ""):
-                candidate_thumbcache.append(p)
+        _SKIP_MEDIA_ROOTS = {
+            "registry", "logs", "prefetch", "filesystem", "mft", "srum",
+            "jumplists", "tasks", "powershell", "rmm", "carved_thumbnails", "zoneidentifier",
+        }
+        if self.staging_dir.exists():
+            staging_res = self.staging_dir.resolve()
+            for walk_root, dirs, files in os.walk(staging_res):
+                root_p = Path(walk_root)
+                if root_p == staging_res:
+                    dirs[:] = [d for d in dirs if d.lower() not in _SKIP_MEDIA_ROOTS]
+                else:
+                    dirs[:] = [d for d in dirs if d.lower() != "carved_thumbnails"]
+                for fname in files:
+                    p = root_p / fname
+                    name_lower = fname.lower()
+                    sfx = p.suffix.lower()
+                    if sfx in self.IMAGE_EXTS or sfx in self.VIDEO_EXTS:
+                        candidate_media.append(p)
+                    elif ("thumbcache_" in name_lower or "iconcache_" in name_lower) and sfx in (".db", ".db2", ""):
+                        candidate_thumbcache.append(p)
 
         candidate_media = sorted(
             candidate_media,
@@ -1655,46 +1671,56 @@ class MediaParser(BaseParser):
         )
         candidate_thumbcache = sorted(candidate_thumbcache, key=lambda item: str(item))
 
-        seen_media_hashes = set()
-        for mf in candidate_media:
+        def _parse_single_media(mf: Path) -> Optional[Tuple[str, str, str, Dict[str, Any]]]:
             try:
                 if "carved_thumbnails" in mf.as_posix().lower() or mf.stat().st_size == 0:
-                    continue
+                    return None
                 mf_hash = compute_sha256(mf)
-                dedup_key = (mf.name.lower(), mf_hash)
-                if dedup_key in seen_media_hashes:
-                    continue
-                seen_media_hashes.add(dedup_key)
-            except Exception:
-                continue
-
-            try:
                 if mf.suffix.lower() in self.IMAGE_EXTS:
                     rec = self._parse_image_exif(mf)
-                    exif_rec = {k: v for k, v in rec.items() if k not in ("width", "height")}
-                    exif_records.append(exif_rec)
-                    picture_records.append(
-                        {k: v for k, v in rec.items() if k not in ("width", "height", "duration_seconds")}
-                    )
-                else:
-                    rec = self._parse_video_file(mf)
-                    exif_rec = {k: v for k, v in rec.items() if k not in ("width", "height")}
-                    exif_records.append(exif_rec)
-                    video_records.append({
-                        "file_path": rec["file_path"],
-                        "file_name": rec["file_name"],
-                        "file_type": rec["file_type"],
-                        "file_size_bytes": rec["file_size_bytes"],
-                        "sha256": rec["sha256"],
-                        "datetime_original": rec["datetime_original"],
-                        "duration_seconds": rec["duration_seconds"],
-                        "width": rec["width"],
-                        "height": rec["height"],
-                        "raw_metadata": rec["raw_metadata"],
-                        "source_file": rec["source_file"],
-                    })
+                    return ("image", mf.name.lower(), mf_hash, rec)
+                rec = self._parse_video_file(mf)
+                return ("video", mf.name.lower(), mf_hash, rec)
             except Exception as ex:
                 self._log(f"Failed parsing media {mf}: {ex}", "WARNING")
+                return None
+
+        if workers > 1 and len(candidate_media) > 2:
+            with ThreadPoolExecutor(max_workers=min(workers, len(candidate_media))) as pool:
+                media_results = list(pool.map(_parse_single_media, candidate_media))
+        else:
+            media_results = [_parse_single_media(mf) for mf in candidate_media]
+
+        seen_media_hashes = set()
+        for res_item in media_results:
+            if res_item is None:
+                continue
+            kind, name_low, mf_hash, rec = res_item
+            dedup_key = (name_low, mf_hash)
+            if dedup_key in seen_media_hashes:
+                continue
+            seen_media_hashes.add(dedup_key)
+
+            exif_rec = {k: v for k, v in rec.items() if k not in ("width", "height")}
+            exif_records.append(exif_rec)
+            if kind == "image":
+                picture_records.append(
+                    {k: v for k, v in rec.items() if k not in ("width", "height", "duration_seconds")}
+                )
+            else:
+                video_records.append({
+                    "file_path": rec["file_path"],
+                    "file_name": rec["file_name"],
+                    "file_type": rec["file_type"],
+                    "file_size_bytes": rec["file_size_bytes"],
+                    "sha256": rec["sha256"],
+                    "datetime_original": rec["datetime_original"],
+                    "duration_seconds": rec["duration_seconds"],
+                    "width": rec["width"],
+                    "height": rec["height"],
+                    "raw_metadata": rec["raw_metadata"],
+                    "source_file": rec["source_file"],
+                })
 
         seen_thumbcache_dbs = set()
         for tcf in candidate_thumbcache:
@@ -1707,7 +1733,7 @@ class MediaParser(BaseParser):
             except Exception as ex:
                 self._log(f"Failed parsing thumbcache {tcf}: {ex}", "WARNING")
 
-        thumb_records.extend(self._parse_snipping_tool_screenshots())
+        thumb_records.extend(self._parse_snipping_tool_screenshots(candidate_media=candidate_media))
 
         with DuckDBManager.get_lock(self.case_id):
             exif_count = self.insert_records(

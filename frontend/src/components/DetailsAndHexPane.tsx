@@ -562,7 +562,7 @@ export const DetailsAndHexPane: React.FC<DetailsAndHexPaneProps> = ({
                           className="flex items-center gap-1 px-1.5 py-0.5 rounded border border-[#cbd5e1] dark:border-[#334155] bg-white dark:bg-[#1e293b] hover:bg-slate-50 dark:hover:bg-[#334155] text-slate-700 dark:text-slate-300 font-semibold cursor-pointer"
                           title="Copy document text"
                         >
-                          {copiedKey === 'doc_text' ? <Check className="w-3 h-3 text-[#166534]" /> : <Copy className="w-3 h-3 text-slate-500" />}
+                          {copiedKey === 'doc_text' ? <Check className="w-3 h-3 text-[#166534] dark:text-emerald-400" /> : <Copy className="w-3 h-3 text-slate-500" />}
                           <span>{copiedKey === 'doc_text' ? 'Copied' : 'Copy'}</span>
                         </button>
                       )}
@@ -869,7 +869,7 @@ export const DetailsAndHexPane: React.FC<DetailsAndHexPaneProps> = ({
                                     title={`Copy Run #${run.runNumber} timestamp`}
                                   >
                                     {copiedKey === `prefetch_run_${run.runNumber}` ? (
-                                      <Check className="w-3 h-3 text-[#166534]" />
+                                      <Check className="w-3 h-3 text-[#166534] dark:text-emerald-400" />
                                     ) : (
                                       <Copy className="w-3 h-3" />
                                     )}
@@ -952,7 +952,7 @@ export const DetailsAndHexPane: React.FC<DetailsAndHexPaneProps> = ({
                                 className="p-0.5 rounded opacity-0 group-hover:opacity-100 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-500 shrink-0 cursor-pointer"
                                 title="Copy value"
                               >
-                                {copiedKey === key ? <Check className="w-3 h-3 text-[#166534]" /> : <Copy className="w-3 h-3" />}
+                                {copiedKey === key ? <Check className="w-3 h-3 text-[#166534] dark:text-emerald-400" /> : <Copy className="w-3 h-3" />}
                               </button>
                             </div>
                           </div>
@@ -1014,7 +1014,7 @@ export const DetailsAndHexPane: React.FC<DetailsAndHexPaneProps> = ({
                                 className="p-0.5 rounded opacity-0 group-hover:opacity-100 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-500 shrink-0 cursor-pointer"
                                 title="Copy value"
                               >
-                                {copiedKey === key ? <Check className="w-3 h-3 text-[#166534]" /> : <Copy className="w-3 h-3" />}
+                                {copiedKey === key ? <Check className="w-3 h-3 text-[#166534] dark:text-emerald-400" /> : <Copy className="w-3 h-3" />}
                               </button>
                             </div>
                           </div>

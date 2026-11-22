@@ -288,7 +288,7 @@ export const KeywordManager: React.FC<KeywordManagerProps> = ({
       {error && (
         <div className="mx-4 mt-3 p-2.5 rounded badge-status-error text-xs flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <AlertCircle className="w-4 h-4 shrink-0 text-[#991b1b]" />
+            <AlertCircle className="w-4 h-4 shrink-0 text-[#991b1b] dark:text-red-400" />
             <span>{error}</span>
           </div>
           <button onClick={() => setError(null)} className="p-0.5 hover:opacity-80 cursor-pointer">
@@ -299,7 +299,7 @@ export const KeywordManager: React.FC<KeywordManagerProps> = ({
 
       {successMessage && (
         <div className="mx-4 mt-3 p-2.5 rounded badge-status-success text-xs flex items-center gap-2">
-          <CheckCircle2 className="w-4 h-4 shrink-0 text-[#166534]" />
+          <CheckCircle2 className="w-4 h-4 shrink-0 text-[#166534] dark:text-emerald-400" />
           <span>{successMessage}</span>
         </div>
       )}
@@ -383,7 +383,7 @@ export const KeywordManager: React.FC<KeywordManagerProps> = ({
                   type="checkbox"
                   checked={isRegex}
                   onChange={(e) => setIsRegex(e.target.checked)}
-                  className="w-3.5 h-3.5 rounded border-[#cbd5e1] text-[#0284c7] focus:ring-0 cursor-pointer"
+                  className="w-3.5 h-3.5 rounded border-[#cbd5e1] dark:border-[#334155] text-[#0284c7] focus:ring-0 cursor-pointer"
                 />
                 <span>Treat as Regular Expression (Regex Pattern)</span>
               </label>
@@ -393,7 +393,7 @@ export const KeywordManager: React.FC<KeywordManagerProps> = ({
                   type="checkbox"
                   checked={caseSensitive}
                   onChange={(e) => setCaseSensitive(e.target.checked)}
-                  className="w-3.5 h-3.5 rounded border-[#cbd5e1] text-[#0284c7] focus:ring-0 cursor-pointer"
+                  className="w-3.5 h-3.5 rounded border-[#cbd5e1] dark:border-[#334155] text-[#0284c7] focus:ring-0 cursor-pointer"
                 />
                 <span>Case Sensitive Match</span>
               </label>

@@ -1306,18 +1306,23 @@ class CloudParser(BaseParser):
         candidate_dropbox_db: List[Path] = []
 
         if self.staging_dir.exists():
-            staging_resolved = self.staging_dir.resolve()
             for p in self.staging_dir.rglob("*"):
-                if not p.is_file():
-                    continue
                 name_lower = p.name.lower()
-                try:
-                    path_lower = p.resolve().relative_to(staging_resolved).as_posix().lower()
-                except Exception:
-                    path_lower = p.name.lower()
-
                 if any(name_lower.endswith(sfx) for sfx in ("-wal", "-shm", "-journal")):
                     continue
+                if not (
+                    name_lower.endswith((".db", ".sqlite", ".sqlite3", ".dbx", ".json", ".log", ".ini", ".dat"))
+                    or "sync_log.log." in name_lower
+                    or "syncenginedatabase" in name_lower
+                    or "metadata_sqlite_db" in name_lower
+                ):
+                    continue
+                if not p.is_file():
+                    continue
+                try:
+                    path_lower = p.relative_to(self.staging_dir).as_posix().lower()
+                except ValueError:
+                    path_lower = str(p).replace("\\", "/").lower()
 
                 if "safedelete" in name_lower and name_lower.endswith((".db", ".sqlite", ".sqlite3")):
                     candidate_safedelete_db.append(p)

@@ -155,14 +155,15 @@ def _parse_any_timestamp(val: Any) -> Optional[datetime]:
     if not s:
         return None
 
-    # Handle 7-digit Windows XML fractional seconds e.g. 2024-05-10T14:22:31.1234567Z or +02:00
+    # Handle 7-digit Windows XML fractional seconds e.g. 2024-05-10T14:22:31.1234567Z or 2024/08/15 11:22:10.500
     m_iso = re.match(
-        r"^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})(?:\.(\d+))?\s*(Z|[+-]\d{2}:?\d{2})?$",
+        r"^(\d{4})[-/](\d{2})[-/](\d{2})[T ](\d{2}:\d{2}:\d{2})(?:\.(\d+))?\s*(Z|[+-]\d{2}:?\d{2})?$",
         s,
         re.IGNORECASE,
     )
     if m_iso:
-        d_part, t_part, frac, tz_part = m_iso.groups()
+        yr_p, mo_p, dy_p, t_part, frac, tz_part = m_iso.groups()
+        d_part = f"{yr_p}-{mo_p}-{dy_p}"
         usec = f".{frac[:6].ljust(6, '0')}" if frac else ""
         tz_norm = "+00:00"
         if tz_part and tz_part.upper() != "Z":
@@ -173,7 +174,8 @@ def _parse_any_timestamp(val: Any) -> Optional[datetime]:
         except ValueError:
             pass
 
-    s_dash = s.replace("/", "-").replace(".", "-")
+    # Only replace date separators (not fractional-second decimal points)
+    s_dash = re.sub(r"(\d{2,4})[/.](\d{2})[/.](\d{2,4})", r"\1-\2-\3", s)
     for fmt in (
         "%Y-%m-%d %H:%M:%S.%f",
         "%Y-%m-%d %H:%M:%S",

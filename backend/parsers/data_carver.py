@@ -19,7 +19,7 @@ import threading
 import time
 import zipfile
 import zlib
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
@@ -352,6 +352,10 @@ class _ThreadSafeStream:
         self._close_shared()
 
 
+_BM_NON_ALLOC_RE = re.compile(rb"[^\xff]+")
+_BM_ZERO_OR_MIXED_RE = re.compile(rb"\x00+|[^\x00]+")
+
+
 def _extract_unallocated_bitmap_runs(
     bm_bytes: bytes,
     cluster_size: int,
@@ -359,63 +363,56 @@ def _extract_unallocated_bitmap_runs(
     vol_size: int,
     media_size: int,
 ) -> List[Tuple[int, int]]:
-    """Fast O(N) byte-skipping extraction of unallocated cluster runs from NTFS $Bitmap."""
+    """Fast C-accelerated extraction of unallocated cluster runs from NTFS $Bitmap."""
     runs: List[Tuple[int, int]] = []
     max_clusters = vol_size // cluster_size if cluster_size > 0 else 0
     if max_clusters <= 0 or not bm_bytes:
         return runs
 
-    total_bm = len(bm_bytes)
-    run_start_cluster: Optional[int] = None
-    byte_idx = 0
+    max_bm_bytes = min(len(bm_bytes), (max_clusters + 7) // 8)
+    bm_view = bm_bytes[:max_bm_bytes] if max_bm_bytes < len(bm_bytes) else bm_bytes
 
-    while byte_idx < total_bm:
-        base_cluster = byte_idx * 8
-        if base_cluster >= max_clusters:
-            break
-        b = bm_bytes[byte_idx]
-        if b == 0xFF:
-            if run_start_cluster is not None:
-                s_off = vol_offset + run_start_cluster * cluster_size
-                e_off = min(media_size, vol_offset + base_cluster * cluster_size)
-                if e_off - s_off >= 512:
-                    runs.append((s_off, e_off))
-                run_start_cluster = None
-            byte_idx += 1
-            while byte_idx < total_bm and bm_bytes[byte_idx] == 0xFF:
-                byte_idx += 1
-            continue
+    for span_m in _BM_NON_ALLOC_RE.finditer(bm_view):
+        span_start = span_m.start()
+        span_bytes = span_m.group(0)
+        run_start_cluster: Optional[int] = None
 
-        if b == 0x00 and base_cluster + 8 <= max_clusters:
-            if run_start_cluster is None:
-                run_start_cluster = base_cluster
-            byte_idx += 1
-            while byte_idx < total_bm and bm_bytes[byte_idx] == 0x00 and (byte_idx * 8 + 8) <= max_clusters:
-                byte_idx += 1
-            continue
-
-        for bit in range(8):
-            c_idx = base_cluster + bit
-            if c_idx >= max_clusters:
-                break
-            allocated = bool(b & (1 << bit))
-            if not allocated:
+        for sub_m in _BM_ZERO_OR_MIXED_RE.finditer(span_bytes):
+            sub_start_byte = span_start + sub_m.start()
+            sub_end_byte = span_start + sub_m.end()
+            sub_chunk = sub_m.group(0)
+            if sub_chunk[0] == 0:
+                c_start = sub_start_byte * 8
+                if c_start >= max_clusters:
+                    break
                 if run_start_cluster is None:
-                    run_start_cluster = c_idx
-            else:
-                if run_start_cluster is not None:
-                    s_off = vol_offset + run_start_cluster * cluster_size
-                    e_off = min(media_size, vol_offset + c_idx * cluster_size)
-                    if e_off - s_off >= 512:
-                        runs.append((s_off, e_off))
-                    run_start_cluster = None
-        byte_idx += 1
+                    run_start_cluster = c_start
+                continue
 
-    if run_start_cluster is not None:
-        s_off = vol_offset + run_start_cluster * cluster_size
-        e_off = min(media_size, vol_offset + max_clusters * cluster_size)
-        if e_off - s_off >= 512:
-            runs.append((s_off, e_off))
+            for rel_i, b in enumerate(sub_chunk):
+                base_cluster = (sub_start_byte + rel_i) * 8
+                if base_cluster >= max_clusters:
+                    break
+                for bit in range(8):
+                    c_idx = base_cluster + bit
+                    if c_idx >= max_clusters:
+                        break
+                    if not (b & (1 << bit)):
+                        if run_start_cluster is None:
+                            run_start_cluster = c_idx
+                    elif run_start_cluster is not None:
+                        s_off = vol_offset + run_start_cluster * cluster_size
+                        e_off = min(media_size, vol_offset + c_idx * cluster_size)
+                        if e_off - s_off >= 512:
+                            runs.append((s_off, e_off))
+                        run_start_cluster = None
+
+        if run_start_cluster is not None:
+            end_cluster = min(max_clusters, span_m.end() * 8)
+            s_off = vol_offset + run_start_cluster * cluster_size
+            e_off = min(media_size, vol_offset + end_cluster * cluster_size)
+            if e_off - s_off >= 512:
+                runs.append((s_off, e_off))
 
     return runs
 
@@ -699,6 +696,39 @@ def _verify_baseline_jpeg_huffman(blob: bytes) -> bool:
                             return False
                         nbits -= s
                         bitbuf &= (1 << nbits) - 1
+            return True
+    return True
+
+
+def _jpeg_needs_more_data(sub: bytes) -> bool:
+    """Return True only if `sub` has a structurally valid JPEG marker prefix that hit EOF before FFD9."""
+    n = len(sub)
+    if n < 64 or sub[:3] != SIG_JPG:
+        return False
+    i = 2
+    while i < n:
+        if sub[i] != 0xFF:
+            return False
+        while i < n and sub[i] == 0xFF:
+            i += 1
+        if i >= n:
+            return True
+        marker = sub[i]
+        i += 1
+        if marker == 0x00 or marker == 0xD9:
+            return False
+        if marker == 0x01 or (0xD0 <= marker <= 0xD7):
+            continue
+        if i + 2 > n:
+            return True
+        seg_len = struct.unpack_from(">H", sub, i)[0]
+        if seg_len < 2:
+            return False
+        if i + seg_len > n:
+            return True
+        i += seg_len
+        if marker == 0xDA:
+            # Reached valid Start-Of-Scan; if FFD9 wasn't in `sub`, larger buffer may hold the rest
             return True
     return True
 
@@ -1567,7 +1597,7 @@ class DataCarver:
             return []
 
         buf = stream.read_at(win.c_start, min(win.hard_limit - win.c_start, primary_len + HEADER_OVERLAP))
-        if not buf:
+        if not buf or buf.count(0) == len(buf):
             return []
 
         hits: List[_CarveCandidate] = []
@@ -1597,11 +1627,15 @@ class DataCarver:
                 if 0xC0 <= b3 <= 0xFE and b3 not in (0xD8, 0xD9, 0xFF):
                     abs_off = win.c_start + idx
                     reader = _make_reader(abs_off, MAX_JPG_SIZE)
-                    # Read adaptive initial window before full 25 MiB read
-                    sub = reader(2 * 1024 * 1024)
-                    blob = _validate_jpeg(sub)
-                    if blob is None and len(sub) == 2 * 1024 * 1024:
-                        blob = _validate_jpeg(reader(MAX_JPG_SIZE))
+                    # Fast 64 KiB structural pre-check (in-buffer, zero extra I/O) before 2 MiB / 25 MiB reads
+                    probe = reader(65536)
+                    blob = _validate_jpeg(probe)
+                    sub = probe
+                    if blob is None and len(probe) == 65536 and _jpeg_needs_more_data(probe):
+                        sub = reader(2 * 1024 * 1024)
+                        blob = _validate_jpeg(sub)
+                        if blob is None and len(sub) == 2 * 1024 * 1024 and _jpeg_needs_more_data(sub):
+                            blob = _validate_jpeg(reader(MAX_JPG_SIZE))
                     if blob is not None:
                         hits.append(
                             _CarveCandidate(
@@ -1644,24 +1678,31 @@ class DataCarver:
                 break
             abs_off = win.c_start + idx
             reader = _make_reader(abs_off, MAX_PNG_SIZE)
-            sub = reader(4 * 1024 * 1024)
-            blob = _validate_png(sub)
-            if blob is None and len(sub) == 4 * 1024 * 1024:
-                blob = _validate_png(reader(MAX_PNG_SIZE))
-            if blob is not None:
-                hits.append(
-                    _CarveCandidate(
-                        file_type="png",
-                        extension="png",
-                        offset_bytes=abs_off,
-                        size_bytes=len(blob),
-                        header_sig="89504E470D0A1A0A",
-                        source_region=win.source_region,
-                        stream_key=win.stream_key,
-                        sha256=hashlib.sha256(blob).hexdigest(),
-                        blob=blob if len(blob) <= 524288 else None,
+            hdr33 = reader(33)
+            if (
+                len(hdr33) == 33
+                and hdr33[12:16] == b"IHDR"
+                and struct.unpack_from(">I", hdr33, 8)[0] == 13
+                and (zlib.crc32(hdr33[12:29]) & 0xFFFFFFFF) == struct.unpack_from(">I", hdr33, 29)[0]
+            ):
+                sub = reader(4 * 1024 * 1024)
+                blob = _validate_png(sub)
+                if blob is None and len(sub) == 4 * 1024 * 1024:
+                    blob = _validate_png(reader(MAX_PNG_SIZE))
+                if blob is not None:
+                    hits.append(
+                        _CarveCandidate(
+                            file_type="png",
+                            extension="png",
+                            offset_bytes=abs_off,
+                            size_bytes=len(blob),
+                            header_sig="89504E470D0A1A0A",
+                            source_region=win.source_region,
+                            stream_key=win.stream_key,
+                            sha256=hashlib.sha256(blob).hexdigest(),
+                            blob=blob if len(blob) <= 524288 else None,
+                        )
                     )
-                )
             pos = idx + 1
 
         # 3. GIF (GIF87a / GIF89a)
@@ -1847,47 +1888,63 @@ class DataCarver:
                 )
             pos = idx + 1
 
-        # 9. PE Executable / DLL (MZ + fast O(1) e_lfanew/PE\0\0/Machine pre-filter)
+        # 9. PE Executable / DLL (anchor on 4-byte PE\0\0 and look back [0x40..0x1000] for MZ -> O(1) vs 2-byte MZ scan)
         if HAS_PEFILE:
-            pos = 0
-            while pos < primary_len:
-                idx = buf.find(SIG_MZ, pos)
-                if idx < 0 or idx >= primary_len:
+            tail_peek = b""
+            if win.c_start + len(buf) < win.hard_limit:
+                tail_peek = stream.read_at(win.c_start + len(buf), min(0x1020, win.hard_limit - (win.c_start + len(buf))))
+            pe_search_buf = buf + tail_peek if tail_peek else buf
+            seen_mz_offsets: Set[int] = set()
+            pe_pos = 0x40
+            pe_limit = min(len(pe_search_buf), primary_len + 0x1000)
+            while pe_pos < pe_limit:
+                pe_idx = pe_search_buf.find(b"PE\x00\x00", pe_pos, pe_limit)
+                if pe_idx < 0:
                     break
-                abs_off = win.c_start + idx
-                e_lfanew = -1
-                reader_pe: Optional[Callable[[int], bytes]] = None
-                if idx + 0x40 <= len(buf):
-                    e_lfanew = struct.unpack_from("<I", buf, idx + 0x3C)[0]
-                else:
-                    reader_pe = _make_reader(abs_off, MAX_PE_SIZE)
-                    mz_hdr = reader_pe(0x40)
-                    if len(mz_hdr) >= 0x40:
-                        e_lfanew = struct.unpack_from("<I", mz_hdr, 0x3C)[0]
-                if 0x40 <= e_lfanew <= 0x1000:
-                    reader = reader_pe if reader_pe is not None else _make_reader(abs_off, MAX_PE_SIZE)
-                    quick_hdr = (
-                        buf[idx : idx + e_lfanew + 24]
-                        if (idx + e_lfanew + 24) <= len(buf)
-                        else reader(e_lfanew + 24)
-                    )
-                    pe_res = _validate_pe(reader, quick_hdr)
-                    if pe_res is not None:
-                        ext, blob = pe_res
-                        hits.append(
-                            _CarveCandidate(
-                                file_type=ext,
-                                extension=ext,
-                                offset_bytes=abs_off,
-                                size_bytes=len(blob),
-                                header_sig="4D5A",
-                                source_region=win.source_region,
-                                stream_key=win.stream_key,
-                                sha256=hashlib.sha256(blob).hexdigest(),
-                                blob=blob if len(blob) <= 524288 else None,
+                mz_min = max(0, pe_idx - 0x1000)
+                mz_max = min(primary_len, pe_idx - 0x3F)
+                mpos = mz_min
+                while mpos < mz_max:
+                    idx = buf.find(SIG_MZ, mpos, mz_max)
+                    if idx < 0:
+                        break
+                    if idx not in seen_mz_offsets:
+                        e_lfanew = -1
+                        reader_pe: Optional[Callable[[int], bytes]] = None
+                        if idx + 0x40 <= len(buf):
+                            e_lfanew = struct.unpack_from("<I", buf, idx + 0x3C)[0]
+                        else:
+                            reader_pe = _make_reader(win.c_start + idx, MAX_PE_SIZE)
+                            mz_hdr = reader_pe(0x40)
+                            if len(mz_hdr) >= 0x40:
+                                e_lfanew = struct.unpack_from("<I", mz_hdr, 0x3C)[0]
+                        if e_lfanew == (pe_idx - idx) and 0x40 <= e_lfanew <= 0x1000:
+                            seen_mz_offsets.add(idx)
+                            abs_off = win.c_start + idx
+                            reader = reader_pe if reader_pe is not None else _make_reader(abs_off, MAX_PE_SIZE)
+                            quick_hdr = (
+                                pe_search_buf[idx : idx + e_lfanew + 24]
+                                if (idx + e_lfanew + 24) <= len(pe_search_buf)
+                                else reader(e_lfanew + 24)
                             )
-                        )
-                pos = idx + 1
+                            pe_res = _validate_pe(reader, quick_hdr)
+                            if pe_res is not None:
+                                ext, blob = pe_res
+                                hits.append(
+                                    _CarveCandidate(
+                                        file_type=ext,
+                                        extension=ext,
+                                        offset_bytes=abs_off,
+                                        size_bytes=len(blob),
+                                        header_sig="4D5A",
+                                        source_region=win.source_region,
+                                        stream_key=win.stream_key,
+                                        sha256=hashlib.sha256(blob).hexdigest(),
+                                        blob=blob if len(blob) <= 524288 else None,
+                                    )
+                                )
+                    mpos = idx + 1
+                pe_pos = pe_idx + 4
 
         # 10. Windows Shell Link LNK (4C000000 + CLSID)
         pos = 0
@@ -2208,12 +2265,28 @@ class DataCarver:
 
             all_candidates: List[_CarveCandidate] = []
             if windows:
+                # Bounded sliding-window submission prevents RAM spikes on fragmented 500 GB images
+                max_in_flight = max(4, workers * 4)
+                win_iter = iter(windows)
                 with ThreadPoolExecutor(max_workers=workers) as executor:
-                    futures = [executor.submit(self._scan_window, w, streams) for w in windows]
-                    for fut in as_completed(futures):
-                        batch = fut.result()
-                        if batch:
-                            all_candidates.extend(batch)
+                    in_flight = set()
+                    for _ in range(min(max_in_flight, len(windows))):
+                        w_item = next(win_iter, None)
+                        if w_item is None:
+                            break
+                        in_flight.add(executor.submit(self._scan_window, w_item, streams))
+
+                    while in_flight:
+                        done, in_flight = wait(in_flight, return_when=FIRST_COMPLETED)
+                        for fut in done:
+                            batch = fut.result()
+                            if batch:
+                                all_candidates.extend(batch)
+                        while len(in_flight) < max_in_flight:
+                            w_item = next(win_iter, None)
+                            if w_item is None:
+                                break
+                            in_flight.add(executor.submit(self._scan_window, w_item, streams))
 
             all_candidates.sort(
                 key=lambda c: (c.source_region, c.offset_bytes, -c.size_bytes, c.file_type)

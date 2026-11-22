@@ -1752,8 +1752,8 @@ class EvidenceExtractor:
 
     def _clear_file_attributes(self, path: Union[str, Path]) -> None:
         """
-        Clear restrictive OS attributes (Read-Only, System, Hidden) so staged artifacts never lock
-        case folders on Windows. Caller MUST invoke apply_forensic_utime() AFTER this call.
+        Clear restrictive OS attributes (Read-Only, System, Hidden) on both files and directories
+        so staged artifacts never lock case folders on Windows. Caller MUST invoke apply_forensic_utime() AFTER this call.
         """
         try:
             p_obj = Path(path)
@@ -1763,8 +1763,7 @@ class EvidenceExtractor:
             os.chmod(p_str, 0o700 if p_obj.is_dir() else 0o600)
             if sys.platform == "win32":
                 try:
-                    if not p_obj.is_dir():
-                        ctypes.windll.kernel32.SetFileAttributesW(p_str, 0x80)
+                    ctypes.windll.kernel32.SetFileAttributesW(p_str, 0x80)
                 except Exception:
                     pass
         except Exception:
@@ -1796,6 +1795,8 @@ class EvidenceExtractor:
                         except OSError:
                             pass
             self._clear_file_attributes(target_p)
+            if hasattr(self, "case_dir") and self.case_dir:
+                self._clear_file_attributes(self.case_dir)
         except Exception as ex:
             self._log(f"Notice while sanitizing permissions on {dir_path}: {ex}", level="INFO")
 
@@ -3694,6 +3695,26 @@ class EvidenceExtractor:
             return None, []
         if fname_low == "desktop.ini":
             return None, []
+        if fname_low.endswith((".vhdx", ".vhd", ".vmdk", ".iso", ".wim", ".esd", ".swm", ".vdi", ".qcow2", ".e01")):
+            return None, []
+
+        # Skip massive non-forensic developer/cache/VM/game subtrees that cause multi-day 500GB staging bloat
+        fpath_padded = f"/{fpath_low}/"
+        if any(
+            bulk_seg in fpath_padded
+            for bulk_seg in (
+                "/node_modules/",
+                "/.git/objects/",
+                "/code cache/",
+                "/gpucache/",
+                "/cache/cache_data/",
+                "/service worker/cachestorage/",
+                "/shader_cache/",
+                "/shadercache/",
+                "/crashdumps/",
+            )
+        ):
+            return None, []
 
         top_root_low = low_parts[0]
         if uname and u_low:
@@ -3711,8 +3732,23 @@ class EvidenceExtractor:
                     "/appdata/local/google/chrome/user data/default/media cache/",
                     "/appdata/local/microsoft/edge/application/",
                     "/appdata/local/microsoft/edge/user data/default/cache/",
+                    "/appdata/local/microsoft/edgewebview/",
                     "/appdata/local/temp/low/",
                     "/local settings/temporary internet files/",
+                    "/appdata/local/npm-cache/",
+                    "/appdata/local/pip/cache/",
+                    "/appdata/local/nuget/",
+                    "/appdata/local/yarn/",
+                    "/appdata/local/spotify/",
+                    "/appdata/local/steam/",
+                    "/appdata/local/epicgameslauncher/",
+                    "/appdata/local/nvidia/",
+                    "/appdata/local/amd/",
+                    "/appdata/local/intel/",
+                    "/appdata/local/docker/",
+                    "/appdata/local/wsl/",
+                    "/appdata/local/jetbrains/",
+                    "/appdata/local/android/",
                 )
             ):
                 return None, []
@@ -5837,7 +5873,7 @@ class EvidenceExtractor:
                             row_idx = len(vfs_rows)
                             vfs_rows.append(self._build_vfs_row(part_idx, v_path, init_staged_rel, rec_meta))
 
-                            if in_use and not is_d and not is_reparse:
+                            if eff_vss and in_use and not is_d and not is_reparse:
                                 active_index[(part_idx, v_path.lower())] = _ActiveFileMeta(
                                     size_bytes=f_sz,
                                     si_modified_us=_dt_to_us(rec_meta.si_modified),
@@ -5982,6 +6018,9 @@ class EvidenceExtractor:
                                 staged_files.extend(rels_to_write)
                                 if first_dst.suffix.lower() in self.ARCHIVE_EXTENSIONS:
                                     nested_arcs_ntfs.append((first_dst, r_meta.vfs_path, r_meta))
+
+                    # Release 1M+ MFT segment references before parallel extraction so RAM stays bounded on 500GB disks
+                    raw_recs.clear()
 
                     if eff_workers <= 1 or len(ntfs_jobs) <= 2:
                         for jb in ntfs_jobs:

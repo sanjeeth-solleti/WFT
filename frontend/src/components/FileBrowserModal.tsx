@@ -359,7 +359,7 @@ export const FileBrowserModal: React.FC<FileBrowserModalProps> = ({
             {/* Error Banner */}
             {error && (
               <div className="m-3 p-2.5 rounded badge-status-error text-xs flex items-center gap-2">
-                <AlertTriangle className="w-4 h-4 text-[#991b1b] shrink-0" />
+                <AlertTriangle className="w-4 h-4 text-[#991b1b] dark:text-red-400 shrink-0" />
                 <span>{error}</span>
               </div>
             )}
