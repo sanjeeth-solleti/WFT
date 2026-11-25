@@ -1234,14 +1234,14 @@ MASTER_ARTIFACT_CATALOG: List[Dict[str, Any]] = [
     {
         "artifact_id": "docs_pdf",
         "category": "DOCUMENTS",
-        "display_name": "PDF Documents",
+        "display_name": "PDF's (.pdf)",
         "table_name": "view_docs_pdf",
         "source_tool": "DocumentParser",
         "ddl": """CREATE OR REPLACE VIEW view_docs_pdf AS
             SELECT row_number() OVER () AS _row_id, file_name, file_path, file_size_bytes, created_time, modified_time, author, title, sha256, source_evidence
             FROM (
                 SELECT file_name, file_path, file_size_bytes, created_time, modified_time, author, title, sha256, source_evidence,
-                       row_number() OVER (PARTITION BY LOWER(file_name), file_size_bytes ORDER BY (CASE WHEN source_evidence = 'parsed_documents_metadata' THEN 1 ELSE 2 END) ASC, modified_time DESC NULLS LAST) AS _final_rn
+                       row_number() OVER (PARTITION BY LOWER(file_name), file_size_bytes ORDER BY (CASE source_evidence WHEN 'parsed_documents_metadata' THEN 1 WHEN 'raw_mft' THEN 2 ELSE 3 END) ASC, modified_time DESC NULLS LAST) AS _final_rn
                 FROM (
                     SELECT file_name, file_path, file_size_bytes, created_time, modified_time, author, title, sha256, 'parsed_documents_metadata' AS source_evidence
                     FROM parsed_documents_metadata 
@@ -1269,24 +1269,36 @@ MASTER_ARTIFACT_CATALOG: List[Dict[str, Any]] = [
                           AND REPLACE(LOWER(COALESCE(ParentPath, '')), '/', '\\\\') NOT LIKE '%\\\\programdata\\\\microsoft%'
                           AND LOWER(COALESCE(FileName, '')) NOT IN ('msoirmprotector.doc', 'msoirmprotector.ppt', 'msoirmprotector.xls')
                     ) mft_p WHERE _dup_rn = 1
+                    UNION ALL
+                    SELECT file_name, COALESCE(vfs_path, parent_path || '/' || file_name) AS file_path, size_bytes AS file_size_bytes, si_created AS created_time, si_modified AS modified_time, CAST(NULL AS VARCHAR) AS author, CAST(NULL AS VARCHAR) AS title, CAST(NULL AS VARCHAR) AS sha256, 'vfs_files' AS source_evidence
+                    FROM vfs_files
+                    WHERE COALESCE(is_dir, FALSE) = FALSE
+                      AND LOWER(regexp_extract(COALESCE(file_name, ''), '(\\.[^.\\\\/]+)$', 1)) = '.pdf'
+                      AND REPLACE(LOWER(COALESCE(vfs_path, '')), '/', '\\\\') NOT LIKE '%\\\\windows\\\\winsxs%'
+                      AND REPLACE(LOWER(COALESCE(vfs_path, '')), '/', '\\\\') NOT LIKE '%\\\\windows\\\\system32%'
+                      AND REPLACE(LOWER(COALESCE(vfs_path, '')), '/', '\\\\') NOT LIKE '%\\\\windows\\\\syswow64%'
+                      AND REPLACE(LOWER(COALESCE(vfs_path, '')), '/', '\\\\') NOT LIKE '%\\\\windows\\\\servicing%'
+                      AND REPLACE(LOWER(COALESCE(vfs_path, '')), '/', '\\\\') NOT LIKE '%\\\\windows\\\\installer%'
+                      AND REPLACE(LOWER(COALESCE(vfs_path, '')), '/', '\\\\') NOT LIKE '%\\\\program files%'
+                      AND REPLACE(LOWER(COALESCE(vfs_path, '')), '/', '\\\\') NOT LIKE '%\\\\programdata\\\\microsoft%'
                 ) p_sub
             ) ranked_p WHERE _final_rn = 1;"""
     },
     {
         "artifact_id": "docs_word",
         "category": "DOCUMENTS",
-        "display_name": "Word Documents (.doc / .docx)",
+        "display_name": "Word (.doc, .docx)",
         "table_name": "view_docs_word",
         "source_tool": "DocumentParser",
         "ddl": """CREATE OR REPLACE VIEW view_docs_word AS
             SELECT row_number() OVER () AS _row_id, file_name, file_path, file_size_bytes, created_time, modified_time, author, title, sha256, source_evidence
             FROM (
                 SELECT file_name, file_path, file_size_bytes, created_time, modified_time, author, title, sha256, source_evidence,
-                       row_number() OVER (PARTITION BY LOWER(file_name), file_size_bytes ORDER BY (CASE WHEN source_evidence = 'parsed_documents_metadata' THEN 1 ELSE 2 END) ASC, modified_time DESC NULLS LAST) AS _final_rn
+                       row_number() OVER (PARTITION BY LOWER(file_name), file_size_bytes ORDER BY (CASE source_evidence WHEN 'parsed_documents_metadata' THEN 1 WHEN 'raw_mft' THEN 2 ELSE 3 END) ASC, modified_time DESC NULLS LAST) AS _final_rn
                 FROM (
                     SELECT file_name, file_path, file_size_bytes, created_time, modified_time, author, title, sha256, 'parsed_documents_metadata' AS source_evidence
                     FROM parsed_documents_metadata 
-                    WHERE (LOWER(COALESCE(file_type, '')) IN ('doc', 'docx', 'docm') OR file_name ILIKE '%.docx' OR file_name ILIKE '%.doc')
+                    WHERE (LOWER(COALESCE(file_type, '')) IN ('doc', 'docx', 'docm') OR file_name ILIKE '%.docx' OR file_name ILIKE '%.doc' OR file_name ILIKE '%.docm')
                       AND REPLACE(LOWER(COALESCE(file_path, '')), '/', '\\\\') NOT LIKE '%\\\\windows\\\\winsxs%'
                       AND REPLACE(LOWER(COALESCE(file_path, '')), '/', '\\\\') NOT LIKE '%\\\\windows\\\\system32%'
                       AND REPLACE(LOWER(COALESCE(file_path, '')), '/', '\\\\') NOT LIKE '%\\\\windows\\\\syswow64%'
@@ -1310,24 +1322,37 @@ MASTER_ARTIFACT_CATALOG: List[Dict[str, Any]] = [
                           AND REPLACE(LOWER(COALESCE(ParentPath, '')), '/', '\\\\') NOT LIKE '%\\\\programdata\\\\microsoft%'
                           AND LOWER(COALESCE(FileName, '')) NOT IN ('msoirmprotector.doc', 'msoirmprotector.ppt', 'msoirmprotector.xls')
                     ) mft_w WHERE _dup_rn = 1
+                    UNION ALL
+                    SELECT file_name, COALESCE(vfs_path, parent_path || '/' || file_name) AS file_path, size_bytes AS file_size_bytes, si_created AS created_time, si_modified AS modified_time, CAST(NULL AS VARCHAR) AS author, CAST(NULL AS VARCHAR) AS title, CAST(NULL AS VARCHAR) AS sha256, 'vfs_files' AS source_evidence
+                    FROM vfs_files
+                    WHERE COALESCE(is_dir, FALSE) = FALSE
+                      AND LOWER(regexp_extract(COALESCE(file_name, ''), '(\\.[^.\\\\/]+)$', 1)) IN ('.doc', '.docx', '.docm')
+                      AND REPLACE(LOWER(COALESCE(vfs_path, '')), '/', '\\\\') NOT LIKE '%\\\\windows\\\\winsxs%'
+                      AND REPLACE(LOWER(COALESCE(vfs_path, '')), '/', '\\\\') NOT LIKE '%\\\\windows\\\\system32%'
+                      AND REPLACE(LOWER(COALESCE(vfs_path, '')), '/', '\\\\') NOT LIKE '%\\\\windows\\\\syswow64%'
+                      AND REPLACE(LOWER(COALESCE(vfs_path, '')), '/', '\\\\') NOT LIKE '%\\\\windows\\\\servicing%'
+                      AND REPLACE(LOWER(COALESCE(vfs_path, '')), '/', '\\\\') NOT LIKE '%\\\\windows\\\\installer%'
+                      AND REPLACE(LOWER(COALESCE(vfs_path, '')), '/', '\\\\') NOT LIKE '%\\\\program files%'
+                      AND REPLACE(LOWER(COALESCE(vfs_path, '')), '/', '\\\\') NOT LIKE '%\\\\programdata\\\\microsoft%'
+                      AND LOWER(COALESCE(file_name, '')) NOT IN ('msoirmprotector.doc', 'msoirmprotector.ppt', 'msoirmprotector.xls')
                 ) w_sub
             ) ranked_w WHERE _final_rn = 1;"""
     },
     {
         "artifact_id": "docs_excel",
         "category": "DOCUMENTS",
-        "display_name": "Excel Spreadsheets (.xls / .xlsx / .csv)",
+        "display_name": "Excel (.xls, .xlsx, .csv)",
         "table_name": "view_docs_excel",
         "source_tool": "DocumentParser",
         "ddl": """CREATE OR REPLACE VIEW view_docs_excel AS
             SELECT row_number() OVER () AS _row_id, file_name, file_path, file_size_bytes, created_time, modified_time, author, title, sha256, source_evidence
             FROM (
                 SELECT file_name, file_path, file_size_bytes, created_time, modified_time, author, title, sha256, source_evidence,
-                       row_number() OVER (PARTITION BY LOWER(file_name), file_size_bytes ORDER BY (CASE WHEN source_evidence = 'parsed_documents_metadata' THEN 1 ELSE 2 END) ASC, modified_time DESC NULLS LAST) AS _final_rn
+                       row_number() OVER (PARTITION BY LOWER(file_name), file_size_bytes ORDER BY (CASE source_evidence WHEN 'parsed_documents_metadata' THEN 1 WHEN 'raw_mft' THEN 2 ELSE 3 END) ASC, modified_time DESC NULLS LAST) AS _final_rn
                 FROM (
                     SELECT file_name, file_path, file_size_bytes, created_time, modified_time, author, title, sha256, 'parsed_documents_metadata' AS source_evidence
                     FROM parsed_documents_metadata 
-                    WHERE (LOWER(COALESCE(file_type, '')) IN ('xls', 'xlsx', 'xlsm', 'csv') OR file_name ILIKE '%.xlsx' OR file_name ILIKE '%.xls' OR file_name ILIKE '%.csv')
+                    WHERE (LOWER(COALESCE(file_type, '')) IN ('xls', 'xlsx', 'xlsm', 'csv') OR file_name ILIKE '%.xlsx' OR file_name ILIKE '%.xls' OR file_name ILIKE '%.xlsm' OR file_name ILIKE '%.csv')
                       AND REPLACE(LOWER(COALESCE(file_path, '')), '/', '\\\\') NOT LIKE '%\\\\windows\\\\winsxs%'
                       AND REPLACE(LOWER(COALESCE(file_path, '')), '/', '\\\\') NOT LIKE '%\\\\windows\\\\system32%'
                       AND REPLACE(LOWER(COALESCE(file_path, '')), '/', '\\\\') NOT LIKE '%\\\\windows\\\\syswow64%'
@@ -1351,24 +1376,37 @@ MASTER_ARTIFACT_CATALOG: List[Dict[str, Any]] = [
                           AND REPLACE(LOWER(COALESCE(ParentPath, '')), '/', '\\\\') NOT LIKE '%\\\\programdata\\\\microsoft%'
                           AND LOWER(COALESCE(FileName, '')) NOT IN ('msoirmprotector.doc', 'msoirmprotector.ppt', 'msoirmprotector.xls')
                     ) mft_e WHERE _dup_rn = 1
+                    UNION ALL
+                    SELECT file_name, COALESCE(vfs_path, parent_path || '/' || file_name) AS file_path, size_bytes AS file_size_bytes, si_created AS created_time, si_modified AS modified_time, CAST(NULL AS VARCHAR) AS author, CAST(NULL AS VARCHAR) AS title, CAST(NULL AS VARCHAR) AS sha256, 'vfs_files' AS source_evidence
+                    FROM vfs_files
+                    WHERE COALESCE(is_dir, FALSE) = FALSE
+                      AND LOWER(regexp_extract(COALESCE(file_name, ''), '(\\.[^.\\\\/]+)$', 1)) IN ('.xls', '.xlsx', '.xlsm', '.csv')
+                      AND REPLACE(LOWER(COALESCE(vfs_path, '')), '/', '\\\\') NOT LIKE '%\\\\windows\\\\winsxs%'
+                      AND REPLACE(LOWER(COALESCE(vfs_path, '')), '/', '\\\\') NOT LIKE '%\\\\windows\\\\system32%'
+                      AND REPLACE(LOWER(COALESCE(vfs_path, '')), '/', '\\\\') NOT LIKE '%\\\\windows\\\\syswow64%'
+                      AND REPLACE(LOWER(COALESCE(vfs_path, '')), '/', '\\\\') NOT LIKE '%\\\\windows\\\\servicing%'
+                      AND REPLACE(LOWER(COALESCE(vfs_path, '')), '/', '\\\\') NOT LIKE '%\\\\windows\\\\installer%'
+                      AND REPLACE(LOWER(COALESCE(vfs_path, '')), '/', '\\\\') NOT LIKE '%\\\\program files%'
+                      AND REPLACE(LOWER(COALESCE(vfs_path, '')), '/', '\\\\') NOT LIKE '%\\\\programdata\\\\microsoft%'
+                      AND LOWER(COALESCE(file_name, '')) NOT IN ('msoirmprotector.doc', 'msoirmprotector.ppt', 'msoirmprotector.xls')
                 ) e_sub
             ) ranked_e WHERE _final_rn = 1;"""
     },
     {
         "artifact_id": "docs_ppt",
         "category": "DOCUMENTS",
-        "display_name": "PowerPoint Presentations (.ppt / .pptx)",
+        "display_name": "PPT (.ppt, .pptx)",
         "table_name": "view_docs_ppt",
         "source_tool": "DocumentParser",
         "ddl": """CREATE OR REPLACE VIEW view_docs_ppt AS
             SELECT row_number() OVER () AS _row_id, file_name, file_path, file_size_bytes, created_time, modified_time, author, title, sha256, source_evidence
             FROM (
                 SELECT file_name, file_path, file_size_bytes, created_time, modified_time, author, title, sha256, source_evidence,
-                       row_number() OVER (PARTITION BY LOWER(file_name), file_size_bytes ORDER BY (CASE WHEN source_evidence = 'parsed_documents_metadata' THEN 1 ELSE 2 END) ASC, modified_time DESC NULLS LAST) AS _final_rn
+                       row_number() OVER (PARTITION BY LOWER(file_name), file_size_bytes ORDER BY (CASE source_evidence WHEN 'parsed_documents_metadata' THEN 1 WHEN 'raw_mft' THEN 2 ELSE 3 END) ASC, modified_time DESC NULLS LAST) AS _final_rn
                 FROM (
                     SELECT file_name, file_path, file_size_bytes, created_time, modified_time, author, title, sha256, 'parsed_documents_metadata' AS source_evidence
                     FROM parsed_documents_metadata 
-                    WHERE (LOWER(COALESCE(file_type, '')) IN ('ppt', 'pptx', 'pptm') OR file_name ILIKE '%.pptx' OR file_name ILIKE '%.ppt')
+                    WHERE (LOWER(COALESCE(file_type, '')) IN ('ppt', 'pptx', 'pptm') OR file_name ILIKE '%.pptx' OR file_name ILIKE '%.ppt' OR file_name ILIKE '%.pptm')
                       AND REPLACE(LOWER(COALESCE(file_path, '')), '/', '\\\\') NOT LIKE '%\\\\windows\\\\winsxs%'
                       AND REPLACE(LOWER(COALESCE(file_path, '')), '/', '\\\\') NOT LIKE '%\\\\windows\\\\system32%'
                       AND REPLACE(LOWER(COALESCE(file_path, '')), '/', '\\\\') NOT LIKE '%\\\\windows\\\\syswow64%'
@@ -1392,13 +1430,26 @@ MASTER_ARTIFACT_CATALOG: List[Dict[str, Any]] = [
                           AND REPLACE(LOWER(COALESCE(ParentPath, '')), '/', '\\\\') NOT LIKE '%\\\\programdata\\\\microsoft%'
                           AND LOWER(COALESCE(FileName, '')) NOT IN ('msoirmprotector.doc', 'msoirmprotector.ppt', 'msoirmprotector.xls')
                     ) mft_ppt WHERE _dup_rn = 1
+                    UNION ALL
+                    SELECT file_name, COALESCE(vfs_path, parent_path || '/' || file_name) AS file_path, size_bytes AS file_size_bytes, si_created AS created_time, si_modified AS modified_time, CAST(NULL AS VARCHAR) AS author, CAST(NULL AS VARCHAR) AS title, CAST(NULL AS VARCHAR) AS sha256, 'vfs_files' AS source_evidence
+                    FROM vfs_files
+                    WHERE COALESCE(is_dir, FALSE) = FALSE
+                      AND LOWER(regexp_extract(COALESCE(file_name, ''), '(\\.[^.\\\\/]+)$', 1)) IN ('.ppt', '.pptx', '.pptm')
+                      AND REPLACE(LOWER(COALESCE(vfs_path, '')), '/', '\\\\') NOT LIKE '%\\\\windows\\\\winsxs%'
+                      AND REPLACE(LOWER(COALESCE(vfs_path, '')), '/', '\\\\') NOT LIKE '%\\\\windows\\\\system32%'
+                      AND REPLACE(LOWER(COALESCE(vfs_path, '')), '/', '\\\\') NOT LIKE '%\\\\windows\\\\syswow64%'
+                      AND REPLACE(LOWER(COALESCE(vfs_path, '')), '/', '\\\\') NOT LIKE '%\\\\windows\\\\servicing%'
+                      AND REPLACE(LOWER(COALESCE(vfs_path, '')), '/', '\\\\') NOT LIKE '%\\\\windows\\\\installer%'
+                      AND REPLACE(LOWER(COALESCE(vfs_path, '')), '/', '\\\\') NOT LIKE '%\\\\program files%'
+                      AND REPLACE(LOWER(COALESCE(vfs_path, '')), '/', '\\\\') NOT LIKE '%\\\\programdata\\\\microsoft%'
+                      AND LOWER(COALESCE(file_name, '')) NOT IN ('msoirmprotector.doc', 'msoirmprotector.ppt', 'msoirmprotector.xls')
                 ) p_sub
             ) ranked_ppt WHERE _final_rn = 1;"""
     },
     {
         "artifact_id": "docs_txt",
         "category": "DOCUMENTS",
-        "display_name": "Plain Text & Configuration Files",
+        "display_name": "TXT (.txt, .rtf)",
         "table_name": "view_docs_txt",
         "source_tool": "DocumentParser",
         "ddl": """CREATE OR REPLACE VIEW view_docs_txt AS
@@ -1412,24 +1463,47 @@ MASTER_ARTIFACT_CATALOG: List[Dict[str, Any]] = [
                        ) AS _final_rn
                 FROM (
                     SELECT file_name, file_path, file_size_bytes, created_time, modified_time,
-                           CAST(NULL AS VARCHAR) AS author, CAST(NULL AS VARCHAR) AS title, sha256,
+                           author, title, sha256,
                            encoding, line_count, text_preview, 'parsed_text_documents' AS source_evidence
                     FROM parsed_text_documents
+                    WHERE LOWER(COALESCE(extension, '')) IN ('.txt', '.rtf', '.log', '.ini', '.cfg', '.conf', '.text', '.csv')
+                      AND LOWER(COALESCE(file_name, '')) NOT IN ('desktop.ini', 'thumbs.db', 'ntuser.ini', 'msoirmprotector.doc', 'msoirmprotector.ppt', 'msoirmprotector.xls')
+                      AND REPLACE(LOWER(COALESCE(file_path, '')), '/', '\\\\') NOT LIKE '%\\\\windows\\\\%'
+                      AND REPLACE(LOWER(COALESCE(file_path, '')), '/', '\\\\') NOT LIKE '%\\\\windows.old\\\\%'
+                      AND REPLACE(LOWER(COALESCE(file_path, '')), '/', '\\\\') NOT LIKE '%\\\\program files%'
+                      AND REPLACE(LOWER(COALESCE(file_path, '')), '/', '\\\\') NOT LIKE '%\\\\programdata\\\\microsoft%'
+                      AND REPLACE(LOWER(COALESCE(file_path, '')), '/', '\\\\') NOT LIKE '%\\\\programdata\\\\package cache%'
+                      AND REPLACE(LOWER(COALESCE(file_path, '')), '/', '\\\\') NOT LIKE '%\\\\system volume information%'
+                      AND REPLACE(LOWER(COALESCE(file_path, '')), '/', '\\\\') NOT LIKE '%\\\\recovery\\\\%'
+                      AND REPLACE(LOWER(COALESCE(file_path, '')), '/', '\\\\') NOT LIKE '%\\\\appdata\\\\local\\\\packages\\\\%'
+                      AND REPLACE(LOWER(COALESCE(file_path, '')), '/', '\\\\') NOT LIKE '%\\\\appdata\\\\local\\\\microsoft\\\\%'
+                      AND REPLACE(LOWER(COALESCE(file_path, '')), '/', '\\\\') NOT LIKE '%\\\\appdata\\\\roaming\\\\microsoft\\\\%'
+                      AND REPLACE(LOWER(COALESCE(file_path, '')), '/', '\\\\') NOT LIKE '%\\\\appdata\\\\local\\\\google\\\\chrome\\\\%'
+                      AND REPLACE(LOWER(COALESCE(file_path, '')), '/', '\\\\') NOT LIKE '%\\\\appdata\\\\local\\\\bravesoftware\\\\%'
+                      AND REPLACE(LOWER(COALESCE(file_path, '')), '/', '\\\\') NOT LIKE '%\\\\appdata\\\\roaming\\\\mozilla\\\\firefox\\\\%'
+                      AND REPLACE(LOWER(COALESCE(file_path, '')), '/', '\\\\') NOT LIKE '%\\\\node_modules\\\\%'
                     UNION ALL
                     SELECT file_name, file_path, file_size_bytes, created_time, modified_time, author, title, sha256,
                            CAST(NULL AS VARCHAR) AS encoding, CAST(NULL AS INTEGER) AS line_count, CAST(NULL AS VARCHAR) AS text_preview,
                            'parsed_documents_metadata' AS source_evidence
                     FROM parsed_documents_metadata
-                    WHERE (LOWER(COALESCE(file_type, '')) IN ('txt', 'log', 'ini', 'cfg', 'conf', 'json', 'xml', 'yaml', 'yml', 'md', 'ps1', 'bat', 'vbs')
-                           OR file_name ILIKE '%.txt' OR file_name ILIKE '%.log' OR file_name ILIKE '%.ini' OR file_name ILIKE '%.cfg' OR file_name ILIKE '%.conf' OR file_name ILIKE '%.json' OR file_name ILIKE '%.xml')
-                      AND REPLACE(LOWER(COALESCE(file_path, '')), '/', '\\\\') NOT LIKE '%\\\\windows\\\\winsxs%'
-                      AND REPLACE(LOWER(COALESCE(file_path, '')), '/', '\\\\') NOT LIKE '%\\\\windows\\\\system32%'
-                      AND REPLACE(LOWER(COALESCE(file_path, '')), '/', '\\\\') NOT LIKE '%\\\\windows\\\\syswow64%'
-                      AND REPLACE(LOWER(COALESCE(file_path, '')), '/', '\\\\') NOT LIKE '%\\\\windows\\\\servicing%'
-                      AND REPLACE(LOWER(COALESCE(file_path, '')), '/', '\\\\') NOT LIKE '%\\\\windows\\\\installer%'
+                    WHERE (LOWER(COALESCE(file_type, '')) IN ('txt', 'rtf', 'log', 'ini', 'cfg', 'conf', 'text', 'csv', 'json', 'xml', 'yaml', 'yml', 'md', 'ps1', 'bat', 'vbs')
+                           OR file_name ILIKE '%.txt' OR file_name ILIKE '%.rtf' OR file_name ILIKE '%.log' OR file_name ILIKE '%.ini' OR file_name ILIKE '%.cfg' OR file_name ILIKE '%.conf' OR file_name ILIKE '%.csv' OR file_name ILIKE '%.json' OR file_name ILIKE '%.xml')
+                      AND REPLACE(LOWER(COALESCE(file_path, '')), '/', '\\\\') NOT LIKE '%\\\\windows\\\\%'
+                      AND REPLACE(LOWER(COALESCE(file_path, '')), '/', '\\\\') NOT LIKE '%\\\\windows.old\\\\%'
                       AND REPLACE(LOWER(COALESCE(file_path, '')), '/', '\\\\') NOT LIKE '%\\\\program files%'
                       AND REPLACE(LOWER(COALESCE(file_path, '')), '/', '\\\\') NOT LIKE '%\\\\programdata\\\\microsoft%'
-                      AND LOWER(COALESCE(file_name, '')) NOT IN ('msoirmprotector.doc', 'msoirmprotector.ppt', 'msoirmprotector.xls')
+                      AND REPLACE(LOWER(COALESCE(file_path, '')), '/', '\\\\') NOT LIKE '%\\\\programdata\\\\package cache%'
+                      AND REPLACE(LOWER(COALESCE(file_path, '')), '/', '\\\\') NOT LIKE '%\\\\system volume information%'
+                      AND REPLACE(LOWER(COALESCE(file_path, '')), '/', '\\\\') NOT LIKE '%\\\\recovery\\\\%'
+                      AND REPLACE(LOWER(COALESCE(file_path, '')), '/', '\\\\') NOT LIKE '%\\\\appdata\\\\local\\\\packages\\\\%'
+                      AND REPLACE(LOWER(COALESCE(file_path, '')), '/', '\\\\') NOT LIKE '%\\\\appdata\\\\local\\\\microsoft\\\\%'
+                      AND REPLACE(LOWER(COALESCE(file_path, '')), '/', '\\\\') NOT LIKE '%\\\\appdata\\\\roaming\\\\microsoft\\\\%'
+                      AND REPLACE(LOWER(COALESCE(file_path, '')), '/', '\\\\') NOT LIKE '%\\\\appdata\\\\local\\\\google\\\\chrome\\\\%'
+                      AND REPLACE(LOWER(COALESCE(file_path, '')), '/', '\\\\') NOT LIKE '%\\\\appdata\\\\local\\\\bravesoftware\\\\%'
+                      AND REPLACE(LOWER(COALESCE(file_path, '')), '/', '\\\\') NOT LIKE '%\\\\appdata\\\\roaming\\\\mozilla\\\\firefox\\\\%'
+                      AND REPLACE(LOWER(COALESCE(file_path, '')), '/', '\\\\') NOT LIKE '%\\\\node_modules\\\\%'
+                      AND LOWER(COALESCE(file_name, '')) NOT IN ('desktop.ini', 'thumbs.db', 'ntuser.ini', 'msoirmprotector.doc', 'msoirmprotector.ppt', 'msoirmprotector.xls')
                     UNION ALL
                     SELECT FileName AS file_name, COALESCE(ParentPath, '') || '\\\\' || COALESCE(FileName, '') AS file_path, FileSize AS file_size_bytes, Created0x10 AS created_time, LastModified0x10 AS modified_time,
                            CAST(NULL AS VARCHAR) AS author, CAST(NULL AS VARCHAR) AS title, CAST(NULL AS VARCHAR) AS sha256,
@@ -1438,15 +1512,22 @@ MASTER_ARTIFACT_CATALOG: List[Dict[str, Any]] = [
                     FROM (
                         SELECT *, row_number() OVER (PARTITION BY LOWER(COALESCE(ParentPath, '')), LOWER(COALESCE(FileName, '')), FileSize ORDER BY LastModified0x10 DESC NULLS LAST) AS _dup_rn
                         FROM raw_mft
-                        WHERE LOWER(COALESCE(Extension, '')) IN ('.txt', '.log', '.ini', '.cfg', '.conf', '.json', '.xml', '.yaml', '.yml')
-                          AND REPLACE(LOWER(COALESCE(ParentPath, '')), '/', '\\\\') NOT LIKE '%\\\\windows\\\\winsxs%'
-                          AND REPLACE(LOWER(COALESCE(ParentPath, '')), '/', '\\\\') NOT LIKE '%\\\\windows\\\\system32%'
-                          AND REPLACE(LOWER(COALESCE(ParentPath, '')), '/', '\\\\') NOT LIKE '%\\\\windows\\\\syswow64%'
-                          AND REPLACE(LOWER(COALESCE(ParentPath, '')), '/', '\\\\') NOT LIKE '%\\\\windows\\\\servicing%'
-                          AND REPLACE(LOWER(COALESCE(ParentPath, '')), '/', '\\\\') NOT LIKE '%\\\\windows\\\\installer%'
+                        WHERE LOWER(COALESCE(Extension, '')) IN ('.txt', '.rtf', '.log', '.ini', '.cfg', '.conf', '.text', '.csv', '.json', '.xml', '.yaml', '.yml')
+                          AND (REPLACE(LOWER(COALESCE(ParentPath, '')), '/', '\\\\') || '\\\\') NOT LIKE '%\\\\windows\\\\%'
+                          AND (REPLACE(LOWER(COALESCE(ParentPath, '')), '/', '\\\\') || '\\\\') NOT LIKE '%\\\\windows.old\\\\%'
                           AND REPLACE(LOWER(COALESCE(ParentPath, '')), '/', '\\\\') NOT LIKE '%\\\\program files%'
                           AND REPLACE(LOWER(COALESCE(ParentPath, '')), '/', '\\\\') NOT LIKE '%\\\\programdata\\\\microsoft%'
-                          AND LOWER(COALESCE(FileName, '')) NOT IN ('msoirmprotector.doc', 'msoirmprotector.ppt', 'msoirmprotector.xls')
+                          AND REPLACE(LOWER(COALESCE(ParentPath, '')), '/', '\\\\') NOT LIKE '%\\\\programdata\\\\package cache%'
+                          AND REPLACE(LOWER(COALESCE(ParentPath, '')), '/', '\\\\') NOT LIKE '%\\\\system volume information%'
+                          AND (REPLACE(LOWER(COALESCE(ParentPath, '')), '/', '\\\\') || '\\\\') NOT LIKE '%\\\\recovery\\\\%'
+                          AND (REPLACE(LOWER(COALESCE(ParentPath, '')), '/', '\\\\') || '\\\\') NOT LIKE '%\\\\appdata\\\\local\\\\packages\\\\%'
+                          AND (REPLACE(LOWER(COALESCE(ParentPath, '')), '/', '\\\\') || '\\\\') NOT LIKE '%\\\\appdata\\\\local\\\\microsoft\\\\%'
+                          AND (REPLACE(LOWER(COALESCE(ParentPath, '')), '/', '\\\\') || '\\\\') NOT LIKE '%\\\\appdata\\\\roaming\\\\microsoft\\\\%'
+                          AND (REPLACE(LOWER(COALESCE(ParentPath, '')), '/', '\\\\') || '\\\\') NOT LIKE '%\\\\appdata\\\\local\\\\google\\\\chrome\\\\%'
+                          AND (REPLACE(LOWER(COALESCE(ParentPath, '')), '/', '\\\\') || '\\\\') NOT LIKE '%\\\\appdata\\\\local\\\\bravesoftware\\\\%'
+                          AND (REPLACE(LOWER(COALESCE(ParentPath, '')), '/', '\\\\') || '\\\\') NOT LIKE '%\\\\appdata\\\\roaming\\\\mozilla\\\\firefox\\\\%'
+                          AND (REPLACE(LOWER(COALESCE(ParentPath, '')), '/', '\\\\') || '\\\\') NOT LIKE '%\\\\node_modules\\\\%'
+                          AND LOWER(COALESCE(FileName, '')) NOT IN ('desktop.ini', 'thumbs.db', 'ntuser.ini', 'msoirmprotector.doc', 'msoirmprotector.ppt', 'msoirmprotector.xls')
                     ) mft_t WHERE _dup_rn = 1
                     UNION ALL
                     SELECT file_name, COALESCE(vfs_path, parent_path || '/' || file_name) AS file_path, size_bytes AS file_size_bytes, si_created AS created_time, si_modified AS modified_time,
@@ -1455,9 +1536,22 @@ MASTER_ARTIFACT_CATALOG: List[Dict[str, Any]] = [
                            'vfs_files' AS source_evidence
                     FROM vfs_files
                     WHERE COALESCE(is_dir, FALSE) = FALSE
-                      AND LOWER(regexp_extract(COALESCE(file_name, ''), '(\\.[^.\\\\/]+)$', 1)) IN ('.txt', '.log', '.ini', '.cfg', '.conf', '.json', '.xml', '.yaml', '.yml', '.md', '.csv', '.rtf', '.ps1', '.bat', '.vbs', '.cmd')
-                      AND REPLACE(LOWER(COALESCE(vfs_path, '')), '/', '\\\\') NOT LIKE '%\\\\windows\\\\winsxs%'
-                      AND REPLACE(LOWER(COALESCE(vfs_path, '')), '/', '\\\\') NOT LIKE '%\\\\windows\\\\system32%'
+                      AND LOWER(regexp_extract(COALESCE(file_name, ''), '(\\.[^.\\\\/]+)$', 1)) IN ('.txt', '.rtf', '.log', '.ini', '.cfg', '.conf', '.text', '.csv', '.json', '.xml', '.yaml', '.yml', '.md', '.ps1', '.bat', '.vbs', '.cmd')
+                      AND REPLACE(LOWER(COALESCE(vfs_path, '')), '/', '\\\\') NOT LIKE '%\\\\windows\\\\%'
+                      AND REPLACE(LOWER(COALESCE(vfs_path, '')), '/', '\\\\') NOT LIKE '%\\\\windows.old\\\\%'
+                      AND REPLACE(LOWER(COALESCE(vfs_path, '')), '/', '\\\\') NOT LIKE '%\\\\program files%'
+                      AND REPLACE(LOWER(COALESCE(vfs_path, '')), '/', '\\\\') NOT LIKE '%\\\\programdata\\\\microsoft%'
+                      AND REPLACE(LOWER(COALESCE(vfs_path, '')), '/', '\\\\') NOT LIKE '%\\\\programdata\\\\package cache%'
+                      AND REPLACE(LOWER(COALESCE(vfs_path, '')), '/', '\\\\') NOT LIKE '%\\\\system volume information%'
+                      AND REPLACE(LOWER(COALESCE(vfs_path, '')), '/', '\\\\') NOT LIKE '%\\\\recovery\\\\%'
+                      AND REPLACE(LOWER(COALESCE(vfs_path, '')), '/', '\\\\') NOT LIKE '%\\\\appdata\\\\local\\\\packages\\\\%'
+                      AND REPLACE(LOWER(COALESCE(vfs_path, '')), '/', '\\\\') NOT LIKE '%\\\\appdata\\\\local\\\\microsoft\\\\%'
+                      AND REPLACE(LOWER(COALESCE(vfs_path, '')), '/', '\\\\') NOT LIKE '%\\\\appdata\\\\roaming\\\\microsoft\\\\%'
+                      AND REPLACE(LOWER(COALESCE(vfs_path, '')), '/', '\\\\') NOT LIKE '%\\\\appdata\\\\local\\\\google\\\\chrome\\\\%'
+                      AND REPLACE(LOWER(COALESCE(vfs_path, '')), '/', '\\\\') NOT LIKE '%\\\\appdata\\\\local\\\\bravesoftware\\\\%'
+                      AND REPLACE(LOWER(COALESCE(vfs_path, '')), '/', '\\\\') NOT LIKE '%\\\\appdata\\\\roaming\\\\mozilla\\\\firefox\\\\%'
+                      AND REPLACE(LOWER(COALESCE(vfs_path, '')), '/', '\\\\') NOT LIKE '%\\\\node_modules\\\\%'
+                      AND LOWER(COALESCE(file_name, '')) NOT IN ('desktop.ini', 'thumbs.db', 'ntuser.ini', 'msoirmprotector.doc', 'msoirmprotector.ppt', 'msoirmprotector.xls')
                 ) t_sub
             ) ranked_t WHERE _final_rn = 1;"""
     },
@@ -1496,6 +1590,139 @@ MASTER_ARTIFACT_CATALOG: List[Dict[str, Any]] = [
                       AND LOWER(COALESCE(FileName, '')) NOT IN ('msoirmprotector.doc', 'msoirmprotector.ppt', 'msoirmprotector.xls')
                 ) doc_sub WHERE _dup_rn = 1
             ) all_docs;"""
+    },
+    {
+        "artifact_id": "docs_other",
+        "category": "DOCUMENTS",
+        "display_name": "Other Files (.js, .py, .html, .css, etc.)",
+        "table_name": "view_docs_other",
+        "source_tool": "DocumentParser",
+        "ddl": """CREATE OR REPLACE VIEW view_docs_other AS
+            SELECT row_number() OVER () AS _row_id, file_name, file_path, extension, file_size_bytes, created_time, modified_time, author, title, sha256, encoding, line_count, text_preview, source_evidence
+            FROM (
+                SELECT file_name, file_path, extension, file_size_bytes, created_time, modified_time, author, title, sha256, encoding, line_count, text_preview, source_evidence,
+                       row_number() OVER (
+                           PARTITION BY LOWER(COALESCE(file_name, '')), COALESCE(file_size_bytes, -1)
+                           ORDER BY (CASE source_evidence WHEN 'parsed_text_documents' THEN 0 WHEN 'parsed_documents_metadata' THEN 1 WHEN 'raw_mft' THEN 2 ELSE 3 END) ASC,
+                                    modified_time DESC NULLS LAST
+                       ) AS _final_rn
+                FROM (
+                    SELECT file_name, file_path,
+                           LOWER(COALESCE(NULLIF(extension, ''), regexp_extract(COALESCE(file_name, ''), '(\\.[^.\\\\/]+)$', 1))) AS extension,
+                           file_size_bytes, created_time, modified_time,
+                           author, title, sha256,
+                           encoding, line_count, text_preview, 'parsed_text_documents' AS source_evidence
+                    FROM parsed_text_documents
+                    WHERE LOWER(COALESCE(extension, '')) NOT IN (
+                        '.txt', '.rtf', '.log', '.ini', '.cfg', '.conf', '.text',
+                        '.csv', '.pdf', '.doc', '.docx', '.docm', '.xls', '.xlsx', '.xlsm', '.ppt', '.pptx', '.pptm'
+                    )
+                      AND LOWER(COALESCE(file_name, '')) NOT IN ('desktop.ini', 'thumbs.db', 'ntuser.ini', 'msoirmprotector.doc', 'msoirmprotector.ppt', 'msoirmprotector.xls')
+                      AND REPLACE(LOWER(COALESCE(file_path, '')), '/', '\\\\') NOT LIKE '%\\\\windows\\\\%'
+                      AND REPLACE(LOWER(COALESCE(file_path, '')), '/', '\\\\') NOT LIKE '%\\\\windows.old\\\\%'
+                      AND REPLACE(LOWER(COALESCE(file_path, '')), '/', '\\\\') NOT LIKE '%\\\\program files%'
+                      AND REPLACE(LOWER(COALESCE(file_path, '')), '/', '\\\\') NOT LIKE '%\\\\programdata\\\\microsoft%'
+                      AND REPLACE(LOWER(COALESCE(file_path, '')), '/', '\\\\') NOT LIKE '%\\\\programdata\\\\package cache%'
+                      AND REPLACE(LOWER(COALESCE(file_path, '')), '/', '\\\\') NOT LIKE '%\\\\system volume information%'
+                      AND REPLACE(LOWER(COALESCE(file_path, '')), '/', '\\\\') NOT LIKE '%\\\\recovery\\\\%'
+                      AND REPLACE(LOWER(COALESCE(file_path, '')), '/', '\\\\') NOT LIKE '%\\\\appdata\\\\local\\\\packages\\\\%'
+                      AND REPLACE(LOWER(COALESCE(file_path, '')), '/', '\\\\') NOT LIKE '%\\\\appdata\\\\local\\\\microsoft\\\\%'
+                      AND REPLACE(LOWER(COALESCE(file_path, '')), '/', '\\\\') NOT LIKE '%\\\\appdata\\\\roaming\\\\microsoft\\\\%'
+                      AND REPLACE(LOWER(COALESCE(file_path, '')), '/', '\\\\') NOT LIKE '%\\\\appdata\\\\local\\\\google\\\\chrome\\\\%'
+                      AND REPLACE(LOWER(COALESCE(file_path, '')), '/', '\\\\') NOT LIKE '%\\\\appdata\\\\local\\\\bravesoftware\\\\%'
+                      AND REPLACE(LOWER(COALESCE(file_path, '')), '/', '\\\\') NOT LIKE '%\\\\appdata\\\\roaming\\\\mozilla\\\\firefox\\\\%'
+                      AND REPLACE(LOWER(COALESCE(file_path, '')), '/', '\\\\') NOT LIKE '%\\\\node_modules\\\\%'
+                    UNION ALL
+                    SELECT file_name, file_path,
+                           LOWER(CASE WHEN file_name LIKE '%.%' THEN regexp_extract(COALESCE(file_name, ''), '(\\.[^.\\\\/]+)$', 1) ELSE '.' || COALESCE(file_type, '') END) AS extension,
+                           file_size_bytes, created_time, modified_time, author, title, sha256,
+                           CAST(NULL AS VARCHAR) AS encoding, CAST(NULL AS INTEGER) AS line_count, CAST(NULL AS VARCHAR) AS text_preview,
+                           'parsed_documents_metadata' AS source_evidence
+                    FROM parsed_documents_metadata
+                    WHERE LOWER(COALESCE(file_type, '')) NOT IN ('pdf', 'doc', 'docx', 'docm', 'xls', 'xlsx', 'xlsm', 'csv', 'ppt', 'pptx', 'pptm', 'txt', 'rtf', 'log', 'ini', 'cfg', 'conf', 'text', 'zone_identifier')
+                      AND REPLACE(LOWER(COALESCE(file_path, '')), '/', '\\\\') NOT LIKE '%\\\\windows\\\\%'
+                      AND REPLACE(LOWER(COALESCE(file_path, '')), '/', '\\\\') NOT LIKE '%\\\\windows.old\\\\%'
+                      AND REPLACE(LOWER(COALESCE(file_path, '')), '/', '\\\\') NOT LIKE '%\\\\program files%'
+                      AND REPLACE(LOWER(COALESCE(file_path, '')), '/', '\\\\') NOT LIKE '%\\\\programdata\\\\microsoft%'
+                      AND REPLACE(LOWER(COALESCE(file_path, '')), '/', '\\\\') NOT LIKE '%\\\\programdata\\\\package cache%'
+                      AND REPLACE(LOWER(COALESCE(file_path, '')), '/', '\\\\') NOT LIKE '%\\\\system volume information%'
+                      AND REPLACE(LOWER(COALESCE(file_path, '')), '/', '\\\\') NOT LIKE '%\\\\recovery\\\\%'
+                      AND REPLACE(LOWER(COALESCE(file_path, '')), '/', '\\\\') NOT LIKE '%\\\\appdata\\\\local\\\\packages\\\\%'
+                      AND REPLACE(LOWER(COALESCE(file_path, '')), '/', '\\\\') NOT LIKE '%\\\\appdata\\\\local\\\\microsoft\\\\%'
+                      AND REPLACE(LOWER(COALESCE(file_path, '')), '/', '\\\\') NOT LIKE '%\\\\appdata\\\\roaming\\\\microsoft\\\\%'
+                      AND REPLACE(LOWER(COALESCE(file_path, '')), '/', '\\\\') NOT LIKE '%\\\\appdata\\\\local\\\\google\\\\chrome\\\\%'
+                      AND REPLACE(LOWER(COALESCE(file_path, '')), '/', '\\\\') NOT LIKE '%\\\\appdata\\\\local\\\\bravesoftware\\\\%'
+                      AND REPLACE(LOWER(COALESCE(file_path, '')), '/', '\\\\') NOT LIKE '%\\\\appdata\\\\roaming\\\\mozilla\\\\firefox\\\\%'
+                      AND REPLACE(LOWER(COALESCE(file_path, '')), '/', '\\\\') NOT LIKE '%\\\\node_modules\\\\%'
+                      AND LOWER(COALESCE(file_name, '')) NOT IN ('desktop.ini', 'thumbs.db', 'ntuser.ini', 'msoirmprotector.doc', 'msoirmprotector.ppt', 'msoirmprotector.xls')
+                    UNION ALL
+                    SELECT FileName AS file_name, COALESCE(ParentPath, '') || '\\\\' || COALESCE(FileName, '') AS file_path,
+                           LOWER(COALESCE(Extension, '')) AS extension,
+                           FileSize AS file_size_bytes, Created0x10 AS created_time, LastModified0x10 AS modified_time,
+                           CAST(NULL AS VARCHAR) AS author, CAST(NULL AS VARCHAR) AS title, CAST(NULL AS VARCHAR) AS sha256,
+                           CAST(NULL AS VARCHAR) AS encoding, CAST(NULL AS INTEGER) AS line_count, CAST(NULL AS VARCHAR) AS text_preview,
+                           'raw_mft' AS source_evidence
+                    FROM (
+                        SELECT *, row_number() OVER (PARTITION BY LOWER(COALESCE(ParentPath, '')), LOWER(COALESCE(FileName, '')), FileSize ORDER BY LastModified0x10 DESC NULLS LAST) AS _dup_rn
+                        FROM raw_mft
+                        WHERE LOWER(COALESCE(Extension, '')) IN (
+                            '.js', '.jsx', '.mjs', '.cjs', '.ts', '.tsx', '.py', '.pyw', '.html', '.htm', '.xhtml',
+                            '.css', '.scss', '.sass', '.less', '.vue', '.svelte', '.php', '.phtml', '.asp', '.aspx', '.jsp', '.jspx',
+                            '.rb', '.pl', '.pm', '.sh', '.bash', '.zsh', '.ps1', '.psm1', '.psd1', '.bat', '.cmd', '.vbs', '.vbe', '.wsf', '.wsh', '.hta', '.sct',
+                            '.c', '.h', '.cpp', '.hpp', '.cc', '.cxx', '.cs', '.java', '.go', '.rs', '.swift', '.kt', '.kts', '.scala', '.lua', '.r',
+                            '.sql', '.json', '.jsonl', '.xml', '.yaml', '.yml', '.toml', '.properties', '.env',
+                            '.md', '.markdown', '.rst', '.reg', '.inf', '.url', '.vcf', '.ics', '.svg', '.tex', '.bib', '.gradle', '.cmake'
+                        )
+                          AND (REPLACE(LOWER(COALESCE(ParentPath, '')), '/', '\\\\') || '\\\\') NOT LIKE '%\\\\windows\\\\%'
+                          AND (REPLACE(LOWER(COALESCE(ParentPath, '')), '/', '\\\\') || '\\\\') NOT LIKE '%\\\\windows.old\\\\%'
+                          AND REPLACE(LOWER(COALESCE(ParentPath, '')), '/', '\\\\') NOT LIKE '%\\\\program files%'
+                          AND REPLACE(LOWER(COALESCE(ParentPath, '')), '/', '\\\\') NOT LIKE '%\\\\programdata\\\\microsoft%'
+                          AND REPLACE(LOWER(COALESCE(ParentPath, '')), '/', '\\\\') NOT LIKE '%\\\\programdata\\\\package cache%'
+                          AND REPLACE(LOWER(COALESCE(ParentPath, '')), '/', '\\\\') NOT LIKE '%\\\\system volume information%'
+                          AND (REPLACE(LOWER(COALESCE(ParentPath, '')), '/', '\\\\') || '\\\\') NOT LIKE '%\\\\recovery\\\\%'
+                          AND (REPLACE(LOWER(COALESCE(ParentPath, '')), '/', '\\\\') || '\\\\') NOT LIKE '%\\\\appdata\\\\local\\\\packages\\\\%'
+                          AND (REPLACE(LOWER(COALESCE(ParentPath, '')), '/', '\\\\') || '\\\\') NOT LIKE '%\\\\appdata\\\\local\\\\microsoft\\\\%'
+                          AND (REPLACE(LOWER(COALESCE(ParentPath, '')), '/', '\\\\') || '\\\\') NOT LIKE '%\\\\appdata\\\\roaming\\\\microsoft\\\\%'
+                          AND (REPLACE(LOWER(COALESCE(ParentPath, '')), '/', '\\\\') || '\\\\') NOT LIKE '%\\\\appdata\\\\local\\\\google\\\\chrome\\\\%'
+                          AND (REPLACE(LOWER(COALESCE(ParentPath, '')), '/', '\\\\') || '\\\\') NOT LIKE '%\\\\appdata\\\\local\\\\bravesoftware\\\\%'
+                          AND (REPLACE(LOWER(COALESCE(ParentPath, '')), '/', '\\\\') || '\\\\') NOT LIKE '%\\\\appdata\\\\roaming\\\\mozilla\\\\firefox\\\\%'
+                          AND (REPLACE(LOWER(COALESCE(ParentPath, '')), '/', '\\\\') || '\\\\') NOT LIKE '%\\\\node_modules\\\\%'
+                          AND LOWER(COALESCE(FileName, '')) NOT IN ('desktop.ini', 'thumbs.db', 'ntuser.ini', 'msoirmprotector.doc', 'msoirmprotector.ppt', 'msoirmprotector.xls')
+                    ) mft_o WHERE _dup_rn = 1
+                    UNION ALL
+                    SELECT file_name, COALESCE(vfs_path, parent_path || '/' || file_name) AS file_path,
+                           LOWER(regexp_extract(COALESCE(file_name, ''), '(\\.[^.\\\\/]+)$', 1)) AS extension,
+                           size_bytes AS file_size_bytes, si_created AS created_time, si_modified AS modified_time,
+                           CAST(NULL AS VARCHAR) AS author, CAST(NULL AS VARCHAR) AS title, CAST(NULL AS VARCHAR) AS sha256,
+                           CAST(NULL AS VARCHAR) AS encoding, CAST(NULL AS INTEGER) AS line_count, CAST(NULL AS VARCHAR) AS text_preview,
+                           'vfs_files' AS source_evidence
+                    FROM vfs_files
+                    WHERE COALESCE(is_dir, FALSE) = FALSE
+                      AND LOWER(regexp_extract(COALESCE(file_name, ''), '(\\.[^.\\\\/]+)$', 1)) IN (
+                          '.js', '.jsx', '.mjs', '.cjs', '.ts', '.tsx', '.py', '.pyw', '.html', '.htm', '.xhtml',
+                          '.css', '.scss', '.sass', '.less', '.vue', '.svelte', '.php', '.phtml', '.asp', '.aspx', '.jsp', '.jspx',
+                          '.rb', '.pl', '.pm', '.sh', '.bash', '.zsh', '.ps1', '.psm1', '.psd1', '.bat', '.cmd', '.vbs', '.vbe', '.wsf', '.wsh', '.hta', '.sct',
+                          '.c', '.h', '.cpp', '.hpp', '.cc', '.cxx', '.cs', '.java', '.go', '.rs', '.swift', '.kt', '.kts', '.scala', '.lua', '.r',
+                          '.sql', '.json', '.jsonl', '.xml', '.yaml', '.yml', '.toml', '.properties', '.env',
+                          '.md', '.markdown', '.rst', '.reg', '.inf', '.url', '.vcf', '.ics', '.svg', '.tex', '.bib', '.gradle', '.cmake'
+                      )
+                      AND REPLACE(LOWER(COALESCE(vfs_path, '')), '/', '\\\\') NOT LIKE '%\\\\windows\\\\%'
+                      AND REPLACE(LOWER(COALESCE(vfs_path, '')), '/', '\\\\') NOT LIKE '%\\\\windows.old\\\\%'
+                      AND REPLACE(LOWER(COALESCE(vfs_path, '')), '/', '\\\\') NOT LIKE '%\\\\program files%'
+                      AND REPLACE(LOWER(COALESCE(vfs_path, '')), '/', '\\\\') NOT LIKE '%\\\\programdata\\\\microsoft%'
+                      AND REPLACE(LOWER(COALESCE(vfs_path, '')), '/', '\\\\') NOT LIKE '%\\\\programdata\\\\package cache%'
+                      AND REPLACE(LOWER(COALESCE(vfs_path, '')), '/', '\\\\') NOT LIKE '%\\\\system volume information%'
+                      AND REPLACE(LOWER(COALESCE(vfs_path, '')), '/', '\\\\') NOT LIKE '%\\\\recovery\\\\%'
+                      AND REPLACE(LOWER(COALESCE(vfs_path, '')), '/', '\\\\') NOT LIKE '%\\\\appdata\\\\local\\\\packages\\\\%'
+                      AND REPLACE(LOWER(COALESCE(vfs_path, '')), '/', '\\\\') NOT LIKE '%\\\\appdata\\\\local\\\\microsoft\\\\%'
+                      AND REPLACE(LOWER(COALESCE(vfs_path, '')), '/', '\\\\') NOT LIKE '%\\\\appdata\\\\roaming\\\\microsoft\\\\%'
+                      AND REPLACE(LOWER(COALESCE(vfs_path, '')), '/', '\\\\') NOT LIKE '%\\\\appdata\\\\local\\\\google\\\\chrome\\\\%'
+                      AND REPLACE(LOWER(COALESCE(vfs_path, '')), '/', '\\\\') NOT LIKE '%\\\\appdata\\\\local\\\\bravesoftware\\\\%'
+                      AND REPLACE(LOWER(COALESCE(vfs_path, '')), '/', '\\\\') NOT LIKE '%\\\\appdata\\\\roaming\\\\mozilla\\\\firefox\\\\%'
+                      AND REPLACE(LOWER(COALESCE(vfs_path, '')), '/', '\\\\') NOT LIKE '%\\\\node_modules\\\\%'
+                      AND LOWER(COALESCE(file_name, '')) NOT IN ('desktop.ini', 'thumbs.db', 'ntuser.ini', 'msoirmprotector.doc', 'msoirmprotector.ppt', 'msoirmprotector.xls')
+                ) o_sub
+            ) ranked_o WHERE _final_rn = 1;"""
     },
 
     # -------------------------------------------------------------------------
@@ -2857,8 +3084,11 @@ def sync_artifact_registry_counts(conn: duckdb.DuckDBPyConnection, case_id: Opti
             "browser_logins",
             "media_exif",
             "documents_metadata",
+            "parsed_documents_metadata",
+            "parsed_text_documents",
             "ocr_extracted_text",
             "ocr_results",
+            "view_documents",
         }
 
         reg_map: Dict[str, str] = {str(aid): str(tbl) for aid, tbl in existing_registered}
@@ -2905,8 +3135,8 @@ def sync_artifact_registry_counts(conn: duckdb.DuckDBPyConnection, case_id: Opti
 
             cursor.execute("""
                 DELETE FROM artifact_registry
-                WHERE artifact_id IN ('browser_history', 'browser_downloads', 'browser_logins', 'media_exif', 'documents_metadata', 'ocr_extracted_text', 'ocr_results')
-                   OR table_name IN ('parsed_browser_history', 'parsed_browser_downloads', 'parsed_browser_logins', 'parsed_media_exif', 'parsed_documents_metadata', 'artifact_ocr_results');
+                WHERE artifact_id IN ('browser_history', 'browser_downloads', 'browser_logins', 'media_exif', 'documents_metadata', 'ocr_extracted_text', 'ocr_results', 'view_documents', 'parsed_text_documents', 'parsed_documents_metadata')
+                   OR table_name IN ('parsed_browser_history', 'parsed_browser_downloads', 'parsed_browser_logins', 'parsed_media_exif', 'parsed_documents_metadata', 'parsed_text_documents', 'artifact_ocr_results', 'view_documents');
 
                 UPDATE artifact_registry SET category = 'EVENT LOGS'
                 WHERE category IN ('Event Logs', 'EVENT LOGS') OR table_name = 'raw_evtx' OR table_name LIKE 'view_evtx_%';
@@ -3243,8 +3473,8 @@ def init_schema(conn: duckdb.DuckDBPyConnection, case_id: Optional[str] = None) 
             )
             cursor.execute("""
                 DELETE FROM artifact_registry
-                WHERE artifact_id IN ('browser_history', 'browser_downloads', 'browser_logins', 'media_exif', 'documents_metadata', 'ocr_extracted_text', 'ocr_results')
-                   OR table_name IN ('parsed_browser_history', 'parsed_browser_downloads', 'parsed_browser_logins', 'parsed_media_exif', 'parsed_documents_metadata', 'artifact_ocr_results');
+                WHERE artifact_id IN ('browser_history', 'browser_downloads', 'browser_logins', 'media_exif', 'documents_metadata', 'ocr_extracted_text', 'ocr_results', 'view_documents', 'parsed_text_documents', 'parsed_documents_metadata')
+                   OR table_name IN ('parsed_browser_history', 'parsed_browser_downloads', 'parsed_browser_logins', 'parsed_media_exif', 'parsed_documents_metadata', 'parsed_text_documents', 'artifact_ocr_results', 'view_documents');
             """)
             cursor.execute("COMMIT;")
         except Exception:

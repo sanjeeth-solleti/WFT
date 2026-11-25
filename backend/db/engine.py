@@ -16,7 +16,7 @@ import duckdb
 from backend.config import get_case_db_path, get_case_dir
 from backend.db.schema import CORE_TABLES, init_schema, verify_core_tables
 
-DEFAULT_DUCKDB_THREADS = 25
+DEFAULT_DUCKDB_THREADS = 32
 
 _PARTITION_LABEL_RE = re.compile(
     r"^(?:"
@@ -1517,6 +1517,7 @@ def scan_keywords_for_case(
                         is_cs = kw_spec["is_case_sensitive"]
                         rx_obj: re.Pattern = kw_spec["regex"]
 
+                        row_limit_sql = " LIMIT 25000" if tbl == "parsed_bulk_extractor_features" else ""
                         if is_rx:
                             rx_opt = "c" if is_cs else "i"
                             clauses = [f'regexp_matches(CAST("{c}" AS VARCHAR), ?, \'{rx_opt}\')' for c in search_cols]
@@ -1525,13 +1526,13 @@ def scan_keywords_for_case(
                             sql_params = [kw_clean] * len(search_cols)
                             try:
                                 candidate_rows = cursor.execute(
-                                    f'SELECT {select_list_sql} FROM "{tbl}" WHERE {full_where};',
+                                    f'SELECT {select_list_sql} FROM "{tbl}" WHERE {full_where}{row_limit_sql};',
                                     sql_params,
                                 ).fetchall()
                             except Exception:
                                 fb_where = f"WHERE {dedup_filter_sql}" if dedup_filter_sql else ""
                                 candidate_rows = cursor.execute(
-                                    f'SELECT {select_list_sql} FROM "{tbl}" {fb_where};'
+                                    f'SELECT {select_list_sql} FROM "{tbl}" {fb_where}{row_limit_sql};'
                                 ).fetchall()
                         else:
                             like_op = "LIKE" if is_cs else "ILIKE"
@@ -1541,7 +1542,7 @@ def scan_keywords_for_case(
                             full_where = f"{match_where} AND ({dedup_filter_sql})" if dedup_filter_sql else match_where
                             sql_params = [like_pat] * len(search_cols)
                             candidate_rows = cursor.execute(
-                                f'SELECT {select_list_sql} FROM "{tbl}" WHERE {full_where};',
+                                f'SELECT {select_list_sql} FROM "{tbl}" WHERE {full_where}{row_limit_sql};',
                                 sql_params,
                             ).fetchall()
 
@@ -1673,7 +1674,7 @@ def scan_keywords_for_case(
             try:
                 raw_files = _collect_raw_scannable_files(case_dir)
                 if raw_files:
-                    pool_size = max(1, min(workers, 4, len(raw_files)))
+                    pool_size = max(1, min(workers, 32, len(raw_files)))
                     with ThreadPoolExecutor(max_workers=pool_size) as pool:
                         futures = [
                             pool.submit(

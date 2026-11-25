@@ -7,7 +7,7 @@ import {
 } from './api/client';
 import { TopNavBar, TabType } from './components/TopNavBar';
 import { GlobalFilterBar, GlobalFilterState } from './components/GlobalFilterBar';
-import { SidebarTree, buildSubviewDedupPredicate } from './components/SidebarTree';
+import { SidebarTree, buildSubviewDedupPredicate, normalizeWftCategory } from './components/SidebarTree';
 import { ArtifactGrid } from './components/ArtifactGrid';
 import { DetailsAndHexPane } from './components/DetailsAndHexPane';
 import { TimelineExplorer } from './components/TimelineExplorer';
@@ -15,6 +15,7 @@ import { ProcessWizard, ProcessWizardPersistedState } from './components/Process
 import { CaseDashboard } from './components/CaseDashboard';
 import { KeywordManager } from './components/KeywordManagerModal';
 import { RegRipperExplorer } from './components/RegRipperExplorer';
+import { BulkExtractorWorkbench } from './components/BulkExtractorWorkbench';
 import { EventLogsWorkbench } from './components/EventLogsWorkbench';
 import { FileSystemView } from './components/FileSystemView';
 import { MalwareWorkbench } from './components/MalwareWorkbench';
@@ -428,6 +429,20 @@ export const App: React.FC = () => {
   };
 
   const handleExploreCategory = (category: string, tableName?: string) => {
+    if (
+      tableName === 'bulk_extractor_hits' ||
+      tableName === 'parsed_bulk_extractor_features' ||
+      tableName === 'parsed_bulk_extractor_histograms' ||
+      tableName === 'bulk_extractor_features' ||
+      tableName === 'bulk_extractor_histograms'
+    ) {
+      setActiveTab('bulkextractor');
+      return;
+    }
+    if ((category || '').toUpperCase() === 'EVENT LOGS' && !tableName) {
+      setActiveTab('eventlogs');
+      return;
+    }
     setActiveTab('artifacts');
     if (registryData?.artifacts) {
       if (tableName) {
@@ -435,8 +450,6 @@ export const App: React.FC = () => {
           (a) =>
             a.table_name === tableName ||
             a.artifact_id === tableName ||
-            (tableName === 'bulk_extractor_hits' &&
-              a.table_name === 'parsed_bulk_extractor_features') ||
             (tableName === 'carved_files' && a.table_name === 'parsed_carved_files')
         );
         if (match) {
@@ -458,23 +471,52 @@ export const App: React.FC = () => {
   const dedupedArtifacts = useMemo(() => {
     const list = registryData?.artifacts || [];
     const isDuplicateSubview = buildSubviewDedupPredicate(list);
-    return list.filter((a) => !isDuplicateSubview(a));
+    return list.filter(
+      (a) =>
+        !isDuplicateSubview(a) &&
+        normalizeWftCategory(a.category) !== 'EVENT LOGS' &&
+        a.table_name !== 'raw_evtx' &&
+        !a.table_name.startsWith('view_evtx_') &&
+        a.table_name !== 'view_documents' &&
+        a.artifact_id !== 'view_documents' &&
+        a.table_name !== 'parsed_documents_metadata' &&
+        a.artifact_id !== 'parsed_documents_metadata' &&
+        a.table_name !== 'parsed_text_documents' &&
+        a.artifact_id !== 'parsed_text_documents' &&
+        a.table_name !== 'parsed_bulk_extractor_features' &&
+        a.table_name !== 'parsed_bulk_extractor_histograms' &&
+        a.artifact_id !== 'bulk_extractor_features' &&
+        a.artifact_id !== 'bulk_extractor_histograms'
+    );
   }, [registryData?.artifacts]);
 
   const totalAllArtifactRows = useMemo(() => {
-    const computed = dedupedArtifacts.reduce((acc, a) => acc + (a.row_count || 0), 0);
-    if (
-      typeof registryData?.all_evidence_total === 'number' &&
-      registryData.all_evidence_total > 0 &&
-      registryData.all_evidence_total === computed
-    ) {
+    if (typeof registryData?.all_evidence_total === 'number' && registryData.all_evidence_total > 0) {
       return registryData.all_evidence_total;
     }
-    return computed;
-  }, [dedupedArtifacts, registryData?.all_evidence_total]);
+    const fullPopulated = (registryData?.artifacts || []).filter((a) => (a.row_count || 0) > 0);
+    const isDuplicateFull = buildSubviewDedupPredicate(fullPopulated);
+    return fullPopulated.reduce((acc, a) => acc + (isDuplicateFull(a) ? 0 : a.row_count || 0), 0);
+  }, [registryData?.artifacts, registryData?.all_evidence_total]);
 
   const totalRegRipperPlugins =
     registryData?.artifacts.find((a) => a.artifact_id === 'regripper_plugins')?.row_count || 0;
+
+  const totalBulkExtractorCount = useMemo(() => {
+    const list = registryData?.artifacts || [];
+    let sum = 0;
+    for (const a of list) {
+      if (
+        a.table_name === 'parsed_bulk_extractor_features' ||
+        a.table_name === 'parsed_bulk_extractor_histograms' ||
+        a.artifact_id === 'bulk_extractor_features' ||
+        a.artifact_id === 'bulk_extractor_histograms'
+      ) {
+        sum += a.row_count || 0;
+      }
+    }
+    return sum;
+  }, [registryData?.artifacts]);
 
   const totalEvtxCount =
     registryData?.artifacts.find((a) => a.table_name === 'raw_evtx')?.row_count || 0;
@@ -625,6 +667,7 @@ export const App: React.FC = () => {
           totalFileSystem={totalFileSystemCount}
           totalMalwareHits={totalMalwareHits}
           totalRegRipperPlugins={totalRegRipperPlugins}
+          totalBulkExtractor={totalBulkExtractorCount}
           theme={theme}
           onToggleTheme={handleToggleTheme}
         />
@@ -722,6 +765,16 @@ export const App: React.FC = () => {
               externalKeywords={globalFilterState.keywords}
               tags={globalFilterState.tags}
               bookmarkedOnly={globalFilterState.bookmarkedOnly}
+            />
+          </div>
+        )}
+
+        {activeTab === 'bulkextractor' && (
+          <div className="flex-1 h-full overflow-hidden">
+            <BulkExtractorWorkbench
+              caseId={currentCaseId}
+              globalSearch={globalFilterState.search}
+              onInspectEntity={handleInspectEntity}
             />
           </div>
         )}

@@ -30,6 +30,7 @@ export type TabType =
   | 'dashboard'
   | 'artifacts'
   | 'regripper'
+  | 'bulkextractor'
   | 'eventlogs'
   | 'filesystem'
   | 'malware'
@@ -58,6 +59,7 @@ interface TopNavBarProps {
   totalFileSystem?: number;
   totalMalwareHits?: number;
   totalRegRipperPlugins?: number;
+  totalBulkExtractor?: number;
   theme: 'light' | 'dark';
   onToggleTheme: () => void;
 }
@@ -84,6 +86,7 @@ export const TopNavBar: React.FC<TopNavBarProps> = ({
   totalFileSystem = 0,
   totalMalwareHits = 0,
   totalRegRipperPlugins = 0,
+  totalBulkExtractor = 0,
   theme,
   onToggleTheme,
 }) => {
@@ -188,6 +191,14 @@ export const TopNavBar: React.FC<TopNavBarProps> = ({
       badge: totalRegRipperPlugins,
       badgeColor: 'bg-purple-100 text-purple-700 dark:bg-purple-950/60 dark:text-purple-300 border-purple-200 dark:border-purple-800',
       description: 'Registry hive fast analysis & plugins',
+    },
+    {
+      id: 'bulkextractor',
+      label: 'Bulk Extractor',
+      icon: Database,
+      badge: totalBulkExtractor,
+      badgeColor: 'bg-cyan-100 text-cyan-800 dark:bg-cyan-950/60 dark:text-cyan-300 border-cyan-300 dark:border-cyan-800',
+      description: 'Carved features, IOCs & frequency histograms',
     },
     {
       id: 'eventlogs',

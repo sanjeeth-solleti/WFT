@@ -4771,11 +4771,43 @@ class TimelineNormalizer:
         if ts_c:
             self._emit_tl(t, f'"{ts_c}"', "Bulk Extractor Feature", "....", "REFINED RESULTS", "Bulk Extractor Features", fv_e, ft_e, f"'Bulk Extractor (' || {ft_e} || '): ' || {fv_e}", rid, src_e)
         ts_clean = self._clean_ts_expr(f'"{ts_c}"') if ts_c else "CAST(NULL AS TIMESTAMP)"
-        self._emit_ent(t, "EMAIL_ADDRESS", f"LOWER({fv_e})", "REFINED RESULTS", "Bulk Extractor Features", rid, "'Bulk Extractor carved email'", ts_clean, f"{ft_e} LIKE '%email%' AND {fv_e} LIKE '%@%'")
-        self._emit_ent(t, "URL", fv_e, "REFINED RESULTS", "Bulk Extractor Features", rid, "'Bulk Extractor carved URL'", ts_clean, f"{ft_e} LIKE '%url%' AND {fv_e} ILIKE 'http%'")
-        self._emit_ent(t, "DOMAIN", f"LOWER(COALESCE(NULLIF(regexp_extract({fv_e}, '^(?:https?://)?([^/:]+)', 1), ''), {fv_e}))", "REFINED RESULTS", "Bulk Extractor Features", rid, "'Bulk Extractor carved domain'", ts_clean, f"({ft_e} IN ('domain', 'httplogs', 'dns') OR ({ft_e} LIKE '%url%' AND {fv_e} ILIKE 'http%'))")
-        self._emit_ent(t, "IP_ADDRESS", fv_e, "REFINED RESULTS", "Bulk Extractor Features", rid, "'Bulk Extractor carved IP'", ts_clean, f"{ft_e} IN ('ip', 'net', 'pcap') AND regexp_matches({fv_e}, '^[0-9]{{1,3}}(\\.[0-9]{{1,3}}){{3}}$')")
-        self._emit_ent(t, "EXECUTABLE", f"UPPER({fv_e})", "REFINED RESULTS", "Bulk Extractor Features", rid, "'Bulk Extractor carved PE/executable'", ts_clean, f"{ft_e} IN ('winpe', 'elf', 'executable')")
+        cur = self.conn.cursor()
+
+        def _emit_dedup_be_ent(ent_type: str, val_expr: str, ctx_label: str, extra_where: str) -> None:
+            cur.execute(f"""
+                INSERT INTO entity_connections (
+                    connection_id, entity_type, entity_value, category, artifact_name,
+                    source_table, source_row_id, context_label, timestamp_utc
+                )
+                SELECT
+                    nextval('seq_connection_id'),
+                    '{ent_type}',
+                    dedup.ent_val,
+                    'REFINED RESULTS',
+                    'Bulk Extractor Features',
+                    '{t}',
+                    dedup.src_rid,
+                    '{ctx_label}',
+                    dedup.ts_val
+                FROM (
+                    SELECT
+                        {val_expr} AS ent_val,
+                        {rid} AS src_rid,
+                        {ts_clean} AS ts_val
+                    FROM "{t}"
+                    WHERE ({val_expr}) IS NOT NULL
+                      AND length(trim(CAST({val_expr} AS VARCHAR))) > 0
+                      AND ({extra_where})
+                    QUALIFY row_number() OVER (PARTITION BY LOWER(CAST({val_expr} AS VARCHAR)) ORDER BY {rid} ASC) <= 5
+                    LIMIT 50000
+                ) dedup;
+            """)
+
+        _emit_dedup_be_ent("EMAIL_ADDRESS", f"LOWER({fv_e})", "Bulk Extractor carved email", f"{ft_e} LIKE '%email%' AND {fv_e} LIKE '%@%'")
+        _emit_dedup_be_ent("URL", fv_e, "Bulk Extractor carved URL", f"{ft_e} LIKE '%url%' AND {fv_e} ILIKE 'http%'")
+        _emit_dedup_be_ent("DOMAIN", f"LOWER(COALESCE(NULLIF(regexp_extract({fv_e}, '^(?:https?://)?([^/:]+)', 1), ''), {fv_e}))", "Bulk Extractor carved domain", f"({ft_e} IN ('domain', 'httplogs', 'dns') OR ({ft_e} LIKE '%url%' AND {fv_e} ILIKE 'http%'))")
+        _emit_dedup_be_ent("IP_ADDRESS", fv_e, "Bulk Extractor carved IP", f"{ft_e} IN ('ip', 'net', 'pcap') AND regexp_matches({fv_e}, '^[0-9]{{1,3}}(\\.[0-9]{{1,3}}){{3}}$')")
+        _emit_dedup_be_ent("EXECUTABLE", f"UPPER({fv_e})", "Bulk Extractor carved PE/executable", f"{ft_e} IN ('winpe', 'elf', 'executable')")
         return self._finish_counts(t)
 
     def _normalize_browser_session(self, cols: Dict[str, str], table_name: str) -> Tuple[int, int]:

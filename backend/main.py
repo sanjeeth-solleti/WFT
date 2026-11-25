@@ -110,15 +110,30 @@ import logging as _logging
 class _SuppressDuplicate200Filter(_logging.Filter):
     """
     Suppresses excessive uvicorn access noise by deduplicating repeated HTTP 200 OK polling logs.
-    If the status is OK, exactly one line is logged per endpoint within the heartbeat window (default 60s).
+    When an endpoint becomes active (200 OK), exactly ONE line is logged and subsequent duplicate
+    200 OK lines for that endpoint are suppressed until a non-200 status transition occurs or the
+    active state resets, at which point becoming active (200 OK) again logs one line.
     Non-200 responses, status transitions, and errors are always logged immediately without suppression.
     """
-    def __init__(self, heartbeat_interval: float = 60.0):
+    def __init__(self, heartbeat_interval: float = 0.0, idle_window: float = 60.0):
         super().__init__()
         self._endpoint_log_times: Dict[str, float] = {}
+        self._last_logged: Dict[str, float] = {}
         self._last_status_per_endpoint: Dict[str, int] = {}
         self._heartbeat = heartbeat_interval
+        self._idle_window = max(1.0, float(idle_window))
         self._lock = threading.Lock()
+
+    def reset_endpoint(self, ep_base: Optional[str] = None) -> None:
+        with self._lock:
+            if ep_base is None:
+                self._last_status_per_endpoint.clear()
+                self._endpoint_log_times.clear()
+                self._last_logged.clear()
+            else:
+                self._last_status_per_endpoint.pop(ep_base, None)
+                self._endpoint_log_times.pop(ep_base, None)
+                self._last_logged.pop(ep_base, None)
 
     def filter(self, record: _logging.LogRecord) -> bool:
         try:
@@ -142,17 +157,34 @@ class _SuppressDuplicate200Filter(_logging.Filter):
                             req_parts = parts[1].split()
                             if len(req_parts) >= 2:
                                 endpoint = req_parts[1]
+                elif '"' in msg:
+                    parts = msg.split('"')
+                    if len(parts) >= 3:
+                        req_parts = parts[1].split()
+                        if len(req_parts) >= 2:
+                            endpoint = req_parts[1]
+                        tail_parts = parts[2].strip().split()
+                        if tail_parts and tail_parts[0].isdigit():
+                            status_code = int(tail_parts[0])
 
             if status_code == 200 and endpoint is not None:
                 ep_base = endpoint.split("?")[0]
                 now = time.time()
                 with self._lock:
-                    last_time = self._endpoint_log_times.get(ep_base, 0.0)
+                    # `_endpoint_log_times` tracks the LAST TIME THIS ENDPOINT WAS SEEN (logged or
+                    # suppressed). While an endpoint is continuously polled (gap < idle window) only the
+                    # first 200 OK line is written; once polling stops for longer than the idle window
+                    # and later resumes, exactly one new "active" line is written again.
+                    last_seen = self._endpoint_log_times.get(ep_base, 0.0)
                     last_status = self._last_status_per_endpoint.get(ep_base)
-                    if last_status == 200 and (now - last_time < self._heartbeat):
-                        return False
                     self._endpoint_log_times[ep_base] = now
+                    still_active = (now - last_seen) < self._idle_window
+                    if last_status == 200 and still_active and (
+                        self._heartbeat <= 0.0 or (now - self._last_logged.get(ep_base, 0.0) < self._heartbeat)
+                    ):
+                        return False
                     self._last_status_per_endpoint[ep_base] = 200
+                    self._last_logged[ep_base] = now
                 return True
 
             if endpoint is not None:
@@ -161,6 +193,8 @@ class _SuppressDuplicate200Filter(_logging.Filter):
                     self._endpoint_log_times[ep_base] = time.time()
                     if status_code is not None:
                         self._last_status_per_endpoint[ep_base] = status_code
+                    else:
+                        self._last_status_per_endpoint.pop(ep_base, None)
             return True
         except Exception:
             return True
@@ -182,9 +216,14 @@ async def _wft_lifespan(_app: FastAPI):
     except Exception:
         pass
     try:
-        _acc_log = _logging.getLogger("uvicorn.access")
-        _acc_log.addFilter(_uv_access_filter)
-        for _h in _acc_log.handlers:
+        for _log_name in ("uvicorn", "uvicorn.access", "uvicorn.error"):
+            _lg = _logging.getLogger(_log_name)
+            _lg.addFilter(_uv_access_filter)
+            for _h in _lg.handlers:
+                _h.addFilter(_uv_access_filter)
+        _root_lg = _logging.getLogger()
+        _root_lg.addFilter(_uv_access_filter)
+        for _h in _root_lg.handlers:
             _h.addFilter(_uv_access_filter)
     except Exception:
         pass
@@ -1513,6 +1552,8 @@ def process_case(
                 "current_step": job_status.get("current_step", "Processing evidence..."),
             }
         _running_cases.add(case_id)
+        _uv_access_filter.reset_endpoint(f"/api/cases/{case_id}/status")
+        _uv_access_filter.reset_endpoint("/api/health")
 
     with IMAGE_READ_LOCK:
         _IMAGE_TARGET_CACHE.pop(case_id, None)
@@ -1790,7 +1831,9 @@ def get_case_ioc_matches(case_id: str, limit: int = Query(1000, ge=1, le=50000),
 INTERNAL_HIDDEN_REGISTRY_TABLES = {
     "parsed_media_exif",
     "parsed_documents_metadata",
+    "parsed_text_documents",
     "view_all_malware_detections",
+    "view_documents",
 }
 
 CANONICAL_CATEGORIES = [
@@ -1925,14 +1968,13 @@ def _build_subview_dedup_predicate(artifacts_data: List[Dict[str, Any]]) -> Call
         if int(a.get("row_count") or 0) > 0
     }
     has_raw_evtx = "raw_evtx" in present_nonzero
-    has_view_docs = "view_documents" in present_nonzero
     has_raw_recmd = "raw_recmd" in present_nonzero
     recmd_slice_views = {"view_usb_devices", "view_autoruns", "view_userassist", "view_bam_dam"}
 
     def _is_duplicate(tname: str) -> bool:
-        if has_raw_evtx and tname.startswith("view_evtx_"):
+        if tname == "view_documents":
             return True
-        if has_view_docs and tname.startswith("view_docs_"):
+        if has_raw_evtx and tname.startswith("view_evtx_"):
             return True
         if has_raw_recmd and tname in recmd_slice_views:
             return True

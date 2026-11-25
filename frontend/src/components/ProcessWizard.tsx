@@ -723,7 +723,17 @@ export const ProcessWizard: React.FC<ProcessWizardProps> = ({
 
   // Single-click Process Evidence: starts immediately and jumps directly to live execution monitor
   const handleStartProcessing = async () => {
-    if (isSubmitting || statusData?.status === 'RUNNING') return;
+    if (isSubmitting) return;
+    if (statusData?.status === 'RUNNING' || isProcessingRunning) {
+      setCurrentStep(4);
+      if (isOpenAsModal && onCloseModal) {
+        onCloseModal();
+      }
+      if (onNavigateToExamine) {
+        onNavigateToExamine();
+      }
+      return;
+    }
     setIsSubmitting(true);
     setSubmissionError(null);
 
@@ -746,6 +756,7 @@ export const ProcessWizard: React.FC<ProcessWizardProps> = ({
 
     try {
       const clampedWorkers = Math.max(1, Math.min(32, Number(maxWorkers) || 25));
+      const shouldNavigateRightAway = !isOpenAsModal;
       const outgoingSet = new Set(selectedArtifactIds);
       if (enableYara) outgoingSet.add('artifact_yara_hits');
       else outgoingSet.delete('artifact_yara_hits');
@@ -815,6 +826,9 @@ export const ProcessWizard: React.FC<ProcessWizardProps> = ({
         );
       }
       onCaseCreated(res.case_id);
+      if (shouldNavigateRightAway && onNavigateToExamine) {
+        onNavigateToExamine();
+      }
     } catch (err: unknown) {
       setSubmissionError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -852,7 +866,7 @@ export const ProcessWizard: React.FC<ProcessWizardProps> = ({
   const isProcessingCompleted =
     statusData?.status === 'SUCCESS' || statusData?.status === 'COMPLETED';
   const canExamineArtifacts = Boolean(
-    onNavigateToExamine && activeCaseId && !isProcessingRunning && isProcessingCompleted
+    onNavigateToExamine && (activeCaseId || currentCaseId)
   );
   const displayCaseName =
     (hasCustomCaseName && caseName.trim()) ||
@@ -893,11 +907,11 @@ export const ProcessWizard: React.FC<ProcessWizardProps> = ({
               <button
                 type="button"
                 onClick={handleStartProcessing}
-                disabled={isProcessingRunning}
+                disabled={isSubmitting}
                 className="flex items-center gap-1.5 px-3.5 py-1 bg-[#166534] hover:bg-emerald-800 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded text-xs font-bold transition-colors shadow-2xs cursor-pointer"
               >
                 <Play className="w-3.5 h-3.5 fill-current" />
-                <span>Process Evidence Now</span>
+                <span>{isProcessingRunning ? 'Go to Artifacts' : 'Process Evidence Now'}</span>
               </button>
             )}
 
@@ -1751,11 +1765,17 @@ export const ProcessWizard: React.FC<ProcessWizardProps> = ({
                     type="button"
                     id="wft-auto-start-process-btn"
                     onClick={handleStartProcessing}
-                    disabled={isProcessingRunning}
+                    disabled={isSubmitting}
                     className="px-5 py-2 rounded bg-[#0284c7] hover:bg-[#0369a1] disabled:opacity-50 disabled:cursor-not-allowed text-white text-xs font-bold flex items-center gap-2 border border-[#0369a1] shadow-2xs transition-colors cursor-pointer"
                   >
                     <Play className="w-4 h-4 fill-current" />
-                    <span>{isProcessingRunning ? 'Processing...' : 'Process Evidence'}</span>
+                    <span>
+                      {isSubmitting
+                        ? 'Starting...'
+                        : isProcessingRunning
+                        ? 'Go to Artifacts'
+                        : 'Process Evidence'}
+                    </span>
                   </button>
                 )}
 
@@ -1769,20 +1789,10 @@ export const ProcessWizard: React.FC<ProcessWizardProps> = ({
                         onNavigateToExamine();
                       }
                     }}
-                    title={
-                      isProcessingRunning
-                        ? 'Processing is in progress — Examine Artifacts will enable once processing completes'
-                        : !isProcessingCompleted
-                        ? 'Complete evidence processing to examine artifacts'
-                        : 'Open Examine Artifacts view for this case'
-                    }
+                    title="Open Examine Artifacts view for this case"
                     className="px-5 py-1.5 rounded bg-[#0284c7] hover:bg-[#0369a1] disabled:bg-slate-300 dark:disabled:bg-slate-700 disabled:text-slate-500 dark:disabled:text-slate-400 disabled:border-slate-300 dark:disabled:border-slate-600 disabled:cursor-not-allowed text-white text-xs font-semibold flex items-center gap-1.5 border border-[#0369a1] shadow-2xs transition-colors cursor-pointer"
                   >
-                    {isProcessingRunning ? (
-                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                    ) : (
-                      <Eye className="w-3.5 h-3.5" />
-                    )}
+                    <Eye className="w-3.5 h-3.5" />
                     <span>Examine Artifacts</span>
                   </button>
                 )}

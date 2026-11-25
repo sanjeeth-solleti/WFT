@@ -701,6 +701,7 @@ class BaseParser:
         self._source_type_checked: bool = self.source_type is not None
         self._vfs_staged_cache: Optional[Dict[str, Dict[str, Any]]] = None
         self._vfs_part_labels_cache: Optional[Set[str]] = None
+        self._last_log_msg: Optional[str] = None
 
         with self.db_manager.get_lock(self.case_id):
             self.conn = self.db_manager.get_connection(self.case_id, read_only=False)
@@ -721,26 +722,30 @@ class BaseParser:
             cursor.execute(ddl_sql)
 
     def _log(self, message: str, level: str = "INFO") -> None:
+        norm_msg = re.sub(r"\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\s*UTC)?\]\s*", "", message).strip()
         timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
         cls_name = self.__class__.__name__
         formatted = _sanitize_utf8_str(f"[{timestamp}] [{level}] [{cls_name}] {message}")
-        try:
-            print(formatted)
-        except UnicodeEncodeError:
+        with _LOG_FILE_LOCK:
+            if getattr(self, "_last_log_msg", None) == norm_msg:
+                return
+            self._last_log_msg = norm_msg
             try:
-                enc = getattr(sys.stdout, "encoding", None) or "utf-8"
-                print(formatted.encode(enc, errors="replace").decode(enc, errors="replace"))
+                print(formatted)
+            except UnicodeEncodeError:
+                try:
+                    enc = getattr(sys.stdout, "encoding", None) or "utf-8"
+                    print(formatted.encode(enc, errors="replace").decode(enc, errors="replace"))
+                except Exception:
+                    pass
             except Exception:
                 pass
-        except Exception:
-            pass
-        try:
-            with _LOG_FILE_LOCK:
+            try:
                 self.log_file.parent.mkdir(parents=True, exist_ok=True)
                 with open(self.log_file, "a", encoding="utf-8", errors="replace") as f:
                     f.write(formatted + "\n")
-        except Exception:
-            pass
+            except Exception:
+                pass
 
     def log_processing(
         self,

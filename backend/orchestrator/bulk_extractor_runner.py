@@ -11,6 +11,7 @@ import subprocess
 import threading
 import time
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
 
@@ -656,11 +657,19 @@ def _is_valid_domain_name(host: str) -> bool:
     return True
 
 
-def _is_valid_feature(scanner: str, feature: str, context: str, has_context: bool = True) -> bool:
-    """Requirement R3 zero-false-positive validator across Bulk Extractor scanners."""
+def _validate_and_clean_feature(
+    scanner: str,
+    feature: str,
+    context: str,
+    has_context: bool = True,
+) -> Tuple[bool, str]:
+    """
+    Requirement R3 zero-false-positive validator across Bulk Extractor scanners.
+    Performs context inspection once and returns (is_valid, clean_ctx).
+    """
     feat = feature.strip()
     if not feat or len(feat) > 4096:
-        return False
+        return (False, "")
 
     sc = scanner.lower().strip()
     if has_context and context:
@@ -670,104 +679,104 @@ def _is_valid_feature(scanner: str, feature: str, context: str, has_context: boo
 
     if sc == "ip":
         if has_context and context and _has_noisy_token_boundary(noise_ratio, imm_left, imm_right):
-            return False
-        return _is_valid_ipv4(feat, clean_ctx, noise_ratio, has_context)
+            return (False, clean_ctx)
+        return (_is_valid_ipv4(feat, clean_ctx, noise_ratio, has_context), clean_ctx)
 
     if sc in ("domain", "email_domain"):
         check_val = feat[1:] if (sc == "email_domain" and feat.startswith("@")) else feat
         if re.match(r"^\d+(?:\.\d+){3}$", check_val):
             if has_context and context and _has_noisy_token_boundary(noise_ratio, imm_left, imm_right):
-                return False
-            return _is_valid_ipv4(check_val, clean_ctx, noise_ratio, has_context)
+                return (False, clean_ctx)
+            return (_is_valid_ipv4(check_val, clean_ctx, noise_ratio, has_context), clean_ctx)
         if has_context and clean_ctx:
             if (
                 noise_ratio > 0.18
                 or _has_noisy_token_boundary(noise_ratio, imm_left, imm_right)
                 or _PE_VERSION_CTX_RE.search(clean_ctx)
             ):
-                return False
-        return _is_valid_domain_name(check_val)
+                return (False, clean_ctx)
+        return (_is_valid_domain_name(check_val), clean_ctx)
 
     if sc == "email":
         if any(ord(c) < 33 or ord(c) > 126 for c in feat):
-            return False
+            return (False, clean_ctx)
         if feat.count("@") != 1:
-            return False
+            return (False, clean_ctx)
         local, dom = feat.split("@", 1)
         if not (1 <= len(local) <= 64) or local.startswith(".") or local.endswith(".") or ".." in local:
-            return False
+            return (False, clean_ctx)
         if _RETINA_ASSET_RE.match("@" + dom):
-            return False
+            return (False, clean_ctx)
         if has_context and (
             noise_ratio > 0.18
             or _has_noisy_token_boundary(noise_ratio, imm_left, imm_right)
             or (clean_ctx and _PE_VERSION_CTX_RE.search(clean_ctx))
         ):
-            return False
+            return (False, clean_ctx)
         if re.match(r"^\d+(?:\.\d+){3}$", dom):
-            return _is_valid_ipv4(dom, clean_ctx, noise_ratio, has_context)
-        return _is_valid_domain_name(dom)
+            return (_is_valid_ipv4(dom, clean_ctx, noise_ratio, has_context), clean_ctx)
+        return (_is_valid_domain_name(dom), clean_ctx)
 
     if sc == "telephone":
         if has_context and (noise_ratio > 0.22 or (clean_ctx and _PE_VERSION_CTX_RE.search(clean_ctx))):
-            return False
+            return (False, clean_ctx)
         digits = re.sub(r"\D", "", feat)
         if not (7 <= len(digits) <= 15):
-            return False
+            return (False, clean_ctx)
         if len(set(digits)) < 3:
-            return False
+            return (False, clean_ctx)
         if digits in ("0123456789", "1234567890", "9876543210", "0987654321"):
-            return False
-        return True
+            return (False, clean_ctx)
+        return (True, clean_ctx)
 
     if sc in ("ccn", "ccn_track2"):
         if has_context and (noise_ratio > 0.20 or (clean_ctx and _PE_VERSION_CTX_RE.search(clean_ctx))):
-            return False
+            return (False, clean_ctx)
         digits = re.sub(r"\D", "", feat.split("=")[0].split("^")[0])
         if not (13 <= len(digits) <= 19):
-            return False
+            return (False, clean_ctx)
         if len(set(digits)) < 3:
-            return False
+            return (False, clean_ctx)
         if not _luhn_valid(digits):
-            return False
+            return (False, clean_ctx)
         if sc == "ccn" and feat.isdigit() and len(digits) == 15 and has_context and clean_ctx:
             has_card_ctx = bool(_CARD_CTX_RE.search(clean_ctx))
             if not has_card_ctx:
                 esc_f = re.escape(feat)
                 if re.search(rf"<(?:[A-Za-z0-9_]+:)?(?:t|v|c|f|is|si)(?:\s[^>]*)?>\s*{esc_f}\s*</", clean_ctx):
-                    return False
+                    return (False, clean_ctx)
                 if _is_dms_station_id_15(digits) and any(ch in clean_ctx for ch in ("<", ">", "\t", ",")):
-                    return False
-        return True
+                    return (False, clean_ctx)
+        return (True, clean_ctx)
 
     if sc == "url_services":
         if any(ord(c) < 32 or ord(c) == 127 for c in feat):
-            return False
+            return (False, clean_ctx)
         if not (feat.startswith("://") or feat.lower().startswith(_VALID_URL_SCHEMES)):
-            return False
+            return (False, clean_ctx)
         rest = feat.split("://", 1)[1] if "://" in feat else ""
         host_port = re.split(r"[/\?#]", rest, maxsplit=1)[0]
         if "@" in host_port:
             host_port = host_port.rsplit("@", 1)[-1]
         host = host_port.split(":", 1)[0].strip("[]")
         if not host:
-            return False
+            return (False, clean_ctx)
         if re.match(r"^\d+(?:\.\d+){3}$", host):
-            return _is_valid_ipv4(host, clean_ctx, noise_ratio, has_context=False)
+            return (_is_valid_ipv4(host, clean_ctx, noise_ratio, has_context=False), clean_ctx)
         if host.lower() == "localhost":
-            return True
-        return _is_valid_domain_name(host)
+            return (True, clean_ctx)
+        return (_is_valid_domain_name(host), clean_ctx)
 
     if sc == "url" or sc.startswith("url_"):
         if any(ord(c) < 32 or ord(c) == 127 for c in feat):
-            return False
+            return (False, clean_ctx)
         low_f = feat.lower()
         if sc == "url":
             if not low_f.startswith(_VALID_URL_SCHEMES):
-                return False
+                return (False, clean_ctx)
         elif not low_f.startswith(_VALID_URL_SCHEMES):
             # Sub-histograms like url_searches may hold search terms; require clean printable text
-            return not (has_context and noise_ratio > 0.45)
+            return (not (has_context and noise_ratio > 0.45), clean_ctx)
 
         if low_f.startswith(("http://", "https://", "ftp://", "ftps://", "ws://", "wss://")):
             after_scheme = feat.split("://", 1)[1]
@@ -776,19 +785,25 @@ def _is_valid_feature(scanner: str, feature: str, context: str, has_context: boo
                 host_port = host_port.rsplit("@", 1)[-1]
             host = host_port.split(":", 1)[0].strip("[]")
             if not host:
-                return False
+                return (False, clean_ctx)
             if re.match(r"^\d+(?:\.\d+){3}$", host):
-                return _is_valid_ipv4(host, clean_ctx, noise_ratio, has_context)
+                return (_is_valid_ipv4(host, clean_ctx, noise_ratio, has_context), clean_ctx)
             if host.lower() != "localhost" and not _is_valid_domain_name(host):
-                return False
+                return (False, clean_ctx)
         if has_context and noise_ratio > 0.50:
-            return False
-        return True
+            return (False, clean_ctx)
+        return (True, clean_ctx)
 
     # General feature scanners (find, exif, gps, winpe, winlnk, winprefetch, httplogs, json, etc.)
     if any(ord(c) < 9 or (14 <= ord(c) < 32) for c in feat):
-        return False
-    return True
+        return (False, clean_ctx)
+    return (True, clean_ctx)
+
+
+def _is_valid_feature(scanner: str, feature: str, context: str, has_context: bool = True) -> bool:
+    """Requirement R3 zero-false-positive validator across Bulk Extractor scanners."""
+    is_ok, _ = _validate_and_clean_feature(scanner, feature, context, has_context=has_context)
+    return is_ok
 
 
 def _canonical_verdict_family(scanner: str) -> str:
@@ -964,12 +979,32 @@ class BulkExtractorRunner:
         feature_rows: List[Tuple[str, str, str, str, str]] = []
         histogram_rows: List[Tuple[str, int, str, str]] = []
 
-        # Pass 1: Feature files (with full flanking-byte context validation)
-        for fpath in feature_files:
+        # Per-feature sample cap and per-scanner row cap prevent multi-million duplicate feature bloat
+        # on 400GB+ disk images while preserving 100% of distinct features and full histogram totals.
+        max_occurrences_per_feature = 50
+        max_features_per_scanner = 50_000
+
+        # Pass 1: Feature files (with full flanking-byte context validation, parallelized across 32 threads)
+        def _parse_single_feature_file(
+            fpath: Path,
+        ) -> Tuple[
+            str,
+            str,
+            List[Tuple[str, str, str, str, str]],
+            Dict[str, Set[str]],
+            Dict[str, Set[str]],
+            Set[str],
+            Set[str],
+        ]:
             scanner = fpath.stem.lower()
-            parsed_scanners.add(scanner)
             family = _canonical_verdict_family(scanner)
             source_name = fpath.name
+            local_rows: List[Tuple[str, str, str, str, str]] = []
+            local_acc_fam: Dict[str, Set[str]] = defaultdict(set)
+            local_rej_fam: Dict[str, Set[str]] = defaultdict(set)
+            local_acc_glob: Set[str] = set()
+            local_rej_glob: Set[str] = set()
+            feature_occurrence_counts: Dict[str, int] = defaultdict(int)
             try:
                 with open(fpath, "r", encoding="utf-8-sig", errors="replace") as f:
                     for raw_line in f:
@@ -986,25 +1021,69 @@ class BulkExtractorRunner:
                             continue
 
                         norm_keys = _normalize_verdict_keys(family, feat_val)
-                        if _is_valid_feature(scanner, feat_val, ctx_val, has_context=True):
-                            clean_ctx, _ = _inspect_be_context(ctx_val, feat_val)
-                            feature_rows.append((scanner, offset_str, feat_val, clean_ctx or ctx_val, source_name))
-                            accepted_by_family[family].update(norm_keys)
-                            accepted_global.update(norm_keys)
+                        is_valid, clean_ctx = _validate_and_clean_feature(
+                            scanner, feat_val, ctx_val, has_context=True
+                        )
+                        if is_valid:
+                            local_acc_fam[family].update(norm_keys)
+                            local_acc_glob.update(norm_keys)
                             if scanner == "email" and "@" in feat_val:
                                 dom_part = feat_val.split("@", 1)[1].lower()
                                 dom_keys = _normalize_verdict_keys("domain", dom_part)
-                                accepted_by_family["domain"].update(dom_keys)
-                                accepted_global.update(dom_keys)
+                                local_acc_fam["domain"].update(dom_keys)
+                                local_acc_glob.update(dom_keys)
+                            feat_key_low = feat_val.lower()
+                            occ_cnt = feature_occurrence_counts[feat_key_low]
+                            if (
+                                occ_cnt < max_occurrences_per_feature
+                                and len(local_rows) < max_features_per_scanner
+                            ):
+                                feature_occurrence_counts[feat_key_low] = occ_cnt + 1
+                                local_rows.append(
+                                    (scanner, offset_str, feat_val, clean_ctx or ctx_val, source_name)
+                                )
                         else:
-                            rejected_by_family[family].update(norm_keys)
-                            rejected_global.update(norm_keys)
+                            local_rej_fam[family].update(norm_keys)
+                            local_rej_glob.update(norm_keys)
                             if scanner == "email" and "@" in feat_val:
                                 dom_part = feat_val.split("@", 1)[1].lower()
                                 dom_keys = _normalize_verdict_keys("domain", dom_part)
-                                rejected_by_family["domain"].update(dom_keys)
+                                local_rej_fam["domain"].update(dom_keys)
             except OSError as ex:
                 self.log_fn(f"Warning reading feature file {fpath.name}: {ex}", "WARNING")
+            return (
+                scanner,
+                family,
+                local_rows,
+                local_acc_fam,
+                local_rej_fam,
+                local_acc_glob,
+                local_rej_glob,
+            )
+
+        if len(feature_files) > 1:
+            with ThreadPoolExecutor(max_workers=min(32, len(feature_files))) as pool:
+                file_results = list(pool.map(_parse_single_feature_file, feature_files))
+        else:
+            file_results = [_parse_single_feature_file(fp) for fp in feature_files]
+
+        for (
+            scanner,
+            _family,
+            local_rows,
+            local_acc_fam,
+            local_rej_fam,
+            local_acc_glob,
+            local_rej_glob,
+        ) in file_results:
+            parsed_scanners.add(scanner)
+            feature_rows.extend(local_rows)
+            for fam_k, keys_set in local_acc_fam.items():
+                accepted_by_family[fam_k].update(keys_set)
+            for fam_k, keys_set in local_rej_fam.items():
+                rejected_by_family[fam_k].update(keys_set)
+            accepted_global.update(local_acc_glob)
+            rejected_global.update(local_rej_glob)
 
         # Pass 2: Histogram files (cross-filtered against Pass 1 context verdicts)
         for hpath in histogram_files:
@@ -1132,10 +1211,135 @@ class BulkExtractorRunner:
         except OSError:
             pass
 
+    @staticmethod
+    def _compute_time_budget(src: Path) -> int:
+        """
+        Size-aware wall-clock budget for bulk_extractor (seconds).
+        Default: 30 min minimum, ~45 s per GiB of evidence, capped at 12 h.
+        Override with WFT_BE_MAX_SECONDS (0 or negative = unlimited).
+        """
+        raw_env = (os.environ.get("WFT_BE_MAX_SECONDS") or "").strip()
+        if raw_env:
+            try:
+                env_val = int(float(raw_env))
+                return env_val if env_val > 0 else 10 ** 9
+            except ValueError:
+                pass
+        total_bytes = 0
+        try:
+            if src.is_file():
+                total_bytes = src.stat().st_size
+                # Include split E01/E02... or .001/.002 segments
+                stem = src.with_suffix("")
+                for sib in src.parent.glob(stem.name + ".*"):
+                    if sib != src and sib.is_file() and re.match(r"^\.(?:e|ex|s)?\d{2,3}$", sib.suffix.lower()):
+                        total_bytes += sib.stat().st_size
+            elif src.is_dir():
+                file_count = 0
+                for root, dirs, files in os.walk(str(src), followlinks=False):
+                    dirs[:] = [d for d in dirs if not d.startswith(".") and d.lower() != "bulk_extractor_out"]
+                    for fn in files:
+                        fp = os.path.join(root, fn)
+                        try:
+                            total_bytes += os.path.getsize(fp)
+                            file_count += 1
+                            if file_count >= 50000:
+                                break
+                        except OSError:
+                            continue
+                    if file_count >= 50000:
+                        break
+        except OSError:
+            pass
+        gib = total_bytes / float(1024 ** 3)
+        return int(min(4 * 3600, max(180, int(gib * 60))))
+
+    def _run_be_process(self, cmd: List[str], time_budget_s: int) -> Tuple[int, Optional[str], bool]:
+        """
+        Run bulk_extractor with stdout/stderr redirected to files (no pipe-buffer deadlocks on
+        multi-hour scans), emit ONE progress line every 10 minutes, and stop the process cleanly
+        when the time budget is exhausted. Returns (exit_code, stderr_text, timed_out).
+        """
+        self.out_dir.parent.mkdir(parents=True, exist_ok=True)
+        stderr_path = self.case_dir / "bulk_extractor_stderr.log"
+        stdout_path = self.case_dir / "bulk_extractor_stdout.log"
+        t_start = time.time()
+        last_progress = t_start
+        timed_out = False
+        with open(stdout_path, "wb") as f_out, open(stderr_path, "wb") as f_err:
+            proc = subprocess.Popen(cmd, stdout=f_out, stderr=f_err, creationflags=_NO_WINDOW)
+            try:
+                while True:
+                    try:
+                        proc.wait(timeout=5)
+                        break
+                    except subprocess.TimeoutExpired:
+                        pass
+                    now = time.time()
+                    if now - t_start > time_budget_s:
+                        timed_out = True
+                        if os.name == "nt":
+                            try:
+                                subprocess.run(
+                                    ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                                    capture_output=True,
+                                    timeout=10,
+                                    creationflags=_NO_WINDOW,
+                                )
+                            except Exception:
+                                pass
+                        proc.terminate()
+                        try:
+                            proc.wait(timeout=10)
+                        except subprocess.TimeoutExpired:
+                            proc.kill()
+                            try:
+                                proc.wait(timeout=10)
+                            except Exception:
+                                pass
+                        break
+                    if now - last_progress >= 600:
+                        last_progress = now
+                        feat_files = 0
+                        feat_bytes = 0
+                        try:
+                            for fp in self.out_dir.glob("*.txt"):
+                                feat_files += 1
+                                feat_bytes += fp.stat().st_size
+                        except OSError:
+                            pass
+                        self.log_fn(
+                            f"bulk_extractor running for {int((now - t_start) // 60)} min "
+                            f"({feat_files} feature files, {feat_bytes / (1024 ** 2):.1f} MiB so far)"
+                        )
+            except BaseException:
+                if proc.poll() is None:
+                    if os.name == "nt":
+                        try:
+                            subprocess.run(
+                                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                                capture_output=True,
+                                timeout=10,
+                                creationflags=_NO_WINDOW,
+                            )
+                        except Exception:
+                            pass
+                    proc.kill()
+                    try:
+                        proc.wait(timeout=5)
+                    except Exception:
+                        pass
+                raise
+        try:
+            err_txt = stderr_path.read_text(encoding="utf-8", errors="replace").strip()[-4000:] or None
+        except OSError:
+            err_txt = None
+        return (proc.returncode if proc.returncode is not None else -1, err_txt, timed_out)
+
     def run(
         self,
         source_path: Union[str, Path],
-        max_workers: int = 25,
+        max_workers: int = 32,
         enable_carving: bool = False,
     ) -> Dict[str, Any]:
         """
@@ -1209,7 +1413,7 @@ class BulkExtractorRunner:
                 "message": err_msg,
             }
 
-        raw_workers = 25 if max_workers is None else int(max_workers)
+        raw_workers = 32 if max_workers is None else int(max_workers)
         clamped_workers = max(1, min(32, raw_workers))
 
         if self.out_dir.exists():
@@ -1219,6 +1423,15 @@ class BulkExtractorRunner:
         # Pass -R ONLY when src is an actual directory (never for disk images or regular files!)
         is_dir_mode = src.is_dir() and (src.suffix.lower() not in DISK_IMAGE_EXTENSIONS)
         if is_dir_mode:
+            try:
+                # If out_dir is inside src, bulk_extractor with -R will recursively scan its own output!
+                self.out_dir.relative_to(src)
+                import tempfile
+                self.out_dir = Path(tempfile.gettempdir()) / f"wft_be_{self.case_id}"
+                if self.out_dir.exists():
+                    shutil.rmtree(self.out_dir, ignore_errors=True)
+            except ValueError:
+                pass
             if os.name == "nt" and src.drive and src == Path(src.drive + "\\"):
                 norm_src = f"{src.drive}/"
             else:
@@ -1240,21 +1453,19 @@ class BulkExtractorRunner:
 
         cmd = _build_be_cmd(clamped_workers)
         cmd_str = " ".join([f'"{c}"' if " " in c else c for c in cmd])
-        self.log_fn(f"Executing: {cmd_str}")
+        time_budget_s = self._compute_time_budget(src)
+        self.log_fn(f"Executing (time budget {time_budget_s // 60} min): {cmd_str}")
 
         try:
-            proc = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=600,
-                creationflags=_NO_WINDOW,
-            )
-            exit_code = proc.returncode
-            stderr_msg = (proc.stderr or "").strip() or None
-            if exit_code != 0 and clamped_workers > 4:
+            run_t0 = time.time()
+            exit_code, stderr_msg, timed_out = self._run_be_process(cmd, time_budget_s)
+            # Retry with fewer threads ONLY for fast crashes (never re-scan a multi-hour image twice)
+            if (
+                exit_code != 0
+                and not timed_out
+                and clamped_workers > 4
+                and (time.time() - run_t0) < 300
+            ):
                 self.log_fn(
                     f"bulk_extractor exited with code {exit_code} at -j {clamped_workers}; retrying safely with -j 4...",
                     "WARNING",
@@ -1263,21 +1474,15 @@ class BulkExtractorRunner:
                     shutil.rmtree(self.out_dir, ignore_errors=True)
                 cmd = _build_be_cmd(4)
                 cmd_str = " ".join([f'"{c}"' if " " in c else c for c in cmd])
-                proc = subprocess.run(
-                    cmd,
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    timeout=600,
-                    creationflags=_NO_WINDOW,
+                remaining = max(600, time_budget_s - int(time.time() - run_t0))
+                exit_code, stderr_msg, timed_out = self._run_be_process(cmd, remaining)
+            if timed_out:
+                exit_code = -2
+                stderr_msg = (
+                    f"bulk_extractor reached its {time_budget_s // 60} min time budget and was stopped; "
+                    f"partial feature files were ingested: {cmd_str}"
                 )
-                exit_code = proc.returncode
-                stderr_msg = (proc.stderr or "").strip() or None
-        except subprocess.TimeoutExpired:
-            exit_code = -2
-            stderr_msg = f"bulk_extractor timed out after 600s: {cmd_str}"
-            self.log_fn(stderr_msg, "WARNING")
+                self.log_fn(stderr_msg, "WARNING")
         except Exception as exc:
             duration_ms = int((time.time() - t0) * 1000)
             err_msg = f"Failed launching bulk_extractor: {exc}"

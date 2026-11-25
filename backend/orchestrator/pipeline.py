@@ -11,6 +11,7 @@ import inspect
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import threading
 import time
@@ -36,7 +37,7 @@ from backend.orchestrator.normalizer import TimelineNormalizer
 from backend.orchestrator.regripper_runner import RegRipperRunner
 from backend.vfs.extractor import EvidenceExtractor
 
-DEFAULT_MAX_WORKERS: int = 25
+DEFAULT_MAX_WORKERS: int = 32
 
 # In-memory status tracker for live API queries
 PIPELINE_JOBS: Dict[str, Dict[str, Any]] = {}
@@ -201,7 +202,8 @@ MEDIA_IDS: Set[str] = {
 
 DOCUMENT_IDS: Set[str] = {
     "documents_metadata", "documents", "view_documents", "docs_pdf", "docs_word",
-    "docs_excel", "docs_ppt", "docs_txt", "parsed_text_documents",
+    "docs_excel", "docs_ppt", "docs_txt", "docs_other", "view_docs_other",
+    "other_files", "parsed_text_documents",
     "zone_identifier", "motw", "pdf", "office",
 }
 
@@ -495,9 +497,16 @@ class ProcessingPipeline:
                 max_workers=self.max_workers,
             )
             self.normalizer = TimelineNormalizer(case_id=case_id)
+        self._log_lock = threading.Lock()
+        self._last_log_msg: Optional[str] = None
 
     def _log(self, message: str, level: str = "INFO") -> None:
         """Append timestamped logs to the case processing log file and console."""
+        norm_msg = re.sub(r"\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\]\s*", "", message).strip()
+        with getattr(self, "_log_lock", threading.Lock()):
+            if getattr(self, "_last_log_msg", None) == norm_msg:
+                return
+            self._last_log_msg = norm_msg
         ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         print(f"[{ts}] [{level}] [Pipeline] {message}")
         if self.log_file and not DuckDBManager.is_case_deleted(self.case_id):
@@ -1241,6 +1250,7 @@ class ProcessingPipeline:
                 case_id=self.case_id,
                 case_dir=self.case_dir,
                 db_manager=DuckDBManager,
+                log_fn=self._log,
             )
             be_res = _call_with_supported_kwargs(
                 be_runner.run,
@@ -1862,9 +1872,80 @@ class ProcessingPipeline:
                 progress_callback=progress_callback,
             )
 
-            # Phase 3A: Execute fast structured artifact engines (EZ Tools, Native Fallbacks, RegRipper, Custom Parsers)
-            # first without raw disk-image carvers starving the Python GIL or disk I/O.
-            stage_workers = max(1, min(workers, 32))
+            # Execute Step 3: Launch long-running scanners (Bulk Extractor & Data Carver) in background
+            # so they never block structured parsers, file enrichment, or parallel keyword indexing across the 32 threads.
+            def _be_worker() -> Dict[str, Any]:
+                be_r = self._run_bulk_extractor_stage(
+                    should_run_bulk_extractor,
+                    effective_evidence_target,
+                    should_run_carving,
+                    workers,
+                )
+                if should_run_bulk_extractor:
+                    _advance_step3_progress(4, f"Bulk Extractor completed ({_extract_row_count(be_r)} features)...")
+                return be_r
+
+            def _dc_worker() -> Dict[str, Any]:
+                dc_r = self._run_data_carver_stage(
+                    should_run_carving,
+                    effective_evidence_target,
+                    workers,
+                )
+                if should_run_carving:
+                    _advance_step3_progress(4, f"Data Carver completed ({_extract_row_count(dc_r)} carved files)...")
+                return dc_r
+
+            def _keyword_indexing_worker(stage_label: str = "Stage 3") -> Dict[str, Any]:
+                k_res: Dict[str, Any] = {"keywords_scanned": 0, "total_hits": 0}
+                t_kw = time.time()
+                try:
+                    with DuckDBManager.get_lock(self.case_id):
+                        kw_conn = DuckDBManager.get_connection(self.case_id, read_only=False)
+                        kw_cnt = int(kw_conn.cursor().execute("SELECT COUNT(*) FROM case_keywords;").fetchone()[0] or 0)
+                    if kw_cnt > 0:
+                        self._log(f"Running parallel keyword indexing ({stage_label}) across {kw_cnt} keywords...")
+                        kw_scan_out = _call_with_supported_kwargs(
+                            scan_keywords_for_case,
+                            self.case_id,
+                            max_workers=max(2, workers // 2),
+                        )
+                        if isinstance(kw_scan_out, dict):
+                            k_res.update(kw_scan_out)
+                        elif isinstance(kw_scan_out, (int, float)):
+                            k_res = {"keywords_scanned": kw_cnt, "total_hits": int(kw_scan_out)}
+                        self._record_stage_telemetry(
+                            "Pipeline:KeywordSearch",
+                            f"scan_keywords_for_case ({stage_label})",
+                            "SUCCESS",
+                            rows=int(k_res.get("total_hits", 0) or 0),
+                            duration_ms=int((time.time() - t_kw) * 1000),
+                        )
+                    else:
+                        self._record_stage_telemetry(
+                            "Pipeline:KeywordSearch",
+                            f"scan_keywords_for_case ({stage_label}: 0 keywords)",
+                            "SKIPPED",
+                            rows=0,
+                            duration_ms=int((time.time() - t_kw) * 1000),
+                        )
+                    return k_res
+                except Exception as kw_scan_err:
+                    self._record_stage_telemetry(
+                        "Pipeline:KeywordSearch",
+                        f"scan_keywords_for_case ({stage_label})",
+                        "WARNING",
+                        duration_ms=int((time.time() - t_kw) * 1000),
+                        exit_code=1,
+                        error=str(kw_scan_err),
+                    )
+                    return k_res
+
+            bg_pool = ThreadPoolExecutor(max_workers=4)
+            f_be = bg_pool.submit(_be_worker) if should_run_bulk_extractor else None
+            f_dc = bg_pool.submit(_dc_worker) if should_run_carving else None
+
+            # Execute structured parsers AND keyword indexing concurrently across the 32-thread pool
+            stage_workers = max(4, min(workers, 32))
             with ThreadPoolExecutor(max_workers=stage_workers) as stage_pool:
                 f_ez = stage_pool.submit(_ez_and_fallbacks_worker)
                 f_rr = stage_pool.submit(_regripper_worker)
@@ -1874,59 +1955,23 @@ class ProcessingPipeline:
                     workers,
                     _on_parser_done,
                 )
+                f_kw_step3 = stage_pool.submit(_keyword_indexing_worker, "Parallel Stage 3")
 
                 ez_results, native_fallback_results, hindsight_results = f_ez.result()
                 regripper_res = f_rr.result()
                 parser_results = f_parsers.result()
-
-            # Phase 3B: Raw Image / Unallocated Scanners (Bulk Extractor & Data Carver)
-            if should_run_bulk_extractor or should_run_carving:
-                self._update_status(
-                    "RUNNING",
-                    max(current_pct, 62),
-                    "Structured artifacts ingested. Running unallocated Data Carver & Bulk Extractor...",
-                    progress_callback=progress_callback,
-                )
-
-                def _be_worker() -> Dict[str, Any]:
-                    be_r = self._run_bulk_extractor_stage(
-                        should_run_bulk_extractor,
-                        effective_evidence_target,
-                        should_run_carving,
-                        workers,
-                    )
-                    if should_run_bulk_extractor:
-                        _advance_step3_progress(4, f"Bulk Extractor completed ({_extract_row_count(be_r)} features)...")
-                    return be_r
-
-                def _dc_worker() -> Dict[str, Any]:
-                    dc_r = self._run_data_carver_stage(
-                        should_run_carving,
-                        effective_evidence_target,
-                        workers,
-                    )
-                    if should_run_carving:
-                        _advance_step3_progress(4, f"Data Carver completed ({_extract_row_count(dc_r)} carved files)...")
-                    return dc_r
-
-                with ThreadPoolExecutor(max_workers=2) as raw_pool:
-                    f_be = raw_pool.submit(_be_worker)
-                    f_dc = raw_pool.submit(_dc_worker)
-                    bulk_extractor_res = f_be.result()
-                    carver_res = f_dc.result()
-            else:
-                bulk_extractor_res = self._run_bulk_extractor_stage(
-                    False, effective_evidence_target, False, workers
-                )
-                carver_res = self._run_data_carver_stage(
-                    False, effective_evidence_target, workers
-                )
+                keyword_res_step3 = f_kw_step3.result()
 
             # -------------------------------------------------------------
-            # STEP 4: File Enrichment (IOC/SHA256, YARA-X, Stinger, RapidOCR)
+            # STEP 4: Parallel File Enrichment & Structured Keyword Indexing
             # -------------------------------------------------------------
             enrichment_results: Dict[str, int] = {}
-            if any([eff_yara, eff_stinger, eff_ocr, eff_ioc]):
+            keyword_res: Dict[str, Any] = keyword_res_step3
+
+            def _enrichment_worker() -> Dict[str, int]:
+                if not any([eff_yara, eff_stinger, eff_ocr, eff_ioc]):
+                    self._record_stage_telemetry("Pipeline:Enrichment", "FileEnrichmentEngine (disabled)", "SKIPPED")
+                    return {}
                 self._update_status(
                     "RUNNING",
                     72,
@@ -1950,18 +1995,18 @@ class ProcessingPipeline:
                         enable_stinger=eff_stinger,
                         enable_ocr=eff_ocr,
                         enable_ioc=eff_ioc,
-                        max_workers=workers,
+                        max_workers=max(2, workers // 2),
                         progress_hook=_on_enrich_progress,
                     )
-                    if isinstance(enr_raw, dict):
-                        enrichment_results = _extract_table_counts_dict(enr_raw)
+                    res_dict = _extract_table_counts_dict(enr_raw) if isinstance(enr_raw, dict) else {}
                     self._record_stage_telemetry(
                         "Pipeline:Enrichment",
                         "FileEnrichmentEngine.run",
                         "SUCCESS",
-                        rows=sum(enrichment_results.values()),
+                        rows=sum(res_dict.values()),
                         duration_ms=int((time.time() - t_enr) * 1000),
                     )
+                    return res_dict
                 except Exception as enrich_err:
                     self._record_stage_telemetry(
                         "Pipeline:Enrichment",
@@ -1972,8 +2017,34 @@ class ProcessingPipeline:
                         exit_code=1,
                         error=str(enrich_err),
                     )
+                    return {}
+
+            with ThreadPoolExecutor(max_workers=max(2, min(workers, 8))) as step4_pool:
+                f_enr = step4_pool.submit(_enrichment_worker)
+                f_kw = step4_pool.submit(_keyword_indexing_worker, "Incremental Post-Enrichment")
+                enrichment_results = f_enr.result()
+                keyword_res = f_kw.result()
+
+            # Await background scanners (Bulk Extractor & Data Carver)
+            if f_be is not None:
+                try:
+                    bulk_extractor_res = f_be.result()
+                except Exception as be_e:
+                    self._log(f"Bulk Extractor error: {be_e}", "WARNING")
+                    bulk_extractor_res = {"status": "ERROR", "error": str(be_e)}
             else:
-                self._record_stage_telemetry("Pipeline:Enrichment", "FileEnrichmentEngine (disabled)", "SKIPPED")
+                bulk_extractor_res = {"status": "SKIPPED", "rows": 0}
+
+            if f_dc is not None:
+                try:
+                    carver_res = f_dc.result()
+                except Exception as dc_e:
+                    self._log(f"Data Carver error: {dc_e}", "WARNING")
+                    carver_res = {"status": "ERROR", "error": str(dc_e)}
+            else:
+                carver_res = {"status": "SKIPPED", "rows": 0}
+
+            bg_pool.shutdown(wait=False)
 
             total_raw_rows = sum(ez_results.values()) + sum(native_fallback_results.values()) + sum(hindsight_results.values())
             total_parsed_rows = sum(parser_results.values())
@@ -2012,12 +2083,12 @@ class ProcessingPipeline:
             )
 
             # -------------------------------------------------------------
-            # STEP 5b: Artifact Registry Synchronization + Keyword Search
+            # STEP 5b: Artifact Registry Synchronization (+ Incremental Search)
             # -------------------------------------------------------------
             self._update_status(
                 "RUNNING",
                 93,
-                "Synchronizing artifact registry and executing keyword search...",
+                "Synchronizing artifact registry...",
                 progress_callback=progress_callback,
             )
             t_sync = time.time()
@@ -2043,49 +2114,38 @@ class ProcessingPipeline:
                     error=str(sync_err),
                 )
 
-            keyword_res: Dict[str, Any] = {"keywords_scanned": 0, "total_hits": 0}
-            t_kw = time.time()
-            try:
-                with DuckDBManager.get_lock(self.case_id):
-                    kw_conn = DuckDBManager.get_connection(self.case_id, read_only=False)
-                    kw_cnt = int(kw_conn.cursor().execute("SELECT COUNT(*) FROM case_keywords;").fetchone()[0] or 0)
-                if kw_cnt > 0:
-                    kw_scan_out = _call_with_supported_kwargs(
+            # If background scanners (Bulk Extractor / Data Carver) produced new features, run an incremental keyword scan
+            if (be_rows > 0 or carved_rows > 0) and keyword_res.get("keywords_scanned", 0) > 0:
+                t_kw_inc = time.time()
+                try:
+                    kw_inc_out = _call_with_supported_kwargs(
                         scan_keywords_for_case,
                         self.case_id,
                         max_workers=workers,
                     )
-                    if isinstance(kw_scan_out, dict):
-                        keyword_res.update(kw_scan_out)
-                    elif isinstance(kw_scan_out, (int, float)):
-                        keyword_res = {"keywords_scanned": kw_cnt, "total_hits": int(kw_scan_out)}
+                    if isinstance(kw_inc_out, dict):
+                        keyword_res = kw_inc_out
+                    elif isinstance(kw_inc_out, (int, float)):
+                        keyword_res["total_hits"] = int(kw_inc_out)
                     with DuckDBManager.get_lock(self.case_id):
                         sync_conn = DuckDBManager.get_connection(self.case_id, read_only=False)
                         sync_artifact_registry_counts(sync_conn, case_id=self.case_id)
                     self._record_stage_telemetry(
                         "Pipeline:KeywordSearch",
-                        "scan_keywords_for_case",
+                        "scan_keywords_for_case (incremental)",
                         "SUCCESS",
                         rows=int(keyword_res.get("total_hits", 0) or 0),
-                        duration_ms=int((time.time() - t_kw) * 1000),
+                        duration_ms=int((time.time() - t_kw_inc) * 1000),
                     )
-                else:
+                except Exception as kw_inc_err:
                     self._record_stage_telemetry(
                         "Pipeline:KeywordSearch",
-                        "scan_keywords_for_case (0 keywords)",
-                        "SKIPPED",
-                        rows=0,
-                        duration_ms=int((time.time() - t_kw) * 1000),
+                        "scan_keywords_for_case (incremental)",
+                        "WARNING",
+                        duration_ms=int((time.time() - t_kw_inc) * 1000),
+                        exit_code=1,
+                        error=str(kw_inc_err),
                     )
-            except Exception as kw_scan_err:
-                self._record_stage_telemetry(
-                    "Pipeline:KeywordSearch",
-                    "scan_keywords_for_case",
-                    "WARNING",
-                    duration_ms=int((time.time() - t_kw) * 1000),
-                    exit_code=1,
-                    error=str(kw_scan_err),
-                )
 
             # -------------------------------------------------------------
             # STEP 6: Final Wrap-up

@@ -201,6 +201,7 @@ class EZToolRunner:
         self.log_file = get_case_log_file(case_id).resolve()
         self.max_workers = max(1, min(32, 25 if max_workers is None else int(max_workers)))
         self._log_lock = threading.Lock()
+        self._last_log_msg: Optional[str] = None
 
         # Ensure base directories exist
         self.staging_dir.mkdir(parents=True, exist_ok=True)
@@ -212,6 +213,11 @@ class EZToolRunner:
 
     def _log(self, message: str, level: str = "INFO") -> None:
         """Helper to append timestamped logs to the case processing log file and console."""
+        norm_msg = re.sub(r"\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\]\s*", "", message).strip()
+        with self._log_lock:
+            if getattr(self, "_last_log_msg", None) == norm_msg:
+                return
+            self._last_log_msg = norm_msg
         ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         print(f"[{ts}] [{level}] [EZToolRunner] {message}")
         try:

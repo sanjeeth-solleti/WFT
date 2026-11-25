@@ -45,7 +45,7 @@ interface SidebarTreeProps {
   width?: number;
 }
 
-// Canonical 10 WFT Examine Categories matching backend/db/schema.py
+// Canonical 9 WFT Examine Categories matching backend/db/schema.py (Event Logs has dedicated dropdown tab)
 export const CANONICAL_WFT_CATEGORIES = [
   'REFINED RESULTS',
   'WEB RELATED',
@@ -55,7 +55,6 @@ export const CANONICAL_WFT_CATEGORIES = [
   'MEDIA',
   'DOCUMENTS',
   'OPERATING SYSTEM',
-  'EVENT LOGS',
   'MALWARE & YARA',
 ] as const;
 
@@ -105,7 +104,7 @@ export function buildSubviewDedupPredicate(
     if (hasRawEvtx && (tname.startsWith('view_evtx_') || aid.startsWith('view_evtx_'))) {
       return true;
     }
-    if (hasViewDocs && (tname.startsWith('view_docs_') || aid.startsWith('view_docs_'))) {
+    if (tname === 'view_documents' || aid === 'view_documents') {
       return true;
     }
     if (hasRawRecmd && (recmdSliceViews.has(tname) || recmdSliceViews.has(aid))) {
@@ -192,6 +191,8 @@ function getArtifactItemIcon(art: ArtifactItem) {
   if (name.includes('word') || name.includes('.doc')) return <FileText className="w-3.5 h-3.5 text-[#2B579A] shrink-0" />;
   if (name.includes('excel') || name.includes('sheet') || name.includes('.xls')) return <FileSpreadsheet className="w-3.5 h-3.5 text-[#217346] shrink-0" />;
   if (name.includes('ppt') || name.includes('powerpoint')) return <FileText className="w-3.5 h-3.5 text-[#D24726] shrink-0" />;
+  if (name.includes('txt') || name.includes('plain text') || name.includes('text document') || name.includes('docs_txt')) return <FileText className="w-3.5 h-3.5 text-slate-600 dark:text-slate-300 shrink-0" />;
+  if (name.includes('other files') || name.includes('docs_other') || name.includes('code') || name.includes('script') || name.includes('.js') || name.includes('.py') || name.includes('.html') || name.includes('.css')) return <FileCode className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400 shrink-0" />;
 
   // Event Logs
   if (name.includes('evtx') || name.includes('event')) return <Activity className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400 shrink-0" />;
@@ -235,10 +236,25 @@ export const SidebarTree: React.FC<SidebarTreeProps> = ({
     }));
   };
 
-  // Strictly filter out row_count === 0 while including all 10 canonical categories
-  // (deduplicating pure SQL union view `view_all_malware_detections` when underlying tables exist,
-  // while keeping granular sub-views visible & clickable inside the tree without double-counting)
-  const allPopulated = (registryData?.artifacts || []).filter((a) => a.row_count > 0);
+  // Event Logs and Bulk Extractor have dedicated tabs in the Forensic Views dropdown,
+  // so they are excluded from the Artifacts sidebar tree.
+  const allPopulated = (registryData?.artifacts || []).filter(
+    (a) =>
+      a.row_count > 0 &&
+      normalizeWftCategory(a.category) !== 'EVENT LOGS' &&
+      a.table_name !== 'raw_evtx' &&
+      !a.table_name.startsWith('view_evtx_') &&
+      a.table_name !== 'view_documents' &&
+      a.artifact_id !== 'view_documents' &&
+      a.table_name !== 'parsed_documents_metadata' &&
+      a.artifact_id !== 'parsed_documents_metadata' &&
+      a.table_name !== 'parsed_text_documents' &&
+      a.artifact_id !== 'parsed_text_documents' &&
+      a.table_name !== 'parsed_bulk_extractor_features' &&
+      a.table_name !== 'parsed_bulk_extractor_histograms' &&
+      a.artifact_id !== 'bulk_extractor_features' &&
+      a.artifact_id !== 'bulk_extractor_histograms'
+  );
   const hasConcreteMalwareTable = allPopulated.some(
     (a) =>
       a.table_name === 'artifact_stinger_hits' ||
@@ -261,12 +277,22 @@ export const SidebarTree: React.FC<SidebarTreeProps> = ({
     (acc, a) => acc + (isDuplicateSubview(a) ? 0 : a.row_count),
     0
   );
+  const fullRegistryPopulated = (registryData?.artifacts || []).filter((a) => a.row_count > 0);
+  const isDuplicateFull = useMemo(
+    () => buildSubviewDedupPredicate(fullRegistryPopulated),
+    [fullRegistryPopulated]
+  );
+  const computedFullDedupTotal = fullRegistryPopulated.reduce(
+    (acc, a) => acc + (isDuplicateFull(a) ? 0 : a.row_count),
+    0
+  );
   const totalAllRows =
     contentTypes.length === 0 &&
     typeof registryData?.all_evidence_total === 'number' &&
-    registryData.all_evidence_total > 0 &&
-    registryData.all_evidence_total === computedDedupTotal
+    registryData.all_evidence_total > 0
       ? registryData.all_evidence_total
+      : contentTypes.length === 0
+      ? computedFullDedupTotal
       : computedDedupTotal || artifacts.reduce((acc, a) => acc + a.row_count, 0);
 
   // Group into Canonical 10 Categories

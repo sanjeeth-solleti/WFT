@@ -1626,6 +1626,7 @@ class EvidenceExtractor:
         self.enable_vss = bool(enable_vss) or _artifacts_request_vss(self.selected_artifacts)
         self.max_workers = max(1, min(32, int(max_workers or 16)))
         self._log_lock = threading.Lock()
+        self._last_log_msg: Optional[str] = None
 
         if staging_dir:
             self.staging_dir = Path(staging_dir).resolve()
@@ -1683,9 +1684,13 @@ class EvidenceExtractor:
     # =========================================================================
 
     def _log(self, message: str, level: str = "INFO") -> None:
-        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-        formatted = f"[{timestamp}] [EvidenceExtractor] [{level}] {message}"
+        norm_msg = re.sub(r"\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\s*UTC)?\]\s*", "", message).strip()
         with self._log_lock:
+            if getattr(self, "_last_log_msg", None) == norm_msg:
+                return
+            self._last_log_msg = norm_msg
+            timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+            formatted = f"[{timestamp}] [EvidenceExtractor] [{level}] {message}"
             try:
                 with open(self.log_file, "a", encoding="utf-8", errors="replace") as f:
                     f.write(formatted + "\n")

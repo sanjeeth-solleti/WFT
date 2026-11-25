@@ -1145,7 +1145,21 @@ class DocumentParser(BaseParser):
         ".xls",
         ".ppt",
     }
-    TXT_DOC_EXTENSIONS = {".txt", ".csv", ".rtf"}
+    TXT_DOC_EXTENSIONS = {
+        ".txt", ".rtf", ".log", ".ini", ".cfg", ".conf", ".text", ".csv",
+    }
+    OTHER_FILE_EXTENSIONS = {
+        ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx",
+        ".py", ".pyw", ".html", ".htm", ".xhtml",
+        ".css", ".scss", ".sass", ".less", ".vue", ".svelte",
+        ".php", ".phtml", ".asp", ".aspx", ".jsp", ".jspx",
+        ".rb", ".pl", ".pm", ".sh", ".bash", ".zsh",
+        ".ps1", ".psm1", ".psd1", ".bat", ".cmd", ".vbs", ".vbe", ".wsf", ".wsh", ".hta", ".sct",
+        ".c", ".h", ".cpp", ".hpp", ".cc", ".cxx", ".cs", ".java", ".go", ".rs", ".swift", ".kt", ".kts", ".scala", ".lua", ".r", ".m",
+        ".sql", ".json", ".jsonl", ".xml", ".yaml", ".yml", ".toml", ".config", ".properties", ".env",
+        ".md", ".markdown", ".rst", ".reg", ".inf", ".url", ".vcf", ".ics", ".svg", ".tex", ".bib",
+        ".dockerfile", ".makefile", ".gradle", ".cmake",
+    }
 
     def __init__(
         self,
@@ -1569,10 +1583,50 @@ class DocumentParser(BaseParser):
         name_low = p.name.lower()
         return "zone.identifier" in name_low or p.name.endswith(":Zone.Identifier")
 
+    _INTERNAL_OS_AND_APP_SUBPATHS: Tuple[str, ...] = (
+        "/windows/",
+        "/windows.old/",
+        "/program files/",
+        "/program files (x86)/",
+        "/programdata/microsoft/",
+        "/programdata/package cache/",
+        "/system volume information/",
+        "/recovery/",
+        "/perflogs/",
+        "/msocache/",
+        "/$recycle.bin/$i",
+        "/appdata/local/packages/",
+        "/appdata/local/microsoft/",
+        "/appdata/roaming/microsoft/",
+        "/appdata/local/google/chrome/",
+        "/appdata/local/microsoft/edge/",
+        "/appdata/local/bravesoftware/",
+        "/appdata/roaming/mozilla/firefox/",
+        "/appdata/local/dropbox/",
+        "/appdata/roaming/dropbox/",
+        "/appdata/local/google/drive",
+        "/appdata/local/microsoft/onedrive/",
+        "/appdata/roaming/slack/",
+        "/appdata/roaming/discord/",
+        "/appdata/roaming/microsoft/teams/",
+        "/node_modules/",
+    )
+
+    _INTERNAL_APP_SUBPATHS: Tuple[str, ...] = _INTERNAL_OS_AND_APP_SUBPATHS
+
+    _SYSTEM_NOISE_FILENAMES: Set[str] = {
+        "desktop.ini",
+        "thumbs.db",
+        "ntuser.ini",
+        "msoirmprotector.doc",
+        "msoirmprotector.ppt",
+        "msoirmprotector.xls",
+    }
+
     def _is_eligible_text_document(self, p: Path) -> bool:
-        """Filter TXT/CSV/RTF so internal non-document app artifacts and desktop.ini are excluded."""
+        """Filter TXT/CSV/RTF so internal non-document OS/app artifacts and desktop.ini are excluded."""
         name_low = p.name.lower()
-        if name_low == "desktop.ini" or self._is_zone_identifier_filename(p):
+        if name_low in self._SYSTEM_NOISE_FILENAMES or self._is_zone_identifier_filename(p):
             return False
         try:
             rel = p.resolve().relative_to(self.staging_dir.resolve())
@@ -1585,9 +1639,21 @@ class DocumentParser(BaseParser):
                 top_bucket = ""
             if top_bucket in _NON_DOC_STAGING_SUBTREES:
                 return False
+            rel_posix = "/" + rel.as_posix().lower() + "/"
+            if any(sub in rel_posix for sub in self._INTERNAL_OS_AND_APP_SUBPATHS):
+                return False
+            for anc in p.parents:
+                if anc.name.lower().endswith("_extracted") and (anc / "[Content_Types].xml").is_file():
+                    return False
+                if anc == self.staging_dir:
+                    break
         except Exception:
             pass
         return True
+
+    def _is_eligible_other_file(self, p: Path) -> bool:
+        """Filter Other Files (.js, .py, .html, .css, etc.) so internal OS/app/browser/cloud metadata is excluded."""
+        return self._is_eligible_text_document(p)
 
     _MOTW_STAGING_BUCKETS: Set[str] = {
         "enrichment",
@@ -2231,7 +2297,17 @@ class DocumentParser(BaseParser):
                             title = f"CSV ({len(first_row)} cols: {hdr_summary})"[:200]
                 except Exception:
                     pass
-            elif sfx == ".txt" and plain_text.strip():
+            elif sfx in (".html", ".htm", ".xhtml") and plain_text.strip():
+                m_html_t = re.search(r"<title[^>]*>(.*?)</title>", plain_text[:65536], re.IGNORECASE | re.DOTALL)
+                if m_html_t and m_html_t.group(1).strip():
+                    title = " ".join(m_html_t.group(1).split())[:200]
+                else:
+                    for ln in plain_text.splitlines():
+                        s_ln = ln.strip()
+                        if s_ln:
+                            title = s_ln[:120]
+                            break
+            elif plain_text.strip():
                 for ln in plain_text.splitlines():
                     s_ln = ln.strip()
                     if s_ln:
@@ -2409,15 +2485,16 @@ class DocumentParser(BaseParser):
         all_txt_records: List[Dict[str, Any]] = []
         candidate_docs: List[Tuple[Path, Optional[str]]] = []
         candidate_txt_docs: List[Path] = []
+        candidate_other_files: List[Path] = []
         candidate_zones: List[Path] = []
 
         # Known non-document binary extensions that never need disguised-doc header sniffing
         _SKIP_DISGUISED_EXTS: Set[str] = {
             ".evtx", ".etl", ".pf", ".dll", ".exe", ".sys", ".mui", ".cat", ".nls",
-            ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".ico", ".svg", ".tif", ".tiff",
+            ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".ico", ".tif", ".tiff",
             ".mp4", ".mp3", ".wav", ".avi", ".mov", ".mkv", ".flac", ".ogg", ".webm",
             ".sqlite", ".sqlite3", ".db", ".db-wal", ".db-shm", ".hve", ".regtrans-ms", ".blf",
-            ".log1", ".log2", ".lnk", ".ttf", ".otf", ".woff", ".woff2", ".eot", ".css", ".map",
+            ".log1", ".log2", ".lnk", ".ttf", ".otf", ".woff", ".woff2", ".eot", ".map",
             ".duckdb", ".wal", ".pak", ".asar", ".vdm",
         }
 
@@ -2444,9 +2521,12 @@ class DocumentParser(BaseParser):
                             candidate_docs.append((p, disguised_sfx))
                         elif sfx in self.TXT_DOC_EXTENSIONS and self._is_eligible_text_document(p):
                             candidate_txt_docs.append(p)
+                        elif sfx in self.OTHER_FILE_EXTENSIONS and self._is_eligible_other_file(p):
+                            candidate_other_files.append(p)
 
         self._log(
             f"Found {len(candidate_docs)} Office/PDF docs, {len(candidate_txt_docs)} TXT/CSV/RTF docs, "
+            f"{len(candidate_other_files)} Other Files (.js/.py/.html/.css/etc.), "
             f"and {len(candidate_zones)} candidate Zone.Identifier files."
         )
 
@@ -2481,22 +2561,23 @@ class DocumentParser(BaseParser):
                 if rec is not None:
                     all_doc_records.append(rec)
 
-        # 2. Parse TXT / CSV / RTF concurrently into BOTH parsed_text_documents and parsed_documents_metadata
+        # 2. Parse TXT / CSV / RTF and Other Files (.js, .py, .html, .css, etc.) concurrently into BOTH parsed_text_documents and parsed_documents_metadata
         def _parse_one_txt(txt_file: Path) -> Optional[Tuple[Dict[str, Any], Dict[str, Any]]]:
             try:
                 return self._parse_text_csv_rtf(txt_file)
             except Exception as ex:
-                self._log(f"Error parsing text document {txt_file}: {ex}", "WARNING")
+                self._log(f"Error parsing text/other file {txt_file}: {ex}", "WARNING")
                 return None
 
-        if workers > 1 and len(candidate_txt_docs) > 2:
-            with ThreadPoolExecutor(max_workers=min(workers, len(candidate_txt_docs))) as pool:
-                for parsed_pair in pool.map(_parse_one_txt, candidate_txt_docs):
+        all_text_like_candidates = candidate_txt_docs + candidate_other_files
+        if workers > 1 and len(all_text_like_candidates) > 2:
+            with ThreadPoolExecutor(max_workers=min(workers, len(all_text_like_candidates))) as pool:
+                for parsed_pair in pool.map(_parse_one_txt, all_text_like_candidates):
                     if parsed_pair is not None:
                         all_doc_records.append(parsed_pair[0])
                         all_txt_records.append(parsed_pair[1])
         else:
-            for txt_file in candidate_txt_docs:
+            for txt_file in all_text_like_candidates:
                 parsed_pair = _parse_one_txt(txt_file)
                 if parsed_pair is not None:
                     all_doc_records.append(parsed_pair[0])
@@ -2547,27 +2628,32 @@ class DocumentParser(BaseParser):
                 table_name="parsed_text_documents",
                 records=unique_txts,
                 schema_ddl=TEXT_DOCUMENTS_SCHEMA_DDL,
-                artifact_id="parsed_text_documents",
-                category="DOCUMENTS",
-                display_name="Plain Text, CSV & RTF Documents",
-                source_tool="DocumentParser",
             )
-            # Refresh docs_txt count in artifact_registry if view_docs_txt already exists
+            # Refresh all document category views in artifact_registry if already created
             try:
                 cur = self._get_conn().cursor()
-                has_view = (
-                    cur.execute(
-                        "SELECT 1 FROM information_schema.tables WHERE table_schema='main' AND table_name='view_docs_txt' LIMIT 1;"
-                    ).fetchone()
-                    is not None
-                )
-                if has_view:
-                    v_cnt_row = cur.execute("SELECT COUNT(*) FROM view_docs_txt;").fetchone()
-                    v_cnt = int(v_cnt_row[0] or 0) if v_cnt_row else 0
-                    cur.execute(
-                        "UPDATE artifact_registry SET row_count = ?, last_updated = now() WHERE artifact_id = 'docs_txt' OR table_name = 'view_docs_txt';",
-                        [v_cnt],
-                    )
+                existing_views = {
+                    str(r[0])
+                    for r in cur.execute(
+                        "SELECT table_name FROM information_schema.tables WHERE table_schema='main' AND table_name LIKE 'view_doc%';"
+                    ).fetchall()
+                }
+                for v_id, v_tbl in (
+                    ("docs_pdf", "view_docs_pdf"),
+                    ("docs_word", "view_docs_word"),
+                    ("docs_excel", "view_docs_excel"),
+                    ("docs_ppt", "view_docs_ppt"),
+                    ("docs_txt", "view_docs_txt"),
+                    ("docs_other", "view_docs_other"),
+                    ("view_documents", "view_documents"),
+                ):
+                    if v_tbl in existing_views:
+                        v_cnt_row = cur.execute(f'SELECT COUNT(*) FROM "{v_tbl}";').fetchone()
+                        v_cnt = int(v_cnt_row[0] or 0) if v_cnt_row else 0
+                        cur.execute(
+                            "UPDATE artifact_registry SET row_count = ?, last_updated = now() WHERE artifact_id = ? OR table_name = ?;",
+                            [v_cnt, v_id, v_tbl],
+                        )
             except Exception:
                 pass
 
@@ -2576,7 +2662,7 @@ class DocumentParser(BaseParser):
             module_name="Parser:Document",
             command_executed=(
                 f"DocumentParser.parse({len(candidate_docs)} docs, "
-                f"{len(candidate_txt_docs)} txt, {len(candidate_zones)} zones)"
+                f"{len(candidate_txt_docs)} txt, {len(candidate_other_files)} other, {len(candidate_zones)} zones)"
             ),
             exit_code=0,
             rows_ingested=doc_count,
