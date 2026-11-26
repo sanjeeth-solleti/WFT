@@ -1822,16 +1822,28 @@ class EmailParser(BaseParser):
         all_attachments: List[Dict[str, Any]] = []
         candidate_emails: List[Path] = []
 
+        self._get_vfs_staged_cache()
+        _SKIP_EMAIL_ROOTS = {
+            "registry", "logs", "prefetch", "filesystem", "mft", "srum",
+            "jumplists", "tasks", "powershell", "rmm", "carved_thumbnails",
+            "zoneidentifier", "recyclebin", "wbem", "wer", "wlan", "usb",
+        }
         if self.staging_dir.exists():
-            for p in self.staging_dir.rglob("*"):
-                if not p.is_file():
-                    continue
-                sfx = p.suffix.lower()
-                if sfx in self.EMAIL_EXTS:
-                    p_low = str(p).lower().replace("\\", "/")
-                    if "extracted_archives/email_attachments" in p_low:
-                        continue
-                    candidate_emails.append(p)
+            staging_res = self.staging_dir.resolve()
+            for walk_root, dirs, files in os.walk(staging_res):
+                root_p = Path(walk_root)
+                if root_p == staging_res:
+                    dirs[:] = [d for d in dirs if d.lower() not in _SKIP_EMAIL_ROOTS]
+                for fname in files:
+                    name_low = fname.lower()
+                    dot_idx = name_low.rfind(".")
+                    sfx = name_low[dot_idx:] if dot_idx != -1 else ""
+                    if sfx in self.EMAIL_EXTS:
+                        p = root_p / fname
+                        p_low = str(p).lower().replace("\\", "/")
+                        if "extracted_archives/email_attachments" in p_low:
+                            continue
+                        candidate_emails.append(p)
 
         self._log(f"Discovered {len(candidate_emails)} email mail stores and messages.")
 

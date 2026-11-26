@@ -1766,7 +1766,7 @@ class DocumentParser(BaseParser):
                     continue
 
                 zone_key = str(p.resolve()).lower()
-                meta["source_file"] = self.resolve_evidence_path(p)
+                meta["_zone_file_path"] = p
                 meta["_zone_path_key"] = zone_key
                 self.zone_by_zone_path[zone_key] = meta
 
@@ -2478,6 +2478,8 @@ class DocumentParser(BaseParser):
         self._log(f"Starting DocumentParser across staging directory: {self.staging_dir} (workers={workers})")
 
         self._preload_vfs_time_cache()
+        self._get_vfs_staged_cache()
+        self._get_mft_index_cache()
         self._discover_and_cache_zone_identifiers()
         self._log(f"Indexed {len(self.zone_by_zone_path)} validated Zone.Identifier streams.")
 
@@ -2515,14 +2517,22 @@ class DocumentParser(BaseParser):
                         candidate_zones.append(p)
                     elif sfx in self.DOC_EXTENSIONS:
                         candidate_docs.append((p, None))
+                    elif sfx in self.TXT_DOC_EXTENSIONS:
+                        disguised_sfx = self._detect_disguised_office_or_pdf(p)
+                        if disguised_sfx is not None:
+                            candidate_docs.append((p, disguised_sfx))
+                        elif self._is_eligible_text_document(p):
+                            candidate_txt_docs.append(p)
+                    elif sfx in self.OTHER_FILE_EXTENSIONS:
+                        disguised_sfx = self._detect_disguised_office_or_pdf(p)
+                        if disguised_sfx is not None:
+                            candidate_docs.append((p, disguised_sfx))
+                        elif self._is_eligible_other_file(p):
+                            candidate_other_files.append(p)
                     elif sfx not in _SKIP_DISGUISED_EXTS:
                         disguised_sfx = self._detect_disguised_office_or_pdf(p)
                         if disguised_sfx is not None:
                             candidate_docs.append((p, disguised_sfx))
-                        elif sfx in self.TXT_DOC_EXTENSIONS and self._is_eligible_text_document(p):
-                            candidate_txt_docs.append(p)
-                        elif sfx in self.OTHER_FILE_EXTENSIONS and self._is_eligible_other_file(p):
-                            candidate_other_files.append(p)
 
         self._log(
             f"Found {len(candidate_docs)} Office/PDF docs, {len(candidate_txt_docs)} TXT/CSV/RTF docs, "

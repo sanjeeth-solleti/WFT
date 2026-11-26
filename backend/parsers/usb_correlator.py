@@ -587,11 +587,21 @@ class USBDeviceCorrelator(BaseParser):
         seen_slots: Set[Tuple[str, str, str]] = set()
         discovered: List[_HiveCandidate] = []
 
+        _SKIP_HIVE_ROOTS = {
+            "logs", "prefetch", "filesystem", "mft", "srum", "jumplists",
+            "tasks", "powershell", "rmm", "carved_thumbnails", "zoneidentifier",
+            "recyclebin", "wbem", "wer", "wlan", "usb", "browsers", "chat",
+            "cloud", "mail", "media", "documents", "notifications", "activitiescache",
+        }
         for root_dir, _prio in search_roots:
             if not root_dir.is_dir():
                 continue
-            for dirpath, _dirnames, filenames in os.walk(root_dir):
+            if root_dir == self.staging_dir and discovered:
+                break
+            for dirpath, dirnames, filenames in os.walk(root_dir):
                 dp = Path(dirpath)
+                if root_dir == self.staging_dir and dp.resolve() == self.staging_dir.resolve():
+                    dirnames[:] = [d for d in dirnames if d.lower() not in _SKIP_HIVE_ROOTS]
                 for fn in sorted(filenames):
                     fn_low = fn.lower()
                     if fn_low.endswith(_SIDE_CAR_SUFFIXES):
@@ -1321,12 +1331,25 @@ class USBDeviceCorrelator(BaseParser):
         setupapi_files: List[Path] = []
         seen_logs: Set[Path] = set()
         if self.staging_dir.exists():
-            for p in sorted(self.staging_dir.rglob("setupapi*.log")):
-                if p.is_file():
-                    rp = p.resolve()
-                    if rp not in seen_logs:
-                        seen_logs.add(rp)
-                        setupapi_files.append(rp)
+            staging_res = self.staging_dir.resolve()
+            _SKIP_USB_ROOTS = {
+                "registry", "logs", "prefetch", "filesystem", "mft", "srum",
+                "jumplists", "tasks", "powershell", "rmm", "carved_thumbnails",
+                "zoneidentifier", "recyclebin", "wbem", "wer", "wlan", "browsers",
+                "chat", "cloud", "mail", "media", "documents", "notifications",
+                "activitiescache", "sqlite",
+            }
+            for walk_root, dirs, files in os.walk(staging_res):
+                root_p = Path(walk_root)
+                if root_p == staging_res:
+                    dirs[:] = [d for d in dirs if d.lower() not in _SKIP_USB_ROOTS]
+                for fname in sorted(files):
+                    fn_low = fname.lower()
+                    if fn_low.startswith("setupapi") and fn_low.endswith(".log"):
+                        rp = (root_p / fname).resolve()
+                        if rp not in seen_logs:
+                            seen_logs.add(rp)
+                            setupapi_files.append(rp)
 
         self._log(
             f"Found {len(setupapi_files)} setupapi log files (ActiveTimeBias={bias_minutes} min): "

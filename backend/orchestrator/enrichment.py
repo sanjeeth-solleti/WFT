@@ -1724,35 +1724,36 @@ class FileEnrichmentEngine:
                 if target_dir is None and scan_items:
                     total_stg_bytes = 0
                     exceeds_threshold = False
-                    for cand_f in scan_root.rglob("*"):
-                        if cand_f.is_file():
-                            try:
-                                total_stg_bytes += cand_f.stat().st_size
-                            except OSError:
-                                continue
-                            if total_stg_bytes > 64 * 1024 * 1024:
-                                exceeds_threshold = True
-                                break
+                    for cand_f, _lpath in scan_items:
+                        try:
+                            total_stg_bytes += cand_f.stat().st_size
+                        except OSError:
+                            continue
+                        if total_stg_bytes > 64 * 1024 * 1024:
+                            exceeds_threshold = True
+                            break
                     if exceeds_threshold:
                         # Create mirror inside case_dir (same volume as staging_dir) so os.link() hardlinks with zero disk copy
                         mirror_parent = get_case_dir(self.case_id).resolve()
                         mirror_parent.mkdir(parents=True, exist_ok=True)
                         stinger_mirror_dir = Path(tempfile.mkdtemp(prefix="wft_stinger_in_", dir=str(mirror_parent))).resolve()
-                        skip_stinger_exts = {
-                            ".evtx",
-                            ".mzz",
-                            ".sqlite",
-                            ".sqlite3",
-                            ".db",
-                            ".ost",
-                            ".pst",
-                            ".etl",
-                        }
+                        stinger_eligible_exts = (
+                            self.PE_EXTENSIONS
+                            | self.SCRIPT_EXTENSIONS
+                            | {
+                                ".msi", ".cab", ".jar", ".class", ".war", ".lnk", ".url",
+                                ".doc", ".xls", ".ppt", ".docm", ".xlsm", ".pptm",
+                                ".docx", ".xlsx", ".pptx", ".pdf", ".rtf",
+                                ".zip", ".7z", ".rar", ".gz", ".tar", ".iso",
+                                ".php", ".asp", ".aspx", ".jsp", ".jspx", ".py", ".sh", ".elf", ".bin",
+                            }
+                        )
                         skip_stinger_names = {"$mft", "$j", "$usnjrnl", "$logfile", "srudb.dat", "objects.data"}
                         linked_count = 0
                         for item_path, _logical in scan_items:
                             low_n = item_path.name.lower()
-                            if low_n in skip_stinger_names or item_path.suffix.lower() in skip_stinger_exts:
+                            ext_low = item_path.suffix.lower()
+                            if low_n in skip_stinger_names or (ext_low and ext_low not in stinger_eligible_exts):
                                 continue
                             try:
                                 rel_p = item_path.resolve().relative_to(self.staging_dir)

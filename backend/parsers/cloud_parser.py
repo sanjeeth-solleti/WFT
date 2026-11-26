@@ -1305,58 +1305,68 @@ class CloudParser(BaseParser):
         candidate_dropbox_info: List[Path] = []
         candidate_dropbox_db: List[Path] = []
 
+        self._get_vfs_staged_cache()
+        _SKIP_CLOUD_ROOTS = {
+            "registry", "logs", "prefetch", "filesystem", "mft", "srum",
+            "jumplists", "tasks", "powershell", "rmm", "carved_thumbnails",
+            "zoneidentifier", "recyclebin", "wbem", "wer", "wlan", "usb",
+        }
         if self.staging_dir.exists():
-            for p in self.staging_dir.rglob("*"):
-                name_lower = p.name.lower()
-                if any(name_lower.endswith(sfx) for sfx in ("-wal", "-shm", "-journal")):
-                    continue
-                if not (
-                    name_lower.endswith((".db", ".sqlite", ".sqlite3", ".dbx", ".json", ".log", ".ini", ".dat"))
-                    or "sync_log.log." in name_lower
-                    or "syncenginedatabase" in name_lower
-                    or "metadata_sqlite_db" in name_lower
-                ):
-                    continue
-                if not p.is_file():
-                    continue
-                try:
-                    path_lower = p.relative_to(self.staging_dir).as_posix().lower()
-                except ValueError:
-                    path_lower = str(p).replace("\\", "/").lower()
+            staging_res = self.staging_dir.resolve()
+            for walk_root, dirs, files in os.walk(staging_res):
+                root_p = Path(walk_root)
+                if root_p == staging_res:
+                    dirs[:] = [d for d in dirs if d.lower() not in _SKIP_CLOUD_ROOTS]
+                for fname in files:
+                    name_lower = fname.lower()
+                    if any(name_lower.endswith(sfx) for sfx in ("-wal", "-shm", "-journal")):
+                        continue
+                    if not (
+                        name_lower.endswith((".db", ".sqlite", ".sqlite3", ".dbx", ".json", ".log", ".ini", ".dat"))
+                        or "sync_log.log." in name_lower
+                        or "syncenginedatabase" in name_lower
+                        or "metadata_sqlite_db" in name_lower
+                    ):
+                        continue
+                    p = root_p / fname
+                    try:
+                        path_lower = p.relative_to(staging_res).as_posix().lower()
+                    except ValueError:
+                        path_lower = str(p).replace("\\", "/").lower()
 
-                if "safedelete" in name_lower and name_lower.endswith((".db", ".sqlite", ".sqlite3")):
-                    candidate_safedelete_db.append(p)
-                elif name_lower == "nucleus.sqlite3" or (
-                    "dropbox" in path_lower
-                    and (
-                        name_lower in ("filecache.dbx", "config.dbx", "config.db", "deleted.dbx")
-                        or name_lower.endswith((".sqlite3", ".sqlite", ".dbx", ".db"))
-                    )
-                ):
-                    candidate_dropbox_db.append(p)
-                elif name_lower == "info.json" and ("dropbox" in path_lower or "cloud" in path_lower):
-                    candidate_dropbox_info.append(p)
-                elif "syncenginedatabase" in name_lower or (
-                    name_lower.endswith((".db", ".sqlite", ".sqlite3")) and "onedrive" in path_lower
-                ):
-                    candidate_onedrive_db.append(p)
-                elif "syncdiagnostics" in name_lower and name_lower.endswith(".log"):
-                    candidate_onedrive_diag.append(p)
-                elif name_lower.endswith(".ini") and "onedrive" in path_lower:
-                    candidate_onedrive_ini.append(p)
-                elif name_lower.endswith(".dat") and "onedrive" in path_lower:
-                    candidate_onedrive_dat.append(p)
-                elif (
-                    "metadata_sqlite_db" in name_lower
-                    or name_lower == "snapshot.db"
-                    or (
-                        name_lower.endswith((".db", ".sqlite", ".sqlite3"))
-                        and any(k in path_lower for k in ("drivefs", "google", "gdrive"))
-                    )
-                ):
-                    candidate_gdrive_db.append(p)
-                elif (name_lower == "sync_log.log" or name_lower.startswith("sync_log.log.")):
-                    candidate_gdrive_log.append(p)
+                    if "safedelete" in name_lower and name_lower.endswith((".db", ".sqlite", ".sqlite3")):
+                        candidate_safedelete_db.append(p)
+                    elif name_lower == "nucleus.sqlite3" or (
+                        "dropbox" in path_lower
+                        and (
+                            name_lower in ("filecache.dbx", "config.dbx", "config.db", "deleted.dbx")
+                            or name_lower.endswith((".sqlite3", ".sqlite", ".dbx", ".db"))
+                        )
+                    ):
+                        candidate_dropbox_db.append(p)
+                    elif name_lower == "info.json" and ("dropbox" in path_lower or "cloud" in path_lower):
+                        candidate_dropbox_info.append(p)
+                    elif "syncenginedatabase" in name_lower or (
+                        name_lower.endswith((".db", ".sqlite", ".sqlite3")) and "onedrive" in path_lower
+                    ):
+                        candidate_onedrive_db.append(p)
+                    elif "syncdiagnostics" in name_lower and name_lower.endswith(".log"):
+                        candidate_onedrive_diag.append(p)
+                    elif name_lower.endswith(".ini") and "onedrive" in path_lower:
+                        candidate_onedrive_ini.append(p)
+                    elif name_lower.endswith(".dat") and "onedrive" in path_lower:
+                        candidate_onedrive_dat.append(p)
+                    elif (
+                        "metadata_sqlite_db" in name_lower
+                        or name_lower == "snapshot.db"
+                        or (
+                            name_lower.endswith((".db", ".sqlite", ".sqlite3"))
+                            and any(k in path_lower for k in ("drivefs", "google", "gdrive"))
+                        )
+                    ):
+                        candidate_gdrive_db.append(p)
+                    elif (name_lower == "sync_log.log" or name_lower.startswith("sync_log.log.")):
+                        candidate_gdrive_log.append(p)
 
         self._log(
             f"Found {len(candidate_onedrive_db)} OneDrive DBs, {len(candidate_safedelete_db)} SafeDelete DBs, "

@@ -1944,7 +1944,7 @@ class ProcessingPipeline:
             f_be = bg_pool.submit(_be_worker) if should_run_bulk_extractor else None
             f_dc = bg_pool.submit(_dc_worker) if should_run_carving else None
 
-            # Execute structured parsers AND keyword indexing concurrently across the 32-thread pool
+            # Execute structured parsers concurrently across the 32-thread pool
             stage_workers = max(4, min(workers, 32))
             with ThreadPoolExecutor(max_workers=stage_workers) as stage_pool:
                 f_ez = stage_pool.submit(_ez_and_fallbacks_worker)
@@ -1955,18 +1955,16 @@ class ProcessingPipeline:
                     workers,
                     _on_parser_done,
                 )
-                f_kw_step3 = stage_pool.submit(_keyword_indexing_worker, "Parallel Stage 3")
 
                 ez_results, native_fallback_results, hindsight_results = f_ez.result()
                 regripper_res = f_rr.result()
                 parser_results = f_parsers.result()
-                keyword_res_step3 = f_kw_step3.result()
 
             # -------------------------------------------------------------
             # STEP 4: Parallel File Enrichment & Structured Keyword Indexing
             # -------------------------------------------------------------
             enrichment_results: Dict[str, int] = {}
-            keyword_res: Dict[str, Any] = keyword_res_step3
+            keyword_res: Dict[str, Any] = {"keywords_scanned": 0, "total_hits": 0}
 
             def _enrichment_worker() -> Dict[str, int]:
                 if not any([eff_yara, eff_stinger, eff_ocr, eff_ioc]):
@@ -2115,7 +2113,16 @@ class ProcessingPipeline:
                 )
 
             # If background scanners (Bulk Extractor / Data Carver) produced new features, run an incremental keyword scan
-            if (be_rows > 0 or carved_rows > 0) and keyword_res.get("keywords_scanned", 0) > 0:
+            has_case_keywords = False
+            try:
+                with DuckDBManager.get_lock(self.case_id):
+                    kw_check_conn = DuckDBManager.get_connection(self.case_id, read_only=False)
+                    has_case_keywords = (
+                        int(kw_check_conn.cursor().execute("SELECT COUNT(*) FROM case_keywords;").fetchone()[0] or 0) > 0
+                    )
+            except Exception:
+                has_case_keywords = bool(keyword_res.get("keywords_scanned", 0) or keyword_res.get("total_hits", 0))
+            if (be_rows > 0 or carved_rows > 0) and has_case_keywords:
                 t_kw_inc = time.time()
                 try:
                     kw_inc_out = _call_with_supported_kwargs(

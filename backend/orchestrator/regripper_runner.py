@@ -701,32 +701,57 @@ class RegRipperRunner:
         h_type: str,
     ) -> Tuple[subprocess.CompletedProcess, str]:
         cmd = [str(rip_exe), "-r", str(hive_path), "-a"]
-        proc = subprocess.run(
-            cmd,
-            cwd=str(rip_exe.parent),
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=300,
-            creationflags=_NO_WINDOW,
-        )
-        stdout_text = proc.stdout or ""
-
-        # Amcache fallback when synthetic/cleaned Amcache.hve lacks embedded header filename
-        if h_type == "AMCACHE" and not stdout_text.strip() and proc.returncode == 0:
-            fb_proc = subprocess.run(
-                [str(rip_exe), "-r", str(hive_path), "-p", "amcache"],
+        try:
+            proc = subprocess.run(
+                cmd,
                 cwd=str(rip_exe.parent),
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                timeout=120,
+                timeout=600,
                 creationflags=_NO_WINDOW,
             )
-            if (fb_proc.stdout or "").strip():
-                return (fb_proc, fb_proc.stdout or "")
+            stdout_text = proc.stdout or ""
+        except subprocess.TimeoutExpired as tex:
+            raw_out = tex.stdout
+            if isinstance(raw_out, bytes):
+                stdout_text = raw_out.decode("utf-8", errors="replace")
+            elif isinstance(raw_out, str):
+                stdout_text = raw_out
+            else:
+                stdout_text = ""
+            raw_err = tex.stderr
+            if isinstance(raw_err, bytes):
+                stderr_text = raw_err.decode("utf-8", errors="replace")
+            elif isinstance(raw_err, str):
+                stderr_text = raw_err
+            else:
+                stderr_text = f"Command timed out after {tex.timeout} seconds"
+            proc = subprocess.CompletedProcess(
+                args=cmd,
+                returncode=0 if stdout_text.strip() else -2,
+                stdout=stdout_text,
+                stderr=stderr_text,
+            )
+
+        # Amcache fallback when synthetic/cleaned Amcache.hve lacks embedded header filename
+        if h_type == "AMCACHE" and not stdout_text.strip() and proc.returncode == 0:
+            try:
+                fb_proc = subprocess.run(
+                    [str(rip_exe), "-r", str(hive_path), "-p", "amcache"],
+                    cwd=str(rip_exe.parent),
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=180,
+                    creationflags=_NO_WINDOW,
+                )
+                if (fb_proc.stdout or "").strip():
+                    return (fb_proc, fb_proc.stdout or "")
+            except subprocess.TimeoutExpired:
+                pass
 
         return (proc, stdout_text)
 

@@ -1071,12 +1071,23 @@ class FirefoxParser(BaseParser):
             "signons.sqlite",
             "logins.json",
         )
+        _SKIP_FF_ROOTS = {
+            "registry", "logs", "prefetch", "filesystem", "mft", "srum",
+            "jumplists", "tasks", "powershell", "rmm", "carved_thumbnails",
+            "zoneidentifier", "recyclebin", "wbem", "wer", "wlan", "usb",
+        }
         try:
-            all_files = [
-                p
-                for p in self.staging_dir.rglob("*")
-                if p.name.lower().endswith(_FF_CANDIDATE_SUFFIXES) and p.is_file()
-            ]
+            self._get_vfs_staged_cache()
+            all_files: List[Path] = []
+            if self.staging_dir.exists():
+                staging_res = self.staging_dir.resolve()
+                for walk_root, dirs, files in os.walk(staging_res):
+                    root_p = Path(walk_root)
+                    if root_p == staging_res:
+                        dirs[:] = [d for d in dirs if d.lower() not in _SKIP_FF_ROOTS]
+                    for fname in files:
+                        if fname.lower().endswith(_FF_CANDIDATE_SUFFIXES):
+                            all_files.append(root_p / fname)
             all_files.sort(key=_ff_priority)
 
             for idx, fp in enumerate(all_files):

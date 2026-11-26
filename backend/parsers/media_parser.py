@@ -940,6 +940,72 @@ class MediaParser(BaseParser):
         self.carved_thumbnails_dir = self.staging_dir / "Carved_Thumbnails"
         self.carved_thumbnails_dir.mkdir(parents=True, exist_ok=True)
         self._parse_init_ts = time.time()
+        self._vfs_rel_cache: Optional[Dict[str, Optional[datetime]]] = None
+        self._vfs_path_cache: Optional[Dict[str, Optional[datetime]]] = None
+        self._cached_eff_source_type: Optional[str] = None
+
+    def _preload_vfs_time_cache(self) -> None:
+        rel_map: Dict[str, Optional[datetime]] = {}
+        vp_map: Dict[str, Optional[datetime]] = {}
+        eff_src = (getattr(self, "source_type", None) or "").strip().lower()
+        try:
+            with DuckDBManager.get_lock(self.case_id):
+                cur = self._get_conn().cursor()
+                tables = {
+                    str(r[0])
+                    for r in cur.execute(
+                        "SELECT table_name FROM information_schema.tables WHERE table_schema = 'main';"
+                    ).fetchall()
+                }
+                if not eff_src and "case_metadata" in tables:
+                    m_row = cur.execute(
+                        "SELECT value FROM case_metadata WHERE LOWER(key) = 'source_type' LIMIT 1;"
+                    ).fetchone()
+                    if m_row and m_row[0]:
+                        eff_src = str(m_row[0]).strip().lower()
+                if "vfs_files" in tables:
+                    vfs_cols = {
+                        str(r[0]).lower(): str(r[0])
+                        for r in cur.execute('DESCRIBE "vfs_files";').fetchall()
+                    }
+                    mod_exprs = [
+                        self._quote_ident(vfs_cols[c])
+                        for c in ("si_modified", "si_modified_utc", "fn_modified", "fn_modified_utc")
+                        if c in vfs_cols
+                    ]
+                    srp_sql = (
+                        f"LOWER(TRIM(BOTH '/' FROM REPLACE(COALESCE({self._quote_ident(vfs_cols['staged_rel_path'])}, ''), chr(92), '/')))"
+                        if "staged_rel_path" in vfs_cols
+                        else "''"
+                    )
+                    vp_sql = (
+                        f"LOWER(REPLACE(COALESCE({self._quote_ident(vfs_cols['vfs_path'])}, ''), '/', chr(92)))"
+                        if "vfs_path" in vfs_cols
+                        else "''"
+                    )
+                    mod_sql = f"COALESCE({', '.join(mod_exprs)})" if mod_exprs else "NULL"
+                    for srp_k, vp_k, m_raw in cur.execute(
+                        f'SELECT {srp_sql}, {vp_sql}, {mod_sql} FROM "vfs_files";'
+                    ).fetchall():
+                        m_dt: Optional[datetime] = None
+                        if isinstance(m_raw, datetime):
+                            m_dt = _to_naive_utc(m_raw)
+                        elif m_raw is not None:
+                            try:
+                                m_dt = _to_naive_utc(
+                                    datetime.fromisoformat(str(m_raw).strip().replace("Z", "+00:00"))
+                                )
+                            except ValueError:
+                                m_dt = None
+                        if srp_k and srp_k not in rel_map:
+                            rel_map[srp_k] = m_dt
+                        if vp_k and vp_k not in vp_map:
+                            vp_map[vp_k] = m_dt
+        except Exception:
+            return
+        self._vfs_rel_cache = rel_map
+        self._vfs_path_cache = vp_map
+        self._cached_eff_source_type = eff_src
 
     @staticmethod
     def _quote_ident(ident: str) -> str:
@@ -974,69 +1040,79 @@ class MediaParser(BaseParser):
         rel_candidates, vfs_cands = self._local_vfs_lookup_candidates(p)
         effective_source_type = (getattr(self, "source_type", None) or "").strip().lower()
 
-        try:
-            with DuckDBManager.get_lock(self.case_id):
-                cur = self._get_conn().cursor()
-                tables = {
-                    str(r[0])
-                    for r in cur.execute(
-                        "SELECT table_name FROM information_schema.tables WHERE table_schema = 'main';"
-                    ).fetchall()
-                }
-                if not effective_source_type and "case_metadata" in tables:
-                    m_row = cur.execute(
-                        "SELECT value FROM case_metadata WHERE LOWER(key) = 'source_type' LIMIT 1;"
-                    ).fetchone()
-                    if m_row and m_row[0]:
-                        effective_source_type = str(m_row[0]).strip().lower()
-
-                if "vfs_files" in tables:
-                    vfs_cols = {
-                        str(r[0]).lower(): str(r[0])
-                        for r in cur.execute('DESCRIBE "vfs_files";').fetchall()
+        if self._vfs_rel_cache is not None and self._vfs_path_cache is not None:
+            if not effective_source_type and self._cached_eff_source_type:
+                effective_source_type = self._cached_eff_source_type
+            for rc in rel_candidates:
+                if rc in self._vfs_rel_cache:
+                    return self._vfs_rel_cache[rc]
+            for vc in vfs_cands:
+                if vc in self._vfs_path_cache:
+                    return self._vfs_path_cache[vc]
+        else:
+            try:
+                with DuckDBManager.get_lock(self.case_id):
+                    cur = self._get_conn().cursor()
+                    tables = {
+                        str(r[0])
+                        for r in cur.execute(
+                            "SELECT table_name FROM information_schema.tables WHERE table_schema = 'main';"
+                        ).fetchall()
                     }
-                    mod_exprs = [
-                        self._quote_ident(vfs_cols[c])
-                        for c in ("si_modified", "si_modified_utc", "fn_modified", "fn_modified_utc")
-                        if c in vfs_cols
-                    ]
-                    where_clauses: List[str] = []
-                    params: List[Any] = []
-                    if rel_candidates and "staged_rel_path" in vfs_cols:
-                        q_srp = self._quote_ident(vfs_cols["staged_rel_path"])
-                        ph = ", ".join(["?"] * len(rel_candidates))
-                        where_clauses.append(
-                            f"LOWER(TRIM(BOTH '/' FROM REPLACE(COALESCE({q_srp}, ''), chr(92), '/'))) IN ({ph})"
-                        )
-                        params.extend(rel_candidates)
-                    if vfs_cands and "vfs_path" in vfs_cols:
-                        q_vp = self._quote_ident(vfs_cols["vfs_path"])
-                        ph_v = ", ".join(["?"] * len(vfs_cands))
-                        where_clauses.append(
-                            f"LOWER(REPLACE(COALESCE({q_vp}, ''), '/', chr(92))) IN ({ph_v})"
-                        )
-                        params.extend(vfs_cands)
-
-                    if where_clauses:
-                        mod_sql = f"COALESCE({', '.join(mod_exprs)})" if mod_exprs else "NULL"
-                        where_sql = " OR ".join(where_clauses)
-                        row = cur.execute(
-                            f'SELECT 1, {mod_sql} FROM "vfs_files" WHERE {where_sql} LIMIT 1;',
-                            params,
+                    if not effective_source_type and "case_metadata" in tables:
+                        m_row = cur.execute(
+                            "SELECT value FROM case_metadata WHERE LOWER(key) = 'source_type' LIMIT 1;"
                         ).fetchone()
-                        if row is not None:
-                            val = row[1]
-                            if val is None:
-                                return None
-                            if isinstance(val, datetime):
-                                return _to_naive_utc(val)
-                            try:
-                                dt_v = datetime.fromisoformat(str(val).strip().replace("Z", "+00:00"))
-                                return _to_naive_utc(dt_v)
-                            except ValueError:
-                                return None
-        except Exception:
-            pass
+                        if m_row and m_row[0]:
+                            effective_source_type = str(m_row[0]).strip().lower()
+
+                    if "vfs_files" in tables:
+                        vfs_cols = {
+                            str(r[0]).lower(): str(r[0])
+                            for r in cur.execute('DESCRIBE "vfs_files";').fetchall()
+                        }
+                        mod_exprs = [
+                            self._quote_ident(vfs_cols[c])
+                            for c in ("si_modified", "si_modified_utc", "fn_modified", "fn_modified_utc")
+                            if c in vfs_cols
+                        ]
+                        where_clauses: List[str] = []
+                        params: List[Any] = []
+                        if rel_candidates and "staged_rel_path" in vfs_cols:
+                            q_srp = self._quote_ident(vfs_cols["staged_rel_path"])
+                            ph = ", ".join(["?"] * len(rel_candidates))
+                            where_clauses.append(
+                                f"LOWER(TRIM(BOTH '/' FROM REPLACE(COALESCE({q_srp}, ''), chr(92), '/'))) IN ({ph})"
+                            )
+                            params.extend(rel_candidates)
+                        if vfs_cands and "vfs_path" in vfs_cols:
+                            q_vp = self._quote_ident(vfs_cols["vfs_path"])
+                            ph_v = ", ".join(["?"] * len(vfs_cands))
+                            where_clauses.append(
+                                f"LOWER(REPLACE(COALESCE({q_vp}, ''), '/', chr(92))) IN ({ph_v})"
+                            )
+                            params.extend(vfs_cands)
+
+                        if where_clauses:
+                            mod_sql = f"COALESCE({', '.join(mod_exprs)})" if mod_exprs else "NULL"
+                            where_sql = " OR ".join(where_clauses)
+                            row = cur.execute(
+                                f'SELECT 1, {mod_sql} FROM "vfs_files" WHERE {where_sql} LIMIT 1;',
+                                params,
+                            ).fetchone()
+                            if row is not None:
+                                val = row[1]
+                                if val is None:
+                                    return None
+                                if isinstance(val, datetime):
+                                    return _to_naive_utc(val)
+                                try:
+                                    dt_v = datetime.fromisoformat(str(val).strip().replace("Z", "+00:00"))
+                                    return _to_naive_utc(dt_v)
+                                except ValueError:
+                                    return None
+            except Exception:
+                pass
 
         if effective_source_type in ("image", "disk_image", "e01", "raw", "vhd", "vhdx", "vmdk"):
             return None
@@ -1635,6 +1711,10 @@ class MediaParser(BaseParser):
         start_time = time.time()
         workers = max(1, min(32, int(max_workers or 16)))
         self._log(f"Starting MediaParser across staging directory: {self.staging_dir} (workers={workers})")
+
+        self._preload_vfs_time_cache()
+        self._get_vfs_staged_cache()
+        self._get_mft_index_cache()
 
         exif_records: List[Dict[str, Any]] = []
         picture_records: List[Dict[str, Any]] = []

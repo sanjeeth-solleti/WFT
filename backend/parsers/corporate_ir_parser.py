@@ -453,11 +453,25 @@ class CorporateIRParser(BaseParser):
 
         # Also check Windows\System32\Tasks if staged under Enrichment or VSS
         if self.staging_dir.is_dir():
-            for p in self.staging_dir.rglob("Tasks"):
-                if p.is_dir() and p.resolve() != self.tasks_dir:
-                    parent_low = str(p.parent).lower().replace("/", "\\")
-                    if "system32" in parent_low or "syswow64" in parent_low or parent_low.endswith("\\windows"):
-                        roots_to_scan.append(p.resolve())
+            staging_res = self.staging_dir.resolve()
+            _SKIP_TASK_ROOTS = {
+                "registry", "logs", "prefetch", "filesystem", "mft", "srum",
+                "jumplists", "tasks", "powershell", "rmm", "carved_thumbnails",
+                "zoneidentifier", "recyclebin", "wbem", "wer", "wlan", "usb",
+                "browsers", "chat", "cloud", "mail", "media", "documents",
+                "notifications", "activitiescache", "sqlite",
+            }
+            for walk_root, dirs, _files in os.walk(staging_res):
+                root_p = Path(walk_root)
+                if root_p == staging_res:
+                    dirs[:] = [d for d in dirs if d.lower() not in _SKIP_TASK_ROOTS]
+                for d in dirs:
+                    if d.lower() == "tasks":
+                        cand_p = (root_p / d).resolve()
+                        if cand_p != self.tasks_dir:
+                            parent_low = str(cand_p.parent).lower().replace("/", "\\")
+                            if "system32" in parent_low or "syswow64" in parent_low or parent_low.endswith("\\windows"):
+                                roots_to_scan.append(cand_p)
 
         for base_dir in roots_to_scan:
             for root, _, files in os.walk(base_dir):
@@ -915,12 +929,24 @@ class CorporateIRParser(BaseParser):
                         ps_files.append(rp)
 
         if self.staging_dir.is_dir():
-            for p in sorted(self.staging_dir.rglob("*ConsoleHost_history.txt")):
-                if p.is_file():
-                    rp = p.resolve()
-                    if rp not in seen:
-                        seen.add(rp)
-                        ps_files.append(rp)
+            staging_res = self.staging_dir.resolve()
+            _SKIP_PS_ROOTS = {
+                "registry", "logs", "prefetch", "filesystem", "mft", "srum",
+                "jumplists", "tasks", "powershell", "rmm", "carved_thumbnails",
+                "zoneidentifier", "recyclebin", "wbem", "wer", "wlan", "usb",
+                "browsers", "chat", "cloud", "mail", "media", "notifications",
+                "activitiescache", "sqlite",
+            }
+            for walk_root, dirs, files in os.walk(staging_res):
+                root_p = Path(walk_root)
+                if root_p == staging_res:
+                    dirs[:] = [d for d in dirs if d.lower() not in _SKIP_PS_ROOTS]
+                for fname in sorted(files):
+                    if fname.lower().endswith("consolehost_history.txt"):
+                        rp = (root_p / fname).resolve()
+                        if rp not in seen:
+                            seen.add(rp)
+                            ps_files.append(rp)
 
         return ps_files
 
@@ -1044,12 +1070,26 @@ class CorporateIRParser(BaseParser):
                         continue
 
         if self.staging_dir.is_dir():
+            staging_res = self.staging_dir.resolve()
+            _SKIP_RMM_ROOTS = {
+                "registry", "logs", "prefetch", "filesystem", "mft", "srum",
+                "jumplists", "tasks", "powershell", "rmm", "carved_thumbnails",
+                "zoneidentifier", "recyclebin", "wbem", "wer", "wlan", "usb",
+                "browsers", "chat", "cloud", "mail", "media", "notifications",
+                "activitiescache", "sqlite",
+            }
             for root, dirs, files in os.walk(self.staging_dir):
                 root_p = Path(root).resolve()
                 if root_p == self.rmm_dir or self.rmm_dir in root_p.parents:
                     dirs[:] = []
                     continue
-                dirs[:] = [d for d in dirs if (root_p / d).resolve() != self.rmm_dir]
+                if root_p == staging_res:
+                    dirs[:] = [
+                        d for d in dirs
+                        if d.lower() not in _SKIP_RMM_ROOTS and (root_p / d).resolve() != self.rmm_dir
+                    ]
+                else:
+                    dirs[:] = [d for d in dirs if (root_p / d).resolve() != self.rmm_dir]
 
                 try:
                     rel_dir_parts = [seg.lower() for seg in root_p.relative_to(self.staging_dir.resolve()).parts]
@@ -1453,18 +1493,32 @@ class CorporateIRParser(BaseParser):
 
         wpn_candidates: List[Path] = []
         seen_wpn: Set[Path] = set()
+        _SKIP_WPN_ROOTS = {
+            "registry", "logs", "prefetch", "filesystem", "mft", "srum",
+            "jumplists", "tasks", "powershell", "rmm", "carved_thumbnails",
+            "zoneidentifier", "recyclebin", "wbem", "wer", "wlan", "usb",
+            "browsers", "chat", "cloud", "mail", "media", "documents",
+            "activitiescache",
+        }
         for base_dir in (self.sqlite_dir, self.staging_dir):
             if not base_dir.is_dir():
                 continue
-            for p in sorted(base_dir.rglob("*wpndatabase*")):
-                if not p.is_file():
-                    continue
-                if p.name.lower().endswith(("-wal", "-shm", "-journal")):
-                    continue
-                rp = p.resolve()
-                if rp not in seen_wpn and rp.stat().st_size > 0:
-                    seen_wpn.add(rp)
-                    wpn_candidates.append(rp)
+            base_res = base_dir.resolve()
+            for walk_root, dirs, files in os.walk(base_res):
+                root_p = Path(walk_root)
+                if base_dir == self.staging_dir and root_p == base_res:
+                    dirs[:] = [d for d in dirs if d.lower() not in _SKIP_WPN_ROOTS]
+                for fname in sorted(files):
+                    fn_low = fname.lower()
+                    if "wpndatabase" not in fn_low or fn_low.endswith(("-wal", "-shm", "-journal")):
+                        continue
+                    rp = (root_p / fname).resolve()
+                    try:
+                        if rp not in seen_wpn and rp.stat().st_size > 0:
+                            seen_wpn.add(rp)
+                            wpn_candidates.append(rp)
+                    except OSError:
+                        continue
 
         self._log(f"Discovered {len(wpn_candidates)} wpndatabase candidate files")
 

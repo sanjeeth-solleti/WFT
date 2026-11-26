@@ -907,6 +907,27 @@ class BulkExtractorRunner:
         return None
 
     @staticmethod
+    def _open_be_text_with_retry(fpath: Path, max_attempts: int = 12) -> Any:
+        """
+        Open a bulk_extractor feature/histogram file with capped backoff on PermissionError.
+        Prevents '[Errno 13] Permission denied' when Windows kernel / Defender is still releasing
+        file handles immediately after bulk_extractor64.exe exits or is terminated.
+        """
+        last_err: Optional[OSError] = None
+        for attempt in range(max_attempts):
+            try:
+                return open(fpath, "r", encoding="utf-8-sig", errors="replace")
+            except PermissionError as perr:
+                last_err = perr
+                if attempt + 1 < max_attempts:
+                    time.sleep(min(1.5, 0.15 * (attempt + 1)))
+            except OSError as oerr:
+                raise oerr
+        if last_err is not None:
+            raise last_err
+        return open(fpath, "r", encoding="utf-8-sig", errors="replace")
+
+    @staticmethod
     def _is_histogram_file(txt_path: Path) -> bool:
         fname_low = txt_path.name.lower()
         if fname_low.endswith("_histogram.txt") or re.search(r"_histogram_\d+\.txt$", fname_low):
@@ -914,7 +935,7 @@ class BulkExtractorRunner:
         if fname_low == "url_services.txt":
             return True
         try:
-            with open(txt_path, "r", encoding="utf-8-sig", errors="replace") as f:
+            with BulkExtractorRunner._open_be_text_with_retry(txt_path, max_attempts=4) as f:
                 for _ in range(10):
                     line = f.readline()
                     if not line:
@@ -1006,7 +1027,7 @@ class BulkExtractorRunner:
             local_rej_glob: Set[str] = set()
             feature_occurrence_counts: Dict[str, int] = defaultdict(int)
             try:
-                with open(fpath, "r", encoding="utf-8-sig", errors="replace") as f:
+                with self._open_be_text_with_retry(fpath) as f:
                     for raw_line in f:
                         line = raw_line.lstrip("\ufeff").rstrip("\r\n")
                         if not line or line.lstrip().startswith("#"):
@@ -1098,7 +1119,7 @@ class BulkExtractorRunner:
                 or (scanner in ("ip", "email", "telephone", "ccn") and scanner in parsed_scanners)
             )
             try:
-                with open(hpath, "r", encoding="utf-8-sig", errors="replace") as f:
+                with self._open_be_text_with_retry(hpath) as f:
                     for raw_line in f:
                         line = raw_line.lstrip("\ufeff").rstrip("\r\n")
                         if not line or line.lstrip().startswith("#"):
@@ -1229,11 +1250,30 @@ class BulkExtractorRunner:
         try:
             if src.is_file():
                 total_bytes = src.stat().st_size
-                # Include split E01/E02... or .001/.002 segments
-                stem = src.with_suffix("")
-                for sib in src.parent.glob(stem.name + ".*"):
-                    if sib != src and sib.is_file() and re.match(r"^\.(?:e|ex|s)?\d{2,3}$", sib.suffix.lower()):
+                # Include split E01/E02..E99/EAA..EZZ or .001/.002 segments
+                stem_low = src.with_suffix("").name.lower()
+                for sib in src.parent.iterdir():
+                    if (
+                        sib != src
+                        and sib.is_file()
+                        and sib.with_suffix("").name.lower() == stem_low
+                        and re.match(r"^\.(?:(?:e|ex|s)(?:\d{2,3}|[a-z]{2})|\d{3})$", sib.suffix.lower())
+                    ):
                         total_bytes += sib.stat().st_size
+                if src.suffix.lower() in (".e01", ".ex01"):
+                    try:
+                        import pyewf  # type: ignore
+                        ewf_glob = pyewf.glob(str(src))
+                        ewf_h = pyewf.handle()
+                        ewf_h.open(ewf_glob)
+                        try:
+                            media_sz = int(ewf_h.get_media_size() or 0)
+                            if media_sz > total_bytes:
+                                total_bytes = media_sz
+                        finally:
+                            ewf_h.close()
+                    except Exception:
+                        pass
             elif src.is_dir():
                 file_count = 0
                 for root, dirs, files in os.walk(str(src), followlinks=False):
@@ -1252,7 +1292,7 @@ class BulkExtractorRunner:
         except OSError:
             pass
         gib = total_bytes / float(1024 ** 3)
-        return int(min(4 * 3600, max(180, int(gib * 60))))
+        return int(min(12 * 3600, max(1800, int(gib * 45))))
 
     def _run_be_process(self, cmd: List[str], time_budget_s: int) -> Tuple[int, Optional[str], bool]:
         """
@@ -1330,6 +1370,8 @@ class BulkExtractorRunner:
                     except Exception:
                         pass
                 raise
+        if timed_out:
+            time.sleep(0.25)
         try:
             err_txt = stderr_path.read_text(encoding="utf-8", errors="replace").strip()[-4000:] or None
         except OSError:
@@ -1526,115 +1568,132 @@ class BulkExtractorRunner:
         duration_ms = int((time.time() - t0) * 1000)
         run_status = "SUCCESS" if exit_code == 0 else "WARNING"
 
-        with self.db_manager.get_lock(self.case_id):
-            conn = self.db_manager.get_connection(self.case_id, read_only=False)
-            cursor = conn.cursor()
-            _ensure_core_audit_tables(cursor)
-            _ensure_be_tables(cursor, reset=True)
+        _be_batch_size = 50_000
+        for _db_attempt in range(4):
+            try:
+                with self.db_manager.get_lock(self.case_id):
+                    conn = self.db_manager.get_connection(self.case_id, read_only=False)
+                    cursor = conn.cursor()
+                    _ensure_core_audit_tables(cursor)
+                    _ensure_be_tables(cursor, reset=True)
 
-            if feature_rows:
-                inserted_fast = False
-                if len(feature_rows) >= 500:
-                    try:
-                        import pyarrow as pa
+                    if feature_rows:
+                        for start_idx in range(0, len(feature_rows), _be_batch_size):
+                            chunk = feature_rows[start_idx : start_idx + _be_batch_size]
+                            inserted_fast = False
+                            if len(chunk) >= 500:
+                                try:
+                                    import pyarrow as pa
 
-                        pa_feat = pa.table(
-                            {
-                                "_row_id": list(range(1, len(feature_rows) + 1)),
-                                "scanner": [r[0] for r in feature_rows],
-                                "offset_str": [r[1] for r in feature_rows],
-                                "feature": [r[2] for r in feature_rows],
-                                "context": [r[3] for r in feature_rows],
-                                "source_file": [r[4] for r in feature_rows],
-                            }
-                        )
-                        cursor.register("_tmp_be_feat", pa_feat)
-                        try:
-                            cursor.execute(
-                                """
-                                INSERT INTO parsed_bulk_extractor_features (
-                                    _row_id, scanner, offset_str, feature, context, source_file
+                                    pa_feat = pa.table(
+                                        {
+                                            "_row_id": list(range(start_idx + 1, start_idx + len(chunk) + 1)),
+                                            "scanner": [r[0] for r in chunk],
+                                            "offset_str": [r[1] for r in chunk],
+                                            "feature": [r[2] for r in chunk],
+                                            "context": [r[3] for r in chunk],
+                                            "source_file": [r[4] for r in chunk],
+                                        }
+                                    )
+                                    cursor.register("_tmp_be_feat", pa_feat)
+                                    try:
+                                        cursor.execute(
+                                            """
+                                            INSERT INTO parsed_bulk_extractor_features (
+                                                _row_id, scanner, offset_str, feature, context, source_file
+                                            )
+                                            SELECT _row_id, scanner, offset_str, feature, context, source_file
+                                            FROM _tmp_be_feat;
+                                            """
+                                        )
+                                        inserted_fast = True
+                                    finally:
+                                        try:
+                                            cursor.unregister("_tmp_be_feat")
+                                        except Exception:
+                                            pass
+                                except Exception:
+                                    inserted_fast = False
+
+                            if not inserted_fast:
+                                numbered_feats = [(start_idx + i + 1, *r) for i, r in enumerate(chunk)]
+                                cursor.executemany(
+                                    """
+                                    INSERT INTO parsed_bulk_extractor_features (
+                                        _row_id, scanner, offset_str, feature, context, source_file
+                                    ) VALUES (?, ?, ?, ?, ?, ?);
+                                    """,
+                                    numbered_feats,
                                 )
-                                SELECT _row_id, scanner, offset_str, feature, context, source_file
-                                FROM _tmp_be_feat;
-                                """
-                            )
-                            inserted_fast = True
-                        finally:
-                            try:
-                                cursor.unregister("_tmp_be_feat")
-                            except Exception:
-                                pass
-                    except Exception:
-                        inserted_fast = False
 
-                if not inserted_fast:
-                    numbered_feats = [(i + 1, *r) for i, r in enumerate(feature_rows)]
-                    cursor.executemany(
-                        """
-                        INSERT INTO parsed_bulk_extractor_features (
-                            _row_id, scanner, offset_str, feature, context, source_file
-                        ) VALUES (?, ?, ?, ?, ?, ?);
-                        """,
-                        numbered_feats,
-                    )
+                    if histogram_rows:
+                        for start_idx in range(0, len(histogram_rows), _be_batch_size):
+                            chunk = histogram_rows[start_idx : start_idx + _be_batch_size]
+                            inserted_hist_fast = False
+                            if len(chunk) >= 500:
+                                try:
+                                    import pyarrow as pa
 
-            if histogram_rows:
-                inserted_hist_fast = False
-                if len(histogram_rows) >= 500:
-                    try:
-                        import pyarrow as pa
+                                    pa_hist = pa.table(
+                                        {
+                                            "_row_id": list(range(start_idx + 1, start_idx + len(chunk) + 1)),
+                                            "scanner": [r[0] for r in chunk],
+                                            "count": [int(r[1]) for r in chunk],
+                                            "feature": [r[2] for r in chunk],
+                                            "source_file": [r[3] for r in chunk],
+                                        }
+                                    )
+                                    cursor.register("_tmp_be_hist", pa_hist)
+                                    try:
+                                        cursor.execute(
+                                            """
+                                            INSERT INTO parsed_bulk_extractor_histograms (
+                                                _row_id, scanner, count, feature, source_file
+                                            )
+                                            SELECT _row_id, scanner, count, feature, source_file
+                                            FROM _tmp_be_hist;
+                                            """
+                                        )
+                                        inserted_hist_fast = True
+                                    finally:
+                                        try:
+                                            cursor.unregister("_tmp_be_hist")
+                                        except Exception:
+                                            pass
+                                except Exception:
+                                    inserted_hist_fast = False
 
-                        pa_hist = pa.table(
-                            {
-                                "_row_id": list(range(1, len(histogram_rows) + 1)),
-                                "scanner": [r[0] for r in histogram_rows],
-                                "count": [int(r[1]) for r in histogram_rows],
-                                "feature": [r[2] for r in histogram_rows],
-                                "source_file": [r[3] for r in histogram_rows],
-                            }
-                        )
-                        cursor.register("_tmp_be_hist", pa_hist)
-                        try:
-                            cursor.execute(
-                                """
-                                INSERT INTO parsed_bulk_extractor_histograms (
-                                    _row_id, scanner, count, feature, source_file
+                            if not inserted_hist_fast:
+                                numbered_hists = [(start_idx + i + 1, *r) for i, r in enumerate(chunk)]
+                                cursor.executemany(
+                                    """
+                                    INSERT INTO parsed_bulk_extractor_histograms (
+                                        _row_id, scanner, count, feature, source_file
+                                    ) VALUES (?, ?, ?, ?, ?);
+                                    """,
+                                    numbered_hists,
                                 )
-                                SELECT _row_id, scanner, count, feature, source_file
-                                FROM _tmp_be_hist;
-                                """
-                            )
-                            inserted_hist_fast = True
-                        finally:
-                            try:
-                                cursor.unregister("_tmp_be_hist")
-                            except Exception:
-                                pass
-                    except Exception:
-                        inserted_hist_fast = False
 
-                if not inserted_hist_fast:
-                    numbered_hists = [(i + 1, *r) for i, r in enumerate(histogram_rows)]
-                    cursor.executemany(
-                        """
-                        INSERT INTO parsed_bulk_extractor_histograms (
-                            _row_id, scanner, count, feature, source_file
-                        ) VALUES (?, ?, ?, ?, ?);
-                        """,
-                        numbered_hists,
+                    self._upsert_registry_and_log(
+                        cursor=cursor,
+                        feat_count=len(feature_rows),
+                        hist_count=len(histogram_rows),
+                        command_executed=cmd_str,
+                        exit_code=exit_code,
+                        duration_ms=duration_ms,
+                        status=run_status,
+                        error_message=stderr_msg if exit_code != 0 else None,
                     )
-
-            self._upsert_registry_and_log(
-                cursor=cursor,
-                feat_count=len(feature_rows),
-                hist_count=len(histogram_rows),
-                command_executed=cmd_str,
-                exit_code=exit_code,
-                duration_ms=duration_ms,
-                status=run_status,
-                error_message=stderr_msg if exit_code != 0 else None,
-            )
+                break
+            except Exception as be_db_exc:
+                err_low = str(be_db_exc).lower()
+                if _db_attempt < 3 and any(
+                    tok in err_low
+                    for tok in ("transactioncontext", "failed to commit", "device is not ready", "could not flush")
+                ):
+                    time.sleep(0.6 * (_db_attempt + 1))
+                    continue
+                raise
 
         return {
             "status": run_status,

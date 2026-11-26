@@ -700,7 +700,16 @@ class BaseParser:
         self._resolved_source_type: Optional[str] = self.source_type
         self._source_type_checked: bool = self.source_type is not None
         self._vfs_staged_cache: Optional[Dict[str, Dict[str, Any]]] = None
+        self._vfs_path_cache_map: Optional[Dict[str, Dict[str, Any]]] = None
+        self._vfs_cache_attempted: bool = False
+        self._vfs_cache_row_count: int = -1
+        self._vfs_empty_checked_at: float = 0.0
         self._vfs_part_labels_cache: Optional[Set[str]] = None
+        self._mft_index_cache: Optional[Dict[str, List[Tuple[str, str, Optional[int]]]]] = None
+        self._mft_cache_attempted: bool = False
+        self._mft_cache_row_count: int = -1
+        self._mft_empty_checked_at: float = 0.0
+        self._cache_lock = threading.Lock()
         self._last_log_msg: Optional[str] = None
 
         with self.db_manager.get_lock(self.case_id):
@@ -860,6 +869,44 @@ class BaseParser:
         append: bool = False,
     ) -> int:
         clean_table = _validate_identifier(table_name)
+        last_err: Optional[Exception] = None
+        for attempt in range(4):
+            try:
+                return self._insert_records_once(
+                    clean_table=clean_table,
+                    records=records,
+                    schema_ddl=schema_ddl,
+                    artifact_id=artifact_id,
+                    category=category,
+                    display_name=display_name,
+                    source_tool=source_tool,
+                    append=append,
+                )
+            except Exception as exc:
+                last_err = exc
+                err_low = str(exc).lower()
+                if attempt < 3 and any(
+                    tok in err_low
+                    for tok in ("transactioncontext", "failed to commit", "device is not ready", "could not flush")
+                ):
+                    time.sleep(0.5 * (attempt + 1))
+                    continue
+                raise
+        if last_err is not None:
+            raise last_err
+        return 0
+
+    def _insert_records_once(
+        self,
+        clean_table: str,
+        records: List[Dict[str, Any]],
+        schema_ddl: Optional[str] = None,
+        artifact_id: Optional[str] = None,
+        category: Optional[str] = None,
+        display_name: Optional[str] = None,
+        source_tool: Optional[str] = None,
+        append: bool = False,
+    ) -> int:
         with self.db_manager.get_lock(self.case_id):
             conn = self.db_manager.get_connection(self.case_id, read_only=False)
             self.conn = conn
@@ -1095,64 +1142,83 @@ class BaseParser:
         return vp
 
     def _get_vfs_staged_cache(self) -> Optional[Dict[str, Dict[str, Any]]]:
-        if self._vfs_staged_cache is not None:
+        if self._vfs_staged_cache is not None and self._vfs_cache_row_count > 500:
             return self._vfs_staged_cache
-        try:
-            with self.db_manager.get_lock(self.case_id):
-                conn = self.db_manager.get_connection(self.case_id, read_only=False)
-                self.conn = conn
-                cur = conn.cursor()
-                has_vfs = (
-                    cur.execute(
-                        "SELECT 1 FROM information_schema.tables WHERE table_schema = 'main' AND table_name = 'vfs_files' LIMIT 1;"
-                    ).fetchone()
-                    is not None
-                )
-                if not has_vfs:
-                    return None
-                cnt_row = cur.execute('SELECT COUNT(*) FROM "vfs_files";').fetchone()
-                if not cnt_row or int(cnt_row[0] or 0) <= 500:
-                    return None
-                vfs_cols = {
-                    str(r[0]).lower(): str(r[0])
-                    for r in cur.execute('DESCRIBE "vfs_files";').fetchall()
-                }
-                if "staged_rel_path" not in vfs_cols:
-                    return None
-                q_staged = _quote_sql_ident(vfs_cols["staged_rel_path"])
-                want_keys = (
-                    "vfs_path",
-                    "si_modified",
-                    "si_modified_utc",
-                    "fn_modified",
-                    "fn_modified_utc",
-                    "si_created",
-                    "si_created_utc",
-                    "fn_created",
-                    "fn_created_utc",
-                )
-                sel_exprs = [q_staged] + [
-                    _quote_sql_ident(vfs_cols[k]) if k in vfs_cols else "NULL"
-                    for k in want_keys
-                ]
-                rows = cur.execute(
-                    f'SELECT {", ".join(sel_exprs)} FROM "vfs_files" WHERE {q_staged} IS NOT NULL;'
-                ).fetchall()
-                cache: Dict[str, Dict[str, Any]] = {}
-                for r in rows:
-                    srp = r[0]
-                    if not srp:
-                        continue
-                    norm_k = str(srp).replace("\\", "/").strip("/").lower()
-                    if norm_k and norm_k not in cache:
+        with self._cache_lock:
+            if self._vfs_staged_cache is not None and self._vfs_cache_row_count > 500:
+                return self._vfs_staged_cache
+            if (
+                self._vfs_staged_cache is None
+                and self._vfs_empty_checked_at > 0.0
+                and (time.monotonic() - self._vfs_empty_checked_at) < 2.0
+            ):
+                return None
+            try:
+                with self.db_manager.get_lock(self.case_id):
+                    conn = self.db_manager.get_connection(self.case_id, read_only=False)
+                    self.conn = conn
+                    cur = conn.cursor()
+                    has_vfs = (
+                        cur.execute(
+                            "SELECT 1 FROM information_schema.tables WHERE table_schema = 'main' AND table_name = 'vfs_files' LIMIT 1;"
+                        ).fetchone()
+                        is not None
+                    )
+                    if not has_vfs:
+                        self._vfs_empty_checked_at = time.monotonic()
+                        return None
+                    cnt_row = cur.execute('SELECT COUNT(*) FROM "vfs_files";').fetchone()
+                    cur_cnt = int(cnt_row[0] or 0) if cnt_row else 0
+                    if cur_cnt == 0:
+                        self._vfs_empty_checked_at = time.monotonic()
+                        return None
+                    if self._vfs_staged_cache is not None and self._vfs_cache_row_count == cur_cnt:
+                        return self._vfs_staged_cache
+                    vfs_cols = {
+                        str(r[0]).lower(): str(r[0])
+                        for r in cur.execute('DESCRIBE "vfs_files";').fetchall()
+                    }
+                    q_staged = _quote_sql_ident(vfs_cols["staged_rel_path"]) if "staged_rel_path" in vfs_cols else "NULL"
+                    want_keys = (
+                        "vfs_path",
+                        "si_modified",
+                        "si_modified_utc",
+                        "fn_modified",
+                        "fn_modified_utc",
+                        "si_created",
+                        "si_created_utc",
+                        "fn_created",
+                        "fn_created_utc",
+                    )
+                    sel_exprs = [q_staged] + [
+                        _quote_sql_ident(vfs_cols[k]) if k in vfs_cols else "NULL"
+                        for k in want_keys
+                    ]
+                    rows = cur.execute(
+                        f'SELECT {", ".join(sel_exprs)} FROM "vfs_files";'
+                    ).fetchall()
+                    cache: Dict[str, Dict[str, Any]] = {}
+                    vp_cache: Dict[str, Dict[str, Any]] = {}
+                    for r in rows:
+                        srp = r[0]
                         entry: Dict[str, Any] = {want_keys[idx]: r[idx + 1] for idx in range(len(want_keys))}
-                        cache[norm_k] = entry
-                        if not norm_k.startswith("staging/"):
-                            cache.setdefault(f"staging/{norm_k}", entry)
-                self._vfs_staged_cache = cache
-                return cache
-        except Exception:
-            return None
+                        if srp:
+                            norm_k = str(srp).replace("\\", "/").strip("/").lower()
+                            if norm_k and norm_k not in cache:
+                                cache[norm_k] = entry
+                                if not norm_k.startswith("staging/"):
+                                    cache.setdefault(f"staging/{norm_k}", entry)
+                        vp_raw = entry.get("vfs_path")
+                        if vp_raw:
+                            norm_vp = str(vp_raw).strip().replace("/", "\\").lower()
+                            if norm_vp and norm_vp not in vp_cache:
+                                vp_cache[norm_vp] = entry
+                    self._vfs_path_cache_map = vp_cache
+                    self._vfs_cache_row_count = cur_cnt
+                    self._vfs_staged_cache = cache
+                    return cache
+            except Exception:
+                return None
 
     def _lookup_vfs_files_path(
         self, raw_rel_posix: Optional[str], inner_rel_posix: Optional[str], vss_idx: Optional[int]
@@ -1461,6 +1527,90 @@ class BaseParser:
 
         return None, None, False
 
+    def _get_mft_index_cache(self) -> Optional[Dict[str, List[Tuple[str, str, Optional[int]]]]]:
+        if self._mft_index_cache is not None and self._mft_cache_row_count > 500:
+            return self._mft_index_cache
+        with self._cache_lock:
+            if self._mft_index_cache is not None and self._mft_cache_row_count > 500:
+                return self._mft_index_cache
+            if (
+                self._mft_index_cache is None
+                and self._mft_empty_checked_at > 0.0
+                and (time.monotonic() - self._mft_empty_checked_at) < 2.0
+            ):
+                return None
+            try:
+                with self.db_manager.get_lock(self.case_id):
+                    conn = self.db_manager.get_connection(self.case_id, read_only=False)
+                    self.conn = conn
+                    cur = conn.cursor()
+                    has_mft = (
+                        cur.execute(
+                            "SELECT 1 FROM information_schema.tables WHERE table_schema = 'main' AND table_name = 'raw_mft' LIMIT 1;"
+                        ).fetchone()
+                        is not None
+                    )
+                    if not has_mft:
+                        self._mft_empty_checked_at = time.monotonic()
+                        return None
+                    cnt_row = cur.execute('SELECT COUNT(*) FROM "raw_mft";').fetchone()
+                    cur_cnt = int(cnt_row[0] or 0) if cnt_row else 0
+                    if cur_cnt == 0:
+                        self._mft_empty_checked_at = time.monotonic()
+                        return None
+                    if self._mft_index_cache is not None and self._mft_cache_row_count == cur_cnt:
+                        return self._mft_index_cache
+
+                    mft_cols = {
+                        str(r[0]).lower(): str(r[0])
+                        for r in cur.execute('DESCRIBE "raw_mft";').fetchall()
+                    }
+                    pp_col = _quote_sql_ident(mft_cols.get("parentpath", "ParentPath"))
+                    fn_col = _quote_sql_ident(mft_cols.get("filename", "FileName"))
+                    fs_expr = (
+                        f"TRY_CAST({_quote_sql_ident(mft_cols['filesize'])} AS BIGINT)"
+                        if "filesize" in mft_cols
+                        else "NULL"
+                    )
+                    order_expr = (
+                        f"{_quote_sql_ident(mft_cols['lastmodified0x10'])} DESC NULLS LAST"
+                        if "lastmodified0x10" in mft_cols
+                        else "1"
+                    )
+                    rows = cur.execute(
+                        f"""
+                        SELECT {pp_col}, {fn_col}, {fs_expr} AS fsize
+                        FROM "raw_mft"
+                        WHERE {fn_col} IS NOT NULL
+                          AND {pp_col} IS NOT NULL
+                          AND LOWER({pp_col}) NOT LIKE '%$recycle.bin%'
+                          AND LOWER({pp_col}) NOT LIKE '%__part%'
+                        ORDER BY {order_expr};
+                        """
+                    ).fetchall()
+                    idx_map: Dict[str, List[Tuple[str, str, Optional[int]]]] = {}
+                    for raw_pp, mft_fname, mft_fsize in rows:
+                        if not raw_pp or not mft_fname:
+                            continue
+                        fn_str = str(mft_fname)
+                        fn_low = fn_str.lower()
+                        cleaned_pp = str(raw_pp).rstrip("/\\")
+                        combined_raw = f"{cleaned_pp}\\{fn_str}"
+                        norm_full = self._format_vfs_windows_path(combined_raw)
+                        norm_parent = norm_full.rsplit("\\", 1)[0]
+                        idx_map.setdefault(fn_low, []).append(
+                            (
+                                norm_parent,
+                                fn_str,
+                                int(mft_fsize) if mft_fsize is not None else None,
+                            )
+                        )
+                    self._mft_cache_row_count = cur_cnt
+                    self._mft_index_cache = idx_map
+                    return idx_map
+            except Exception:
+                return None
+
     def _lookup_parent_aware_mft(
         self,
         fname: str,
@@ -1483,130 +1633,73 @@ class BaseParser:
             return None
 
         try:
-            with self.db_manager.get_lock(self.case_id):
-                conn = self.db_manager.get_connection(self.case_id, read_only=False)
-                self.conn = conn
-                cur = conn.cursor()
-                has_mft = (
-                    cur.execute(
-                        "SELECT 1 FROM information_schema.tables WHERE table_schema = 'main' AND table_name = 'raw_mft' LIMIT 1;"
-                    ).fetchone()
-                    is not None
-                )
-                if not has_mft:
-                    return None
+            mft_cache = self._get_mft_index_cache()
+            if mft_cache is None:
+                return None
+            candidates = mft_cache.get(fname_low, [])
+            if not candidates:
+                return None
 
-                mft_cols = {
-                    str(r[0]).lower(): str(r[0])
-                    for r in cur.execute('DESCRIBE "raw_mft";').fetchall()
-                }
-                pp_col = _quote_sql_ident(mft_cols.get("parentpath", "ParentPath"))
-                fn_col = _quote_sql_ident(mft_cols.get("filename", "FileName"))
-                fs_expr = (
-                    f"TRY_CAST({_quote_sql_ident(mft_cols['filesize'])} AS BIGINT)"
-                    if "filesize" in mft_cols
-                    else "NULL"
-                )
-                order_expr = (
-                    f"{_quote_sql_ident(mft_cols['lastmodified0x10'])} DESC NULLS LAST"
-                    if "lastmodified0x10" in mft_cols
-                    else "1"
-                )
-
-                rows = cur.execute(
-                    f"""
-                    SELECT {pp_col}, {fn_col}, {fs_expr} AS fsize
-                    FROM "raw_mft"
-                    WHERE LOWER({fn_col}) = LOWER(?)
-                      AND {pp_col} IS NOT NULL
-                      AND LOWER({pp_col}) NOT LIKE '%$recycle.bin%'
-                      AND LOWER({pp_col}) NOT LIKE '%__part%'
-                    ORDER BY {order_expr};
-                    """,
-                    [fname],
-                ).fetchall()
-                if not rows:
-                    return None
-
-                candidates: List[Tuple[str, str, Optional[int]]] = []
-                for raw_pp, mft_fname, mft_fsize in rows:
-                    if not raw_pp:
-                        continue
-                    cleaned_pp = str(raw_pp).rstrip("/\\")
-                    combined_raw = f"{cleaned_pp}\\{mft_fname}"
-                    norm_full = self._format_vfs_windows_path(combined_raw)
-                    norm_parent = norm_full.rsplit("\\", 1)[0]
-                    candidates.append(
-                        (
-                            norm_parent,
-                            str(mft_fname),
-                            int(mft_fsize) if mft_fsize is not None else None,
-                        )
-                    )
-
-                if not candidates:
-                    return None
-
-                if parent_hint:
-                    hint_norm = parent_hint.strip("\\/").replace("/", "\\").lower()
-                    matched = [
-                        c
-                        for c in candidates
-                        if c[0].lower().endswith("\\" + hint_norm)
-                        or c[0].lower().endswith(":\\" + hint_norm)
-                        or ("\\" + hint_norm + "\\") in (c[0].lower() + "\\")
-                    ]
-                    if not matched:
-                        # Also support multi-token non-contiguous hints like "Alice\Profile 1"
-                        hint_tokens = [tok for tok in hint_norm.split("\\") if tok]
-                        if len(hint_tokens) >= 2:
-                            def _subseq_match(parent_low: str) -> bool:
-                                p_segs = [seg for seg in parent_low.split("\\") if seg]
-                                pos = 0
-                                for tok in hint_tokens:
-                                    found = False
-                                    while pos < len(p_segs):
-                                        if p_segs[pos] == tok:
-                                            found = True
-                                            pos += 1
-                                            break
+            if parent_hint:
+                hint_norm = parent_hint.strip("\\/").replace("/", "\\").lower()
+                matched = [
+                    c
+                    for c in candidates
+                    if c[0].lower().endswith("\\" + hint_norm)
+                    or c[0].lower().endswith(":\\" + hint_norm)
+                    or ("\\" + hint_norm + "\\") in (c[0].lower() + "\\")
+                ]
+                if not matched:
+                    # Also support multi-token non-contiguous hints like "Alice\Profile 1"
+                    hint_tokens = [tok for tok in hint_norm.split("\\") if tok]
+                    if len(hint_tokens) >= 2:
+                        def _subseq_match(parent_low: str) -> bool:
+                            p_segs = [seg for seg in parent_low.split("\\") if seg]
+                            pos = 0
+                            for tok in hint_tokens:
+                                found = False
+                                while pos < len(p_segs):
+                                    if p_segs[pos] == tok:
+                                        found = True
                                         pos += 1
-                                    if not found:
-                                        return False
-                                return True
+                                        break
+                                    pos += 1
+                                if not found:
+                                    return False
+                            return True
 
-                            matched = [c for c in candidates if _subseq_match(c[0].lower())]
-                    if not matched:
-                        return None
-                    if file_size is not None and file_size > 0:
-                        size_matched = [c for c in matched if c[2] == int(file_size)]
-                        if len(size_matched) == 1:
-                            win_p = f"{size_matched[0][0]}\\{size_matched[0][1]}"
-                            return f"[VSS#{vss_idx}] {win_p}" if vss_idx is not None else win_p
-                        if len(size_matched) > 1:
-                            matched = size_matched
-                    unique_dirs = {c[0].lower() for c in matched}
-                    if len(unique_dirs) == 1:
-                        win_p = f"{matched[0][0]}\\{matched[0][1]}"
-                        return f"[VSS#{vss_idx}] {win_p}" if vss_idx is not None else win_p
-                    if is_generic:
-                        return None
-                    win_p = f"{matched[0][0]}\\{matched[0][1]}"
-                    return f"[VSS#{vss_idx}] {win_p}" if vss_idx is not None else win_p
-
-                # No parent_hint (already guaranteed `not is_generic`)
+                        matched = [c for c in candidates if _subseq_match(c[0].lower())]
+                if not matched:
+                    return None
                 if file_size is not None and file_size > 0:
-                    size_matched = [c for c in candidates if c[2] == int(file_size)]
-                    if len({c[0].lower() for c in size_matched}) == 1 and size_matched:
+                    size_matched = [c for c in matched if c[2] == int(file_size)]
+                    if len(size_matched) == 1:
                         win_p = f"{size_matched[0][0]}\\{size_matched[0][1]}"
                         return f"[VSS#{vss_idx}] {win_p}" if vss_idx is not None else win_p
-
-                unique_dirs = {c[0].lower() for c in candidates}
+                    if len(size_matched) > 1:
+                        matched = size_matched
+                unique_dirs = {c[0].lower() for c in matched}
                 if len(unique_dirs) == 1:
-                    win_p = f"{candidates[0][0]}\\{candidates[0][1]}"
+                    win_p = f"{matched[0][0]}\\{matched[0][1]}"
+                    return f"[VSS#{vss_idx}] {win_p}" if vss_idx is not None else win_p
+                if is_generic:
+                    return None
+                win_p = f"{matched[0][0]}\\{matched[0][1]}"
+                return f"[VSS#{vss_idx}] {win_p}" if vss_idx is not None else win_p
+
+            # No parent_hint (already guaranteed `not is_generic`)
+            if file_size is not None and file_size > 0:
+                size_matched = [c for c in candidates if c[2] == int(file_size)]
+                if len({c[0].lower() for c in size_matched}) == 1 and size_matched:
+                    win_p = f"{size_matched[0][0]}\\{size_matched[0][1]}"
                     return f"[VSS#{vss_idx}] {win_p}" if vss_idx is not None else win_p
 
-                return None
+            unique_dirs = {c[0].lower() for c in candidates}
+            if len(unique_dirs) == 1:
+                win_p = f"{candidates[0][0]}\\{candidates[0][1]}"
+                return f"[VSS#{vss_idx}] {win_p}" if vss_idx is not None else win_p
+
+            return None
         except Exception:
             return None
 
@@ -1846,8 +1939,13 @@ class BaseParser:
                 hit = staged_cache.get(rc)
                 if hit is not None:
                     return tuple(hit.get(ck) for ck in col_keys)
-            if rel_candidates:
-                return None
+            vp_map = self._vfs_path_cache_map
+            if vp_map is not None:
+                for vc in vfs_cands:
+                    hit = vp_map.get(vc)
+                    if hit is not None:
+                        return tuple(hit.get(ck) for ck in col_keys)
+            return None
         try:
             with self.db_manager.get_lock(self.case_id):
                 conn = self.db_manager.get_connection(self.case_id, read_only=False)

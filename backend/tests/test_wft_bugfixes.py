@@ -235,3 +235,165 @@ def test_ui_excludes_event_logs_from_artifacts_and_exposes_bulk_extractor_tab() 
     assert "a.table_name !== 'parsed_bulk_extractor_features'" in sidebar_src
     assert "onNavigateToExamine()" in wizard_src
 
+
+def test_large_case_resilience_mft_cache_csv_fallback_regripper_timeout_and_hindsight_cache(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """
+    Regression verification for 430GB E01 Remcos failure root causes:
+    1. BaseParser caches vfs_files (any non-zero row count) and raw_mft in-memory index so resolve_evidence_path
+       and get_original_mtime/get_original_ctime do not re-query DuckDB per file.
+    2. EZToolRunner.ingest_csv_files falls back to explicit CSV dialect (read_csv with strict_mode=false,
+       null_padding=true, ignore_errors=true) when a timed-out tool (e.g. EvtxECmd) leaves a truncated CSV tail.
+    3. RegRipperRunner._invoke_rip_on_hive salvages partial stdout on subprocess.TimeoutExpired instead of
+       discarding all plugin reports from a large UsrClass.dat hive.
+    4. EZToolRunner._profile_has_broken_chromium_cache detects incomplete Cache_Data (index present, data_3 missing)
+       upfront so Hindsight runs once with profile_nocache.
+    5. BulkExtractorRunner._open_be_text_with_retry retries transient PermissionError ([Errno 13] Permission denied).
+    6. DuckDBManager.get_connection recovers a connection stuck in an aborted transaction.
+    """
+    import subprocess
+    from backend.orchestrator.ez_runner import EZToolRunner
+    from backend.orchestrator.regripper_runner import RegRipperRunner
+    from backend.parsers.base_parser import BaseParser
+
+    case_id = "test_remcos_resilience"
+    case_dir = (tmp_path / case_id).resolve()
+    staging_dir = case_dir / "staging"
+    staging_dir.mkdir(parents=True, exist_ok=True)
+    register_case_dir(case_id, case_dir)
+    init_case_db(case_id)
+
+    try:
+        # 1. Seed vfs_files (small row count <= 500) and raw_mft, verify BaseParser caches both in memory
+        with DuckDBManager.get_lock(case_id):
+            conn = DuckDBManager.get_connection(case_id, read_only=False)
+            cur = conn.cursor()
+            cur.execute(
+                """
+                INSERT INTO vfs_files (
+                    _row_id, part_index, vfs_path, file_name, is_directory,
+                    si_modified, si_created, staged_rel_path
+                ) VALUES (
+                    1, 1, '\\Users\\2304432\\Downloads\\payload.exe', 'payload.exe', FALSE,
+                    '2025-10-15 12:30:00', '2025-10-15 12:00:00',
+                    'UserFiles/2304432/Downloads/payload.exe'
+                );
+                """
+            )
+            cur.execute(
+                """
+                CREATE OR REPLACE TABLE raw_mft (
+                    _row_id BIGINT,
+                    ParentPath VARCHAR,
+                    FileName VARCHAR,
+                    FileSize VARCHAR,
+                    LastModified0x10 VARCHAR
+                );
+                INSERT INTO raw_mft VALUES (
+                    1, '.\\Users\\2304432\\Desktop', 'remcos_agent.bin', '4096', '2025-10-15 13:00:00'
+                );
+                """
+            )
+
+        bp = BaseParser(case_id=case_id, staging_dir=staging_dir, source_type="image")
+        staged_p = staging_dir / "UserFiles" / "2304432" / "Downloads" / "payload.exe"
+        assert bp.resolve_evidence_path(staged_p) == "C:\\Users\\2304432\\Downloads\\payload.exe"
+        assert bp.get_original_mtime(staged_p) == "2025-10-15 12:30:00"
+        assert bp._vfs_staged_cache is not None
+
+        mft_only_p = staging_dir / "Enrichment" / "remcos_agent.bin"
+        assert bp.resolve_evidence_path(mft_only_p, file_size=4096) == "C:\\Users\\2304432\\Desktop\\remcos_agent.bin"
+        assert bp._mft_index_cache is not None
+        assert "remcos_agent.bin" in bp._mft_index_cache
+
+        # 2. Verify DuckDBManager recovers an open transaction on cached connection
+        with DuckDBManager.get_lock(case_id):
+            c1 = DuckDBManager.get_connection(case_id, read_only=False)
+            healthy = DuckDBManager._ensure_healthy_cached_conn(
+                case_id=case_id,
+                db_path=case_dir / "case.duckdb",
+                db_key=str((case_dir / "case.duckdb").resolve()).lower(),
+                conn=c1,
+                read_only=False,
+                threads=4,
+            )
+            assert healthy.cursor().execute("SELECT 1;").fetchone()[0] == 1
+
+        # 3. Verify EZToolRunner.ingest_csv_files handles a truncated/malformed CSV without crashing
+        ez = EZToolRunner(case_id=case_id)
+        trunc_csv = case_dir / "csv_out" / "evtx" / "evtx.csv"
+        trunc_csv.parent.mkdir(parents=True, exist_ok=True)
+        trunc_csv.write_text(
+            'RecordNumber,EventId,Channel,Payload\n'
+            '1,4624,Security,"{\\"EventData\\":\\"Logon\\"}"\n'
+            '2,4688,Security,"{\\"TruncatedPayloadWithoutClosingQuote\n',
+            encoding="utf-8",
+        )
+        ingested_cnt = ez.ingest_csv_file(
+            csv_path=trunc_csv,
+            table_name="raw_evtx",
+            category="EVENT LOGS",
+            display_name="Windows Event Logs",
+            source_tool="EvtxECmd.exe",
+            artifact_id="os_evtx",
+        )
+        assert ingested_cnt >= 1
+
+        # 4. Verify EZToolRunner._profile_has_broken_chromium_cache detects missing data_3
+        prof_dir = staging_dir / "Browsers" / "Edge" / "2304432" / "Default"
+        cache_data = prof_dir / "Cache" / "Cache_Data"
+        cache_data.mkdir(parents=True, exist_ok=True)
+        (cache_data / "index").write_bytes(b"idx" * 32)
+        (cache_data / "data_0").write_bytes(b"d0" * 32)
+        (cache_data / "data_1").write_bytes(b"d1" * 32)
+        (cache_data / "data_2").write_bytes(b"d2" * 32)
+        assert EZToolRunner._profile_has_broken_chromium_cache(prof_dir) is True
+        (cache_data / "data_3").write_bytes(b"d3" * 32)
+        assert EZToolRunner._profile_has_broken_chromium_cache(prof_dir) is False
+
+        # 5. Verify RegRipperRunner._invoke_rip_on_hive salvages partial stdout on TimeoutExpired
+        partial_rip_out = (
+            "----------------------------------------\n"
+            "shellbags v.20200428\n"
+            "(USRCLASS) Parse ShellBags\n"
+            "MITRE: T1083\n"
+            "C:\\Users\\3185999\\Desktop\\Remcos\n"
+            "----------------------------------------\n"
+        )
+
+        def _fake_timeout_run(*args, **kwargs):
+            raise subprocess.TimeoutExpired(
+                cmd=args[0],
+                timeout=600,
+                output=partial_rip_out,
+                stderr="plugin hung",
+            )
+
+        monkeypatch.setattr(subprocess, "run", _fake_timeout_run)
+        proc_rr, salvaged_out = RegRipperRunner._invoke_rip_on_hive(
+            Path("rip.exe"), Path("UsrClass.dat"), "USRCLASS"
+        )
+        assert proc_rr.returncode == 0
+        assert "shellbags v.20200428" in salvaged_out
+
+        # 6. Verify BulkExtractorRunner._open_be_text_with_retry retries transient PermissionError
+        be_feat = case_dir / "domain.txt"
+        be_feat.write_text("1024\texample.com\tcontext\n", encoding="utf-8")
+        real_open = open
+        attempts = {"cnt": 0}
+
+        def _flaky_open(file, *args, **kwargs):
+            if Path(file) == be_feat and attempts["cnt"] < 2:
+                attempts["cnt"] += 1
+                raise PermissionError(13, "Permission denied", str(file))
+            return real_open(file, *args, **kwargs)
+
+        monkeypatch.setattr("builtins.open", _flaky_open)
+        with BulkExtractorRunner._open_be_text_with_retry(be_feat) as fh:
+            assert "example.com" in fh.read()
+        assert attempts["cnt"] == 2
+    finally:
+        DuckDBManager.close_connection(case_id)
+
+

@@ -81,13 +81,29 @@ def _file_digest_key(path: Path) -> Tuple[int, str]:
     return (st.st_size, h.hexdigest())
 
 
+_NON_SQLITE_EXTS: Set[str] = {
+    ".exe", ".dll", ".sys", ".mui", ".cat", ".nls", ".pf", ".evtx", ".etl",
+    ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".ico", ".tif", ".tiff",
+    ".mp4", ".mp3", ".wav", ".avi", ".mov", ".mkv", ".flac", ".ogg", ".webm",
+    ".pdf", ".docx", ".docm", ".xlsx", ".xlsm", ".pptx", ".pptm", ".doc", ".xls", ".ppt",
+    ".txt", ".csv", ".rtf", ".html", ".htm", ".xml", ".json", ".jsonl", ".js", ".css",
+    ".ps1", ".bat", ".cmd", ".vbs", ".py", ".sh", ".ini", ".cfg", ".conf", ".reg",
+    ".lnk", ".url", ".zip", ".7z", ".rar", ".gz", ".tar", ".cab", ".msi",
+    ".hve", ".regtrans-ms", ".blf", ".log1", ".log2", ".ttf", ".otf", ".woff", ".woff2",
+    ".duckdb", ".pak", ".asar", ".vdm", ".eml", ".msg", ".pst", ".ost", ".mbox",
+}
+
+
 def _is_sqlite3_file(path: Path) -> bool:
-    """Verify 16-byte SQLite3 magic header, excluding WAL/SHM/journal sidecars."""
+    """Verify 16-byte SQLite3 magic header, excluding WAL/SHM/journal sidecars and known non-SQLite extensions."""
     try:
-        if not path.is_file():
-            return False
         low_name = path.name.lower()
         if low_name.endswith(("-wal", "-shm", "-journal", ".wal", ".shm", ".journal")):
+            return False
+        dot_idx = low_name.rfind(".")
+        if dot_idx != -1 and low_name[dot_idx:] in _NON_SQLITE_EXTS:
+            return False
+        if not path.is_file():
             return False
         if path.stat().st_size < 100:
             return False
@@ -818,6 +834,42 @@ class EZToolRunner:
             f"[EZToolRunner] Ingesting {len(valid_csvs)} CSV(s) -> Table: '{table_name}'"
         )
 
+        for _csv_attempt in range(4):
+            try:
+                return self._ingest_csv_files_once(
+                    valid_csvs=valid_csvs,
+                    src_expr=src_expr,
+                    union_opt=union_opt,
+                    table_name=table_name,
+                    category=category,
+                    display_name=display_name,
+                    source_tool=source_tool,
+                    artifact_id=artifact_id,
+                    start_time=start_time,
+                )
+            except Exception as csv_exc:
+                err_low = str(csv_exc).lower()
+                if _csv_attempt < 3 and any(
+                    tok in err_low
+                    for tok in ("transactioncontext", "failed to commit", "device is not ready", "could not flush")
+                ):
+                    time.sleep(0.5 * (_csv_attempt + 1))
+                    continue
+                raise
+        return 0
+
+    def _ingest_csv_files_once(
+        self,
+        valid_csvs: List[Path],
+        src_expr: str,
+        union_opt: str,
+        table_name: str,
+        category: str,
+        display_name: str,
+        source_tool: str,
+        artifact_id: str,
+        start_time: float,
+    ) -> int:
         with DuckDBManager.get_lock(self.case_id):
             conn = DuckDBManager.get_connection(self.case_id, read_only=False)
             cursor = conn.cursor()
@@ -844,7 +896,26 @@ class EZToolRunner:
                     *
                 FROM read_csv_auto({src_expr}{union_opt}, ignore_errors=true, sample_size=-1, all_varchar=true);
                 """
-                cursor.execute(fallback_sql)
+                try:
+                    cursor.execute(fallback_sql)
+                except Exception as fb_exc:
+                    print(
+                        f"[EZToolRunner] Warning: read_csv_auto fallback failed ({fb_exc}). Retrying with explicit CSV dialect..."
+                    )
+                    explicit_csv_sql = f"""
+                    CREATE OR REPLACE TABLE "{table_name}" AS
+                    SELECT
+                        row_number() OVER () AS _row_id,
+                        *
+                    FROM read_csv({src_expr}{union_opt}, delim=',', quote='"', escape='"', header=true, ignore_errors=true, null_padding=true, strict_mode=false, all_varchar=true);
+                    """
+                    try:
+                        cursor.execute(explicit_csv_sql)
+                    except Exception as exp_exc:
+                        print(
+                            f"[EZToolRunner] Warning: explicit read_csv failed for '{table_name}' ({exp_exc}); skipping CSV ingestion."
+                        )
+                        return 0
 
             count_row = cursor.execute(f'SELECT COUNT(*) FROM "{table_name}";').fetchone()
             row_count = int(count_row[0]) if count_row else 0
@@ -1666,7 +1737,7 @@ class EZToolRunner:
             "evtx.csv",
         ]
 
-        self._execute_subprocess("EvtxECmd", cmd, timeout=600)
+        self._execute_subprocess("EvtxECmd", cmd, timeout=1800)
         res = self.ingest_csv_directory("evtx", out_dir)
         try:
             with DuckDBManager.get_lock(self.case_id):
@@ -2110,15 +2181,13 @@ class EZToolRunner:
                             seen_digests.add(dkey)
                             targets.append(f.resolve())
         else:
-            candidate_roots = [
+            primary_roots = [
                 self.staging_dir / "ActivitiesCache",
                 self.staging_dir / "Timeline",
-                self.staging_dir / "UserFiles",
                 self.staging_dir / "SQLite",
                 self.staging_dir / "VSS",
-                self.staging_dir,
             ]
-            for root in candidate_roots:
+            for root in primary_roots:
                 if not root.exists():
                     continue
                 if root.is_file() and root.name.lower() == "activitiescache.db":
@@ -2130,9 +2199,40 @@ class EZToolRunner:
                         seen_digests.add(dkey)
                         targets.append(root.resolve())
                 elif root.is_dir():
-                    for f in sorted(root.rglob("*"), key=lambda x: str(x).lower()):
-                        if f.is_file() and f.name.lower() == "activitiescache.db" and f.stat().st_size > 0:
+                    for walk_root, _dirs, files in os.walk(root):
+                        for fname in sorted(files):
+                            if fname.lower() == "activitiescache.db":
+                                f = Path(walk_root) / fname
+                                try:
+                                    if f.stat().st_size <= 0:
+                                        continue
+                                    dkey = _file_digest_key(f)
+                                except OSError:
+                                    continue
+                                if dkey not in seen_digests:
+                                    seen_digests.add(dkey)
+                                    targets.append(f.resolve())
+
+            if not targets and self.staging_dir.exists():
+                staging_res = self.staging_dir.resolve()
+                _SKIP_WXT_ROOTS = {
+                    "activitiescache", "timeline", "sqlite", "vss",
+                    "registry", "logs", "prefetch", "filesystem", "mft", "srum",
+                    "jumplists", "tasks", "powershell", "rmm", "carved_thumbnails",
+                    "zoneidentifier", "recyclebin", "wbem", "wer", "wlan", "usb",
+                    "browsers", "chat", "cloud", "mail", "media", "documents",
+                    "notifications",
+                }
+                for walk_root, dirs, files in os.walk(staging_res):
+                    root_p = Path(walk_root)
+                    if root_p == staging_res:
+                        dirs[:] = [d for d in dirs if d.lower() not in _SKIP_WXT_ROOTS]
+                    for fname in sorted(files):
+                        if fname.lower() == "activitiescache.db":
+                            f = root_p / fname
                             try:
+                                if f.stat().st_size <= 0:
+                                    continue
                                 dkey = _file_digest_key(f)
                             except OSError:
                                 continue
@@ -2303,11 +2403,12 @@ class EZToolRunner:
                 "StickyNotes",
                 "Cloud",
                 "Chat",
-                "UserFiles",
-                "Enrichment",
                 "VSS",
             ):
                 _collect_from(self.staging_dir / sub_name, recursive=True)
+            if not unique_dbs:
+                for sub_name in ("UserFiles", "Enrichment"):
+                    _collect_from(self.staging_dir / sub_name, recursive=True)
             _collect_from(self.staging_dir, recursive=False)
 
         if not unique_dbs:
@@ -2442,19 +2543,34 @@ class EZToolRunner:
         """
         target = Path(rfc_file).resolve() if rfc_file else None
         if target is None or not target.exists():
+            _SKIP_RFC_ROOTS = {
+                "logs", "prefetch", "filesystem", "mft", "srum",
+                "jumplists", "tasks", "powershell", "rmm", "carved_thumbnails",
+                "zoneidentifier", "recyclebin", "wbem", "wer", "wlan", "usb",
+                "browsers", "chat", "cloud", "mail", "media", "documents",
+                "notifications", "activitiescache", "sqlite", "userfiles",
+            }
             for search_root in [
                 self.staging_dir / "RecentFileCache.bcf",
                 self.staging_dir / "Registry" / "RecentFileCache.bcf",
                 self.staging_dir / "AppCompat" / "Programs" / "RecentFileCache.bcf",
+                self.staging_dir / "Registry",
+                self.staging_dir / "AppCompat",
                 self.staging_dir,
             ]:
                 if search_root.is_file() and search_root.name.lower() == "recentfilecache.bcf":
                     target = search_root.resolve()
                     break
                 if search_root.is_dir():
-                    for f in search_root.rglob("RecentFileCache.bcf"):
-                        if f.is_file():
-                            target = f.resolve()
+                    sr_res = search_root.resolve()
+                    for walk_root, dirs, files in os.walk(sr_res):
+                        if search_root == self.staging_dir and Path(walk_root) == sr_res:
+                            dirs[:] = [d for d in dirs if d.lower() not in _SKIP_RFC_ROOTS]
+                        for fname in files:
+                            if fname.lower() == "recentfilecache.bcf":
+                                target = (Path(walk_root) / fname).resolve()
+                                break
+                        if target:
                             break
                 if target:
                     break
@@ -2493,6 +2609,13 @@ class EZToolRunner:
         """
         target = Path(sum_dir).resolve() if sum_dir else None
         if target is None or not target.exists():
+            _SKIP_SUM_ROOTS = {
+                "registry", "logs", "prefetch", "filesystem", "mft", "srum",
+                "jumplists", "tasks", "powershell", "rmm", "carved_thumbnails",
+                "zoneidentifier", "recyclebin", "wbem", "wer", "wlan", "usb",
+                "browsers", "chat", "cloud", "mail", "media", "documents",
+                "notifications", "activitiescache", "sqlite", "userfiles",
+            }
             for search_root in [
                 self.staging_dir / "SUM",
                 self.staging_dir / "LogFiles" / "SUM",
@@ -2502,9 +2625,13 @@ class EZToolRunner:
                     if any(search_root.glob("*.mdb")):
                         target = search_root.resolve()
                         break
-                    for mdb in search_root.rglob("*.mdb"):
-                        if mdb.is_file() and mdb.parent.name.lower() == "sum":
-                            target = mdb.parent.resolve()
+                    sr_res = search_root.resolve()
+                    for walk_root, dirs, files in os.walk(sr_res):
+                        root_p = Path(walk_root)
+                        if search_root == self.staging_dir and root_p == sr_res:
+                            dirs[:] = [d for d in dirs if d.lower() not in _SKIP_SUM_ROOTS]
+                        if root_p.name.lower() == "sum" and any(fn.lower().endswith(".mdb") for fn in files):
+                            target = root_p.resolve()
                             break
                     if target:
                         break
@@ -2770,6 +2897,69 @@ class EZToolRunner:
         except ValueError:
             return None
 
+    @staticmethod
+    def _profile_has_broken_chromium_cache(prof_dir: Path) -> bool:
+        """
+        Return True if prof_dir contains a Chromium Cache / Cache_Data directory whose
+        blockfile index exists without all required data_0..data_3 files (which triggers
+        FileNotFoundError inside ccl_chromium_cache).
+        """
+        for cache_rel in (
+            Path("Cache") / "Cache_Data",
+            Path("Cache"),
+            Path("Cache_Data"),
+        ):
+            cdir = prof_dir / cache_rel
+            if not cdir.is_dir():
+                continue
+            if (cdir / "index").is_file():
+                for d_idx in range(4):
+                    if not (cdir / f"data_{d_idx}").is_file():
+                        return True
+        return False
+
+    @staticmethod
+    def _build_nocache_profile_dir(prof_dir: Path, nocache_prof: Path) -> Path:
+        nocache_prof.mkdir(parents=True, exist_ok=True)
+        skip_cache_names = {
+            "cache",
+            "cache_data",
+            "code cache",
+            "gpucache",
+            "media cache",
+            "application cache",
+            "dawngraphitecache",
+            "dawnwebgpucache",
+            "grshadercache",
+            "shadercache",
+        }
+        for child in prof_dir.iterdir():
+            if child.name.lower() in skip_cache_names:
+                continue
+            dst_child = nocache_prof / child.name
+            try:
+                if child.is_dir():
+                    for root, dirs, files in os.walk(child):
+                        dirs[:] = [d for d in dirs if d.lower() not in skip_cache_names]
+                        rel_r = Path(root).relative_to(child)
+                        target_r = dst_child / rel_r
+                        target_r.mkdir(parents=True, exist_ok=True)
+                        for fn in files:
+                            src_f = Path(root) / fn
+                            dst_f = target_r / fn
+                            try:
+                                os.link(src_f, dst_f)
+                            except OSError:
+                                shutil.copy2(src_f, dst_f)
+                elif child.is_file():
+                    try:
+                        os.link(child, dst_child)
+                    except OSError:
+                        shutil.copy2(child, dst_child)
+            except OSError:
+                continue
+        return nocache_prof
+
     def run_hindsight(
         self,
         browsers_dir: Optional[Path] = None,
@@ -2865,6 +3055,14 @@ class EZToolRunner:
             )
 
             try:
+                sqlite_fallback_path = Path(f"{out_base}.sqlite")
+                sqlite_fallback_path.unlink(missing_ok=True)
+                use_nocache_upfront = self._profile_has_broken_chromium_cache(prof_dir)
+                active_prof_dir = (
+                    self._build_nocache_profile_dir(prof_dir, worker_tmp / "profile_nocache")
+                    if use_nocache_upfront
+                    else prof_dir
+                )
                 if mode in ("exe", "py") and hs_path is not None:
                     base_cmd = [sys.executable, str(hs_path)] if mode == "py" else [str(hs_path)]
                     extra_env: Optional[Dict[str, str]] = None
@@ -2875,7 +3073,7 @@ class EZToolRunner:
                         }
                     cmd = base_cmd + [
                         "-i",
-                        str(prof_dir),
+                        str(active_prof_dir),
                         "-o",
                         str(out_base),
                         "-f",
@@ -2900,37 +3098,19 @@ class EZToolRunner:
                     hs_stderr = proc_hs.stderr or ""
                     has_jsonl = jsonl_path.is_file() and jsonl_path.stat().st_size > 0
                     if (
-                        proc_hs.returncode != 0 or not has_jsonl
-                    ) and any(
-                        tok in hs_stderr
-                        for tok in ("ccl_chromium_cache", "get_cache", "OverflowError")
+                        not use_nocache_upfront
+                        and (proc_hs.returncode != 0 or not has_jsonl)
+                        and any(
+                            tok in hs_stderr
+                            for tok in ("ccl_chromium_cache", "get_cache", "OverflowError")
+                        )
                     ):
-                        nocache_prof = worker_tmp / "profile_nocache"
-                        nocache_prof.mkdir(parents=True, exist_ok=True)
-                        skip_cache_names = {
-                            "cache",
-                            "code cache",
-                            "gpucache",
-                            "media cache",
-                            "application cache",
-                        }
-                        for child in prof_dir.iterdir():
-                            if child.name.lower() in skip_cache_names:
-                                continue
-                            dst_child = nocache_prof / child.name
-                            try:
-                                if child.is_dir():
-                                    shutil.copytree(child, dst_child, dirs_exist_ok=True)
-                                elif child.is_file():
-                                    try:
-                                        os.link(child, dst_child)
-                                    except OSError:
-                                        shutil.copy2(child, dst_child)
-                            except OSError:
-                                continue
+                        active_prof_dir = self._build_nocache_profile_dir(
+                            prof_dir, worker_tmp / "profile_nocache"
+                        )
                         cmd_nocache = base_cmd + [
                             "-i",
-                            str(nocache_prof),
+                            str(active_prof_dir),
                             "-o",
                             str(out_base),
                             "-f",
@@ -2942,46 +3122,83 @@ class EZToolRunner:
                         ]
                         if is_legacy_muon_brave:
                             cmd_nocache.extend(["-b", "Brave"])
-                        self._execute_subprocess(
+                        proc_hs = self._execute_subprocess(
                             f"Hindsight:{profile_label}",
                             cmd_nocache,
                             timeout=300,
                             cwd=self.hindsight_out_dir,
                             extra_env=extra_env,
-                            log_to_db=True,
+                            log_to_db=False,
                         )
-                    else:
-                        cmd_str = " ".join([f'"{c}"' if " " in c else c for c in cmd])
-                        err_summary: Optional[str] = None
-                        if hs_stderr.strip():
-                            if "Traceback (most recent call last)" in hs_stderr:
-                                lines_ne = [
-                                    ln.strip()
-                                    for ln in hs_stderr.splitlines()
-                                    if ln.strip() and "Traceback (most recent call last)" not in ln
-                                ]
-                                err_summary = (
-                                    f"External tool exited with code {proc_hs.returncode}: "
-                                    f"{lines_ne[-1] if lines_ne else 'Hindsight error'}"
-                                )[:500]
-                            else:
-                                err_summary = hs_stderr.strip()[:1000]
-                        with DuckDBManager.get_lock(self.case_id):
-                            log_processing_event(
-                                case_id=self.case_id,
-                                module_name=f"Hindsight:{profile_label}",
-                                command_executed=cmd_str,
-                                exit_code=proc_hs.returncode,
-                                rows_ingested=0,
-                                duration_ms=0,
-                                status="SUCCESS" if proc_hs.returncode == 0 else "WARNING",
-                                error_message=err_summary,
-                            )
+                        hs_stderr = proc_hs.stderr or ""
+                        has_jsonl = jsonl_path.is_file() and jsonl_path.stat().st_size > 0
+                        cmd = cmd_nocache
+
+                    # If pyhindsight write_jsonl crashed with KeyError: 'value' in HindsightEncoder.default,
+                    # retry with -f sqlite so the timeline records are not lost.
+                    if (proc_hs.returncode != 0 or not has_jsonl) and (
+                        "KeyError: 'value'" in hs_stderr or "generate_jsonl" in hs_stderr or "write_jsonl" in hs_stderr
+                    ):
+                        cmd_sqlite = base_cmd + [
+                            "-i",
+                            str(active_prof_dir),
+                            "-o",
+                            str(out_base),
+                            "-f",
+                            "sqlite",
+                            "-l",
+                            str(log_path),
+                            "--temp_dir",
+                            str(worker_tmp),
+                        ]
+                        if is_legacy_muon_brave:
+                            cmd_sqlite.extend(["-b", "Brave"])
+                        proc_sq = self._execute_subprocess(
+                            f"Hindsight:{profile_label}",
+                            cmd_sqlite,
+                            timeout=300,
+                            cwd=self.hindsight_out_dir,
+                            extra_env=extra_env,
+                            log_to_db=False,
+                        )
+                        if proc_sq.returncode == 0 or (
+                            sqlite_fallback_path.is_file() and sqlite_fallback_path.stat().st_size > 0
+                        ):
+                            proc_hs = proc_sq
+                            hs_stderr = proc_sq.stderr or ""
+                            cmd = cmd_sqlite
+
+                    cmd_str = " ".join([f'"{c}"' if " " in c else c for c in cmd])
+                    err_summary: Optional[str] = None
+                    if hs_stderr.strip():
+                        if "Traceback (most recent call last)" in hs_stderr:
+                            lines_ne = [
+                                ln.strip()
+                                for ln in hs_stderr.splitlines()
+                                if ln.strip() and "Traceback (most recent call last)" not in ln
+                            ]
+                            err_summary = (
+                                f"External tool exited with code {proc_hs.returncode}: "
+                                f"{lines_ne[-1] if lines_ne else 'Hindsight error'}"
+                            )[:500]
+                        else:
+                            err_summary = hs_stderr.strip()[:1000]
+                    with DuckDBManager.get_lock(self.case_id):
+                        log_processing_event(
+                            case_id=self.case_id,
+                            module_name=f"Hindsight:{profile_label}",
+                            command_executed=cmd_str,
+                            exit_code=proc_hs.returncode,
+                            rows_ingested=0,
+                            duration_ms=0,
+                            status="SUCCESS" if proc_hs.returncode == 0 else "WARNING",
+                            error_message=err_summary,
+                        )
                 else:
                     from pyhindsight.analysis import AnalysisSession
 
                     session = AnalysisSession()
-                    session.input_path = str(prof_dir)
+                    session.input_path = str(active_prof_dir)
                     session.output_name = str(out_base)
                     session.selected_output_format = "jsonl"
                     session.browser_type = "Brave" if is_legacy_muon_brave else "Chrome"
@@ -2989,12 +3206,61 @@ class EZToolRunner:
                     session.log_path = str(log_path)
                     session.run()
                     if hasattr(session, "generate_jsonl"):
-                        session.generate_jsonl(str(jsonl_path))
+                        try:
+                            session.generate_jsonl(str(jsonl_path))
+                        except KeyError:
+                            if hasattr(session, "generate_sqlite"):
+                                session.generate_sqlite(str(sqlite_fallback_path))
             finally:
                 shutil.rmtree(worker_tmp, ignore_errors=True)
 
             parsed_rows: List[Tuple[Any, ...]] = []
-            if jsonl_path.is_file() and jsonl_path.stat().st_size > 0:
+            # When -f jsonl crashed and the -f sqlite fallback produced a populated database, prefer the
+            # complete SQLite timeline over a partial/truncated JSONL file; fall back to JSONL otherwise.
+            if sqlite_fallback_path.is_file() and sqlite_fallback_path.stat().st_size > 0:
+                try:
+                    import sqlite3 as _hs_sqlite3
+                    with _hs_sqlite3.connect(str(sqlite_fallback_path)) as sq_conn:
+                        sq_conn.row_factory = _hs_sqlite3.Row
+                        sq_cur = sq_conn.cursor()
+                        tbls = {
+                            str(r[0])
+                            for r in sq_cur.execute(
+                                "SELECT name FROM sqlite_master WHERE type='table';"
+                            ).fetchall()
+                        }
+                        if "timeline" in tbls:
+                            for sq_row in sq_cur.execute("SELECT * FROM timeline;").fetchall():
+                                obj = {k: sq_row[k] for k in sq_row.keys()}
+                                raw_dt = str(obj.get("timestamp") or obj.get("datetime") or "")
+                                ts_desc = str(obj.get("type") or obj.get("timestamp_desc") or "")
+                                ts_val = self._parse_hindsight_timestamp(raw_dt, ts_desc)
+                                rec_type = str(obj.get("type") or obj.get("record_type") or "chrome:artifact")
+                                url_val = str(obj.get("url") or "") or None
+                                title_val = str(obj.get("title") or obj.get("name") or "") or None
+                                val_raw = obj.get("value") if obj.get("value") is not None else obj.get("data")
+                                val_str = str(val_raw) if val_raw is not None else None
+                                interp_raw = obj.get("interpretation")
+                                interp_str = str(interp_raw) if interp_raw not in (None, "") else None
+                                src_path = str(obj.get("source") or obj.get("profile") or prof_dir)
+                                extra_json = json.dumps(obj, ensure_ascii=False, default=str)
+                                parsed_rows.append(
+                                    (
+                                        ts_val,
+                                        browser_name,
+                                        profile_label,
+                                        rec_type,
+                                        url_val,
+                                        title_val,
+                                        val_str,
+                                        interp_str,
+                                        src_path,
+                                        extra_json,
+                                    )
+                                )
+                except Exception:
+                    parsed_rows = []
+            if not parsed_rows and jsonl_path.is_file() and jsonl_path.stat().st_size > 0:
                 with open(jsonl_path, "r", encoding="utf-8", errors="replace") as jf:
                     for raw_line in jf:
                         line = raw_line.strip()
@@ -3066,48 +3332,60 @@ class EZToolRunner:
         numbered_rows = [(idx + 1, *row) for idx, row in enumerate(all_rows)]
         duration_ms = int((time.time() - t0) * 1000)
 
-        with DuckDBManager.get_lock(self.case_id):
-            conn = DuckDBManager.get_connection(self.case_id, read_only=False)
-            cursor = conn.cursor()
-            self._ensure_hindsight_table(cursor)
-            cursor.execute("DELETE FROM raw_hindsight;")
+        for _hs_attempt in range(4):
+            try:
+                with DuckDBManager.get_lock(self.case_id):
+                    conn = DuckDBManager.get_connection(self.case_id, read_only=False)
+                    cursor = conn.cursor()
+                    self._ensure_hindsight_table(cursor)
+                    cursor.execute("DELETE FROM raw_hindsight;")
 
-            if numbered_rows:
-                cursor.executemany(
-                    """
-                    INSERT INTO raw_hindsight (
-                        _row_id, timestamp_utc, browser, profile, record_type,
-                        url, title, value, interpretation, source_path, extra_json
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
-                    """,
-                    numbered_rows,
-                )
+                    if numbered_rows:
+                        cursor.executemany(
+                            """
+                            INSERT INTO raw_hindsight (
+                                _row_id, timestamp_utc, browser, profile, record_type,
+                                url, title, value, interpretation, source_path, extra_json
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                            """,
+                            numbered_rows,
+                        )
 
-            cursor.execute(
-                "DELETE FROM artifact_registry WHERE table_name = 'raw_hindsight' AND artifact_id != 'web_hindsight';"
-            )
-            cursor.execute(
-                """
-                INSERT OR REPLACE INTO artifact_registry (
-                    artifact_id, category, display_name, table_name, source_tool, row_count, last_updated
-                ) VALUES (
-                    'web_hindsight', 'WEB RELATED', 'Chromium Forensics (Hindsight)',
-                    'raw_hindsight', 'Hindsight', ?, CURRENT_TIMESTAMP
-                );
-                """,
-                [len(numbered_rows)],
-            )
+                    cursor.execute(
+                        "DELETE FROM artifact_registry WHERE table_name = 'raw_hindsight' AND artifact_id != 'web_hindsight';"
+                    )
+                    cursor.execute(
+                        """
+                        INSERT OR REPLACE INTO artifact_registry (
+                            artifact_id, category, display_name, table_name, source_tool, row_count, last_updated
+                        ) VALUES (
+                            'web_hindsight', 'WEB RELATED', 'Chromium Forensics (Hindsight)',
+                            'raw_hindsight', 'Hindsight', ?, CURRENT_TIMESTAMP
+                        );
+                        """,
+                        [len(numbered_rows)],
+                    )
 
-            log_processing_event(
-                case_id=self.case_id,
-                module_name="Hindsight",
-                command_executed=f"{hs_path or 'pyhindsight'} ({len(profiles)} profile(s), workers={effective_workers})",
-                exit_code=0,
-                rows_ingested=len(numbered_rows),
-                duration_ms=duration_ms,
-                status="SUCCESS",
-                error_message=None,
-            )
+                    log_processing_event(
+                        case_id=self.case_id,
+                        module_name="Hindsight",
+                        command_executed=f"{hs_path or 'pyhindsight'} ({len(profiles)} profile(s), workers={effective_workers})",
+                        exit_code=0,
+                        rows_ingested=len(numbered_rows),
+                        duration_ms=duration_ms,
+                        status="SUCCESS",
+                        error_message=None,
+                    )
+                break
+            except Exception as hs_db_exc:
+                err_low = str(hs_db_exc).lower()
+                if _hs_attempt < 3 and any(
+                    tok in err_low
+                    for tok in ("transactioncontext", "failed to commit", "device is not ready", "could not flush")
+                ):
+                    time.sleep(0.5 * (_hs_attempt + 1))
+                    continue
+                raise
 
         return {"raw_hindsight": len(numbered_rows)}
 

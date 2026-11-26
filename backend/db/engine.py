@@ -7,6 +7,7 @@ import json
 import os
 import re
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
@@ -348,12 +349,13 @@ class DuckDBManager:
             if cls.is_case_deleted(case_id):
                 raise FileNotFoundError(f"Case '{case_id}' has been deleted.")
             ro_conn_to_close: Optional[duckdb.DuckDBPyConnection] = None
+            cached_conn: Optional[duckdb.DuckDBPyConnection] = None
             with cls._instance_lock:
                 db_path, db_key = cls._resolve_db_key(case_id)
                 threads = cls._case_threads.get(db_key, DEFAULT_DUCKDB_THREADS)
                 if read_only:
                     if db_key in cls._connections:
-                        return cls._connections[db_key]
+                        cached_conn = cls._connections[db_key]
                 else:
                     if db_key in cls._connections:
                         if db_key in cls._ro_connections or cls._is_read_only.get(db_key, False):
@@ -361,7 +363,18 @@ class DuckDBManager:
                             cls._ro_connections.discard(db_key)
                             cls._is_read_only.pop(db_key, None)
                         else:
-                            return cls._connections[db_key]
+                            cached_conn = cls._connections[db_key]
+
+            if cached_conn is not None:
+                eff_ro = bool(read_only or db_key in cls._ro_connections or cls._is_read_only.get(db_key, False))
+                return cls._ensure_healthy_cached_conn(
+                    case_id=case_id,
+                    db_path=db_path,
+                    db_key=db_key,
+                    conn=cached_conn,
+                    read_only=eff_ro,
+                    threads=threads,
+                )
 
             if ro_conn_to_close is not None:
                 try:
@@ -372,7 +385,7 @@ class DuckDBManager:
             if read_only:
                 if not db_path.is_file():
                     raise FileNotFoundError(f"Case database does not exist: {db_path}")
-                conn = duckdb.connect(database=str(db_path), read_only=True)
+                conn = cls._connect_with_retry(db_path=db_path, read_only=True)
                 try:
                     conn.cursor().execute(f"PRAGMA threads={threads};")
                 except Exception:
@@ -384,7 +397,7 @@ class DuckDBManager:
                 return conn
 
             db_path.parent.mkdir(parents=True, exist_ok=True)
-            conn = duckdb.connect(database=str(db_path), read_only=False)
+            conn = cls._connect_with_retry(db_path=db_path, read_only=False)
             try:
                 conn.cursor().execute(f"PRAGMA threads={threads};")
             except Exception as pragma_err:
@@ -394,6 +407,74 @@ class DuckDBManager:
                 cls._is_read_only[db_key] = False
                 cls._ro_connections.discard(db_key)
             return conn
+
+    @classmethod
+    def _connect_with_retry(
+        cls,
+        db_path: Path,
+        read_only: bool,
+        max_attempts: int = 8,
+    ) -> duckdb.DuckDBPyConnection:
+        """
+        Open a DuckDB connection with exponential backoff when the storage volume experiences
+        a transient I/O stall (e.g. external USB/HDD spin-up 'The device is not ready').
+        """
+        last_err: Optional[Exception] = None
+        for attempt in range(max_attempts):
+            try:
+                return duckdb.connect(database=str(db_path), read_only=read_only)
+            except Exception as exc:
+                last_err = exc
+                if attempt + 1 < max_attempts:
+                    time.sleep(min(4.0, 0.35 * (attempt + 1)))
+        if last_err is not None:
+            raise last_err
+        return duckdb.connect(database=str(db_path), read_only=read_only)
+
+    @classmethod
+    def _ensure_healthy_cached_conn(
+        cls,
+        case_id: str,
+        db_path: Path,
+        db_key: str,
+        conn: duckdb.DuckDBPyConnection,
+        read_only: bool,
+        threads: int,
+    ) -> duckdb.DuckDBPyConnection:
+        """
+        Verify that a cached DuckDB connection is not stuck in an aborted transaction
+        (e.g. after a transient 'TransactionContext Error: Failed to commit' disk/WAL flush hiccup).
+        If unhealthy, attempt ROLLBACK first; if still poisoned, close and reopen cleanly with retry.
+        """
+        try:
+            conn.cursor().execute("SELECT 1;")
+            return conn
+        except Exception as err:
+            err_str = str(err)
+            try:
+                conn.cursor().execute("ROLLBACK;")
+                conn.cursor().execute("SELECT 1;")
+                return conn
+            except Exception:
+                pass
+            print(f"[DuckDBManager] Recovering poisoned connection for {case_id} ({err_str})...")
+            try:
+                conn.close()
+            except Exception:
+                pass
+            new_conn = cls._connect_with_retry(db_path=db_path, read_only=read_only)
+            try:
+                new_conn.cursor().execute(f"PRAGMA threads={threads};")
+            except Exception:
+                pass
+            with cls._instance_lock:
+                cls._connections[db_key] = new_conn
+                cls._is_read_only[db_key] = read_only
+                if read_only:
+                    cls._ro_connections.add(db_key)
+                else:
+                    cls._ro_connections.discard(db_key)
+            return new_conn
 
     @classmethod
     def configure_threads(cls, case_id: str, max_workers: int = 25) -> int:
@@ -670,46 +751,49 @@ def log_processing_event(
 ) -> None:
     if DuckDBManager.is_case_deleted(case_id):
         return
-    with DuckDBManager.get_lock(case_id):
-        if DuckDBManager.is_case_deleted(case_id):
-            return
-        conn = DuckDBManager.get_connection(case_id, read_only=False)
-        cursor = conn.cursor()
+    try:
+        with DuckDBManager.get_lock(case_id):
+            if DuckDBManager.is_case_deleted(case_id):
+                return
+            conn = DuckDBManager.get_connection(case_id, read_only=False)
+            cursor = conn.cursor()
 
-        cursor.execute(
-            """
-            INSERT INTO processing_logs (
-                log_id,
-                timestamp_utc,
-                module_name,
-                command_executed,
-                exit_code,
-                rows_ingested,
-                duration_ms,
-                status,
-                error_message
-            ) VALUES (
-                nextval('seq_log_id'),
-                CURRENT_TIMESTAMP,
-                ?,
-                ?,
-                ?,
-                ?,
-                ?,
-                ?,
-                ?
-            );
-            """,
-            [
-                module_name,
-                command_executed,
-                exit_code,
-                rows_ingested,
-                duration_ms,
-                status,
-                error_message,
-            ],
-        )
+            cursor.execute(
+                """
+                INSERT INTO processing_logs (
+                    log_id,
+                    timestamp_utc,
+                    module_name,
+                    command_executed,
+                    exit_code,
+                    rows_ingested,
+                    duration_ms,
+                    status,
+                    error_message
+                ) VALUES (
+                    nextval('seq_log_id'),
+                    CURRENT_TIMESTAMP,
+                    ?,
+                    ?,
+                    ?,
+                    ?,
+                    ?,
+                    ?,
+                    ?
+                );
+                """,
+                [
+                    module_name,
+                    command_executed,
+                    exit_code,
+                    rows_ingested,
+                    duration_ms,
+                    status,
+                    error_message,
+                ],
+            )
+    except Exception as db_log_err:
+        print(f"[log_processing_event] Warning inserting processing_logs row for {case_id}: {db_log_err}")
 
     if DuckDBManager.is_case_deleted(case_id):
         return
@@ -1461,63 +1545,67 @@ def scan_keywords_for_case(
             all_emitted_hits: List[List[Any]] = []
             hit_row_id = 1
 
-            # 4. Structured Database Table Scan (per-column, deduplicating synced families & alias columns)
-            for tbl in candidate_tables:
-                try:
-                    row_cnt = table_row_counts.get(tbl, 0)
-                    if row_cnt == 0:
-                        continue
-                    desc_rows = table_desc_cache.get(tbl)
-                    if not desc_rows:
-                        continue
+        # 4. Structured Database Table Scan (acquire per-case DB lock per table query only;
+        # process Python regex/snippet extraction outside the DB lock so other threads never block!)
+        for tbl in candidate_tables:
+            try:
+                row_cnt = table_row_counts.get(tbl, 0)
+                if row_cnt == 0:
+                    continue
+                desc_rows = table_desc_cache.get(tbl)
+                if not desc_rows:
+                    continue
 
-                    col_names = [str(r[0]) for r in desc_rows]
-                    col_lookup_low = {c.lower(): c for c in col_names}
-                    dedup_filter_sql = _build_combined_dedup_filter(
-                        tbl, col_names, table_row_counts, table_cols_map
-                    )
-                    if dedup_filter_sql == "1=0":
-                        continue
+                col_names = [str(r[0]) for r in desc_rows]
+                col_lookup_low = {c.lower(): c for c in col_names}
+                dedup_filter_sql = _build_combined_dedup_filter(
+                    tbl, col_names, table_row_counts, table_cols_map
+                )
+                if dedup_filter_sql == "1=0":
+                    continue
 
-                    id_col = "_row_id" if "_row_id" in col_names else col_names[0]
-                    src_col = next(
-                        (
-                            c for c in col_names
-                            if c.lower() in ("file_path", "source_file", "sourcefile", "sourcefilename", "source_path", "vfs_path", "carved_rel_path")
-                        ),
-                        None,
-                    )
-                    sha_col = col_lookup_low.get("sha256")
-                    fname_col = col_lookup_low.get("file_name")
-                    search_cols = [
-                        str(r[0])
-                        for r in desc_rows
-                        if str(r[0]) != "_row_id" and "BLOB" not in str(r[1]).upper() and "BYTEA" not in str(r[1]).upper()
-                    ]
-                    if not search_cols:
-                        continue
+                id_col = "_row_id" if "_row_id" in col_names else col_names[0]
+                src_col = next(
+                    (
+                        c for c in col_names
+                        if c.lower() in ("file_path", "source_file", "sourcefile", "sourcefilename", "source_path", "vfs_path", "carved_rel_path")
+                    ),
+                    None,
+                )
+                sha_col = col_lookup_low.get("sha256")
+                fname_col = col_lookup_low.get("file_name")
+                search_cols = [
+                    str(r[0])
+                    for r in desc_rows
+                    if str(r[0]) != "_row_id" and "BLOB" not in str(r[1]).upper() and "BYTEA" not in str(r[1]).upper()
+                ]
+                if not search_cols:
+                    continue
 
-                    art_label = disp_map.get(
-                        tbl,
-                        tbl.replace("parsed_", "").replace("raw_", "").replace("_", " ").title(),
-                    )
-                    select_cols = [id_col]
-                    for extra_meta_col in (src_col, sha_col, fname_col):
-                        if extra_meta_col and extra_meta_col not in select_cols:
-                            select_cols.append(extra_meta_col)
-                    extra_search_cols = [c for c in search_cols if c not in select_cols]
-                    ordered_cols = select_cols + extra_search_cols
-                    select_list_sql = ", ".join([f'"{c}"' for c in ordered_cols])
-                    col_idx_map = {c: i for i, c in enumerate(ordered_cols)}
+                art_label = disp_map.get(
+                    tbl,
+                    tbl.replace("parsed_", "").replace("raw_", "").replace("_", " ").title(),
+                )
+                select_cols = [id_col]
+                for extra_meta_col in (src_col, sha_col, fname_col):
+                    if extra_meta_col and extra_meta_col not in select_cols:
+                        select_cols.append(extra_meta_col)
+                extra_search_cols = [c for c in search_cols if c not in select_cols]
+                ordered_cols = select_cols + extra_search_cols
+                select_list_sql = ", ".join([f'"{c}"' for c in ordered_cols])
+                col_idx_map = {c: i for i, c in enumerate(ordered_cols)}
 
-                    for kw_spec in compiled_keywords:
-                        kw_id_str = kw_spec["keyword_id"]
-                        kw_clean = kw_spec["keyword"]
-                        is_rx = kw_spec["is_regex"]
-                        is_cs = kw_spec["is_case_sensitive"]
-                        rx_obj: re.Pattern = kw_spec["regex"]
+                for kw_spec in compiled_keywords:
+                    kw_id_str = kw_spec["keyword_id"]
+                    kw_clean = kw_spec["keyword"]
+                    is_rx = kw_spec["is_regex"]
+                    is_cs = kw_spec["is_case_sensitive"]
+                    rx_obj: re.Pattern = kw_spec["regex"]
 
-                        row_limit_sql = " LIMIT 25000" if tbl == "parsed_bulk_extractor_features" else ""
+                    row_limit_sql = " LIMIT 25000" if tbl in ("parsed_bulk_extractor_features", "raw_mft", "raw_usnjrnl") else ""
+                    with DuckDBManager.get_lock(case_id):
+                        q_conn = conn if conn is not None else DuckDBManager.get_connection(case_id, read_only=False)
+                        q_cursor = q_conn.cursor()
                         if is_rx:
                             rx_opt = "c" if is_cs else "i"
                             clauses = [f'regexp_matches(CAST("{c}" AS VARCHAR), ?, \'{rx_opt}\')' for c in search_cols]
@@ -1525,13 +1613,13 @@ def scan_keywords_for_case(
                             full_where = f"{match_where} AND ({dedup_filter_sql})" if dedup_filter_sql else match_where
                             sql_params = [kw_clean] * len(search_cols)
                             try:
-                                candidate_rows = cursor.execute(
+                                candidate_rows = q_cursor.execute(
                                     f'SELECT {select_list_sql} FROM "{tbl}" WHERE {full_where}{row_limit_sql};',
                                     sql_params,
                                 ).fetchall()
                             except Exception:
                                 fb_where = f"WHERE {dedup_filter_sql}" if dedup_filter_sql else ""
-                                candidate_rows = cursor.execute(
+                                candidate_rows = q_cursor.execute(
                                     f'SELECT {select_list_sql} FROM "{tbl}" {fb_where}{row_limit_sql};'
                                 ).fetchall()
                         else:
@@ -1541,132 +1629,132 @@ def scan_keywords_for_case(
                             match_where = f"({' OR '.join(clauses)})"
                             full_where = f"{match_where} AND ({dedup_filter_sql})" if dedup_filter_sql else match_where
                             sql_params = [like_pat] * len(search_cols)
-                            candidate_rows = cursor.execute(
+                            candidate_rows = q_cursor.execute(
                                 f'SELECT {select_list_sql} FROM "{tbl}" WHERE {full_where}{row_limit_sql};',
                                 sql_params,
                             ).fetchall()
 
-                        for r_tuple in candidate_rows:
-                            raw_rid = r_tuple[col_idx_map[id_col]]
-                            try:
-                                s_rid = int(raw_rid) if raw_rid is not None else 0
-                            except (TypeError, ValueError):
-                                s_rid = 0
-                            raw_src = r_tuple[col_idx_map[src_col]] if src_col else ""
-                            s_file = restore_evidence_path(
-                                str(raw_src or ""), case_dir=case_dir, vfs_lookup=vfs_lookup
-                            )
-                            row_sha = (
-                                str(r_tuple[col_idx_map[sha_col]] or "").strip().lower()
-                                if sha_col
-                                else ""
-                            )
-                            row_fname_low = (
-                                str(r_tuple[col_idx_map[fname_col]] or "").strip().lower()
-                                if fname_col
-                                else ""
-                            )
-                            if not row_fname_low and s_file:
-                                row_fname_low = os.path.basename(s_file.replace("/", "\\")).strip().lower()
+                    for r_tuple in candidate_rows:
+                        raw_rid = r_tuple[col_idx_map[id_col]]
+                        try:
+                            s_rid = int(raw_rid) if raw_rid is not None else 0
+                        except (TypeError, ValueError):
+                            s_rid = 0
+                        raw_src = r_tuple[col_idx_map[src_col]] if src_col else ""
+                        s_file = restore_evidence_path(
+                            str(raw_src or ""), case_dir=case_dir, vfs_lookup=vfs_lookup
+                        )
+                        row_sha = (
+                            str(r_tuple[col_idx_map[sha_col]] or "").strip().lower()
+                            if sha_col
+                            else ""
+                        )
+                        row_fname_low = (
+                            str(r_tuple[col_idx_map[fname_col]] or "").strip().lower()
+                            if fname_col
+                            else ""
+                        )
+                        if not row_fname_low and s_file:
+                            row_fname_low = os.path.basename(s_file.replace("/", "\\")).strip().lower()
 
-                            row_emitted_any = False
-                            for s_col in search_cols:
-                                cell_val = r_tuple[col_idx_map[s_col]]
-                                if cell_val is None:
+                        row_emitted_any = False
+                        for s_col in search_cols:
+                            cell_val = r_tuple[col_idx_map[s_col]]
+                            if cell_val is None:
+                                continue
+                            cell_str = str(cell_val)
+                            if not cell_str:
+                                continue
+
+                            # DocumentParser synthesizes parsed_text_documents.title from the first line of content_preview;
+                            # skip title when content_preview/text_preview/full_text on the same row already carries the match.
+                            if tbl == "parsed_text_documents" and s_col.lower() == "title":
+                                body_matched = False
+                                for body_key in ("content_preview", "text_preview", "full_text"):
+                                    b_col = col_lookup_low.get(body_key)
+                                    if b_col and b_col in col_idx_map:
+                                        b_str = str(r_tuple[col_idx_map[b_col]] or "")
+                                        if b_str and (cell_str in b_str or rx_obj.search(b_str)):
+                                            body_matched = True
+                                            break
+                                if body_matched:
                                     continue
-                                cell_str = str(cell_val)
-                                if not cell_str:
+
+                            # Skip file_name when a path column on the same row already carries the filename match
+                            if s_col.lower() == "file_name":
+                                path_matched = False
+                                for path_key in ("file_path", "vfs_path", "local_path", "cloud_path", "cloud_path_or_id", "target_path"):
+                                    p_col = col_lookup_low.get(path_key)
+                                    if p_col and p_col in col_idx_map:
+                                        p_str = str(r_tuple[col_idx_map[p_col]] or "")
+                                        if p_str and cell_str.lower() in p_str.lower() and rx_obj.search(p_str):
+                                            path_matched = True
+                                            break
+                                if path_matched:
                                     continue
 
-                                # DocumentParser synthesizes parsed_text_documents.title from the first line of content_preview;
-                                # skip title when content_preview/text_preview/full_text on the same row already carries the match.
-                                if tbl == "parsed_text_documents" and s_col.lower() == "title":
-                                    body_matched = False
-                                    for body_key in ("content_preview", "text_preview", "full_text"):
-                                        b_col = col_lookup_low.get(body_key)
-                                        if b_col and b_col in col_idx_map:
-                                            b_str = str(r_tuple[col_idx_map[b_col]] or "")
-                                            if b_str and (cell_str in b_str or rx_obj.search(b_str)):
-                                                body_matched = True
-                                                break
-                                    if body_matched:
-                                        continue
+                            # Skip duplicate compatibility-alias columns holding identical text on the same row
+                            prim_low = _COMPAT_ALIAS_PRIMARY.get(s_col.lower())
+                            if prim_low and prim_low in col_lookup_low:
+                                prim_col = col_lookup_low[prim_low]
+                                if prim_col in col_idx_map:
+                                    prim_val = str(r_tuple[col_idx_map[prim_col]] or "")
+                                    if prim_val:
+                                        if prim_val == cell_str:
+                                            continue
+                                        if s_col.lower() == "source_file" and (
+                                            restore_evidence_path(prim_val, case_dir=case_dir, vfs_lookup=vfs_lookup).lower()
+                                            == restore_evidence_path(cell_str, case_dir=case_dir, vfs_lookup=vfs_lookup).lower()
+                                        ):
+                                            continue
 
-                                # Skip file_name when a path column on the same row already carries the filename match
-                                if s_col.lower() == "file_name":
-                                    path_matched = False
-                                    for path_key in ("file_path", "vfs_path", "local_path", "cloud_path", "cloud_path_or_id", "target_path"):
-                                        p_col = col_lookup_low.get(path_key)
-                                        if p_col and p_col in col_idx_map:
-                                            p_str = str(r_tuple[col_idx_map[p_col]] or "")
-                                            if p_str and cell_str.lower() in p_str.lower() and rx_obj.search(p_str):
-                                                path_matched = True
-                                                break
-                                    if path_matched:
-                                        continue
+                            m = rx_obj.search(cell_str)
+                            if m:
+                                snippet = _build_centered_snippet(cell_str, m.start(), m.end(), s_col)
+                                all_emitted_hits.append([
+                                    hit_row_id,
+                                    kw_id_str,
+                                    kw_clean,
+                                    is_rx,
+                                    is_cs,
+                                    art_label,
+                                    tbl,
+                                    s_rid,
+                                    s_col,
+                                    int(m.start()),
+                                    "table",
+                                    snippet,
+                                    s_file,
+                                ])
+                                hit_row_id += 1
+                                hit_counts_by_id[kw_id_str] = hit_counts_by_id.get(kw_id_str, 0) + 1
+                                row_emitted_any = True
 
-                                # Skip duplicate compatibility-alias columns holding identical text on the same row
-                                prim_low = _COMPAT_ALIAS_PRIMARY.get(s_col.lower())
-                                if prim_low and prim_low in col_lookup_low:
-                                    prim_col = col_lookup_low[prim_low]
-                                    if prim_col in col_idx_map:
-                                        prim_val = str(r_tuple[col_idx_map[prim_col]] or "")
-                                        if prim_val:
-                                            if prim_val == cell_str:
-                                                continue
-                                            if s_col.lower() == "source_file" and (
-                                                restore_evidence_path(prim_val, case_dir=case_dir, vfs_lookup=vfs_lookup).lower()
-                                                == restore_evidence_path(cell_str, case_dir=case_dir, vfs_lookup=vfs_lookup).lower()
-                                            ):
-                                                continue
-
-                                m = rx_obj.search(cell_str)
-                                if m:
-                                    snippet = _build_centered_snippet(cell_str, m.start(), m.end(), s_col)
-                                    all_emitted_hits.append([
-                                        hit_row_id,
-                                        kw_id_str,
-                                        kw_clean,
-                                        is_rx,
-                                        is_cs,
-                                        art_label,
-                                        tbl,
-                                        s_rid,
-                                        s_col,
-                                        int(m.start()),
-                                        "table",
-                                        snippet,
-                                        s_file,
-                                    ])
-                                    hit_row_id += 1
-                                    hit_counts_by_id[kw_id_str] = hit_counts_by_id.get(kw_id_str, 0) + 1
-                                    row_emitted_any = True
-
-                            if row_emitted_any and tbl == "parsed_text_documents":
-                                canon_doc_low = ""
-                                if s_file:
-                                    s_low = s_file.lower()
-                                    text_doc_covered_paths.add((kw_id_str, s_low))
-                                    if not s_low.startswith(("[staged]", "[vss#", "[carved]")):
-                                        canon_doc_low = _format_vfs_path(s_file).lower()
-                                        text_doc_covered_paths.add((kw_id_str, canon_doc_low))
-                                    else:
-                                        canon_doc_low = s_low
-                                if raw_src:
-                                    raw_src_str = str(raw_src)
-                                    raw_low = raw_src_str.replace("/", "\\").lower()
-                                    text_doc_covered_paths.add((kw_id_str, raw_low))
-                                    if not raw_low.startswith(("[staged]", "[vss#", "[carved]")):
-                                        vfs_norm_low = _format_vfs_path(raw_src_str).lower()
-                                        text_doc_covered_paths.add((kw_id_str, vfs_norm_low))
-                                        if not canon_doc_low:
-                                            canon_doc_low = vfs_norm_low
-                                if row_sha:
-                                    text_doc_covered_hashes.setdefault((kw_id_str, row_sha), set()).add(canon_doc_low)
-                                elif row_fname_low:
-                                    text_doc_unhashed_fnames.add((kw_id_str, row_fname_low))
-                except Exception as scan_err:
-                    print(f"[KeywordScanner] Notice scanning table {tbl}: {scan_err}")
+                        if row_emitted_any and tbl == "parsed_text_documents":
+                            canon_doc_low = ""
+                            if s_file:
+                                s_low = s_file.lower()
+                                text_doc_covered_paths.add((kw_id_str, s_low))
+                                if not s_low.startswith(("[staged]", "[vss#", "[carved]")):
+                                    canon_doc_low = _format_vfs_path(s_file).lower()
+                                    text_doc_covered_paths.add((kw_id_str, canon_doc_low))
+                                else:
+                                    canon_doc_low = s_low
+                            if raw_src:
+                                raw_src_str = str(raw_src)
+                                raw_low = raw_src_str.replace("/", "\\").lower()
+                                text_doc_covered_paths.add((kw_id_str, raw_low))
+                                if not raw_low.startswith(("[staged]", "[vss#", "[carved]")):
+                                    vfs_norm_low = _format_vfs_path(raw_src_str).lower()
+                                    text_doc_covered_paths.add((kw_id_str, vfs_norm_low))
+                                    if not canon_doc_low:
+                                        canon_doc_low = vfs_norm_low
+                            if row_sha:
+                                text_doc_covered_hashes.setdefault((kw_id_str, row_sha), set()).add(canon_doc_low)
+                            elif row_fname_low:
+                                text_doc_unhashed_fnames.add((kw_id_str, row_fname_low))
+            except Exception as scan_err:
+                print(f"[KeywordScanner] Notice scanning table {tbl}: {scan_err}")
 
         # 5. Multi-threaded Raw Staged & Carved File Scan (outside per-case DB lock, inside per-case scan lock!)
         raw_file_hits: List[Dict[str, Any]] = []
@@ -1711,165 +1799,178 @@ def scan_keywords_for_case(
                 print(f"[KeywordScanner] Notice collecting raw staged files: {raw_scan_err}")
 
         # 6. Atomically replace parsed_keyword_hits & update exact hit_count under case lock
-        with DuckDBManager.get_lock(case_id):
-            if conn is None:
-                conn = DuckDBManager.get_connection(case_id, read_only=False)
-            cursor = conn.cursor()
+        for _kw_db_attempt in range(4):
+            try:
+                with DuckDBManager.get_lock(case_id):
+                    write_conn = conn if conn is not None else DuckDBManager.get_connection(case_id, read_only=False)
+                    cursor = write_conn.cursor()
 
-            seen_raw_path_offsets: Set[Tuple[str, str, int]] = set()
-            seen_raw_hash_paths: Dict[Tuple[str, str, str, int], Set[str]] = {}
+                    seen_raw_path_offsets: Set[Tuple[str, str, int]] = set()
+                    seen_raw_hash_paths: Dict[Tuple[str, str, str, int], Set[str]] = {}
+                    final_emitted_hits = list(all_emitted_hits)
+                    final_hit_counts = dict(hit_counts_by_id)
+                    final_hit_row_id = hit_row_id
 
-            for rh in raw_file_hits:
-                kw_id_str = rh["keyword_id"]
-                src_low = str(rh["source_file"] or "").lower()
-                m_off = int(rh["match_offset"])
-                f_sha = str(rh.get("_sha256") or "")
-                f_name_low = str(rh.get("_fname_low") or "")
+                    for rh in raw_file_hits:
+                        kw_id_str = rh["keyword_id"]
+                        src_low = str(rh["source_file"] or "").lower()
+                        m_off = int(rh["match_offset"])
+                        f_sha = str(rh.get("_sha256") or "")
+                        f_name_low = str(rh.get("_fname_low") or "")
 
-                # Deduplicate against SQL parsed_text_documents hits on the exact same evidence file
-                if rh["source_table"] == "raw_staged_file":
-                    if src_low and (kw_id_str, src_low) in text_doc_covered_paths:
-                        continue
-                    if f_sha and (kw_id_str, f_sha) in text_doc_covered_hashes:
-                        covered_paths = text_doc_covered_hashes[(kw_id_str, f_sha)]
-                        if src_low.startswith("[vss#"):
-                            if src_low in covered_paths:
+                        # Deduplicate against SQL parsed_text_documents hits on the exact same evidence file
+                        if rh["source_table"] == "raw_staged_file":
+                            if src_low and (kw_id_str, src_low) in text_doc_covered_paths:
                                 continue
-                        elif _has_real_win_subdir(src_low):
-                            if src_low in covered_paths or not any(_has_real_win_subdir(cp) for cp in covered_paths if cp):
+                            if f_sha and (kw_id_str, f_sha) in text_doc_covered_hashes:
+                                covered_paths = text_doc_covered_hashes[(kw_id_str, f_sha)]
+                                if src_low.startswith("[vss#"):
+                                    if src_low in covered_paths:
+                                        continue
+                                elif _has_real_win_subdir(src_low):
+                                    if src_low in covered_paths or not any(_has_real_win_subdir(cp) for cp in covered_paths if cp):
+                                        continue
+                                else:
+                                    # Flat staging copy ([STAGED] Documents\... or root C:\<file>) matching SHA-256 of an active text doc
+                                    continue
+                            if (
+                                f_name_low
+                                and (kw_id_str, f_name_low) in text_doc_unhashed_fnames
+                                and not src_low.startswith("[vss#")
+                                and not _has_real_win_subdir(src_low)
+                            ):
                                 continue
-                        else:
-                            # Flat staging copy ([STAGED] Documents\... or root C:\<file>) matching SHA-256 of an active text doc
+
+                        # Deduplicate identical raw file hits across duplicate staging copies (Enrichment vs flat Documents)
+                        po_key = (kw_id_str, src_low, m_off)
+                        if po_key in seen_raw_path_offsets:
                             continue
-                    if (
-                        f_name_low
-                        and (kw_id_str, f_name_low) in text_doc_unhashed_fnames
-                        and not src_low.startswith("[vss#")
-                        and not _has_real_win_subdir(src_low)
-                    ):
-                        continue
+                        if rh["source_table"] == "raw_staged_file" and f_sha:
+                            ho_key = (kw_id_str, f_sha, f_name_low, m_off)
+                            prev_paths = seen_raw_hash_paths.get(ho_key)
+                            if prev_paths and not src_low.startswith("[vss#") and not _has_real_win_subdir(src_low):
+                                continue
+                            seen_raw_hash_paths.setdefault(ho_key, set()).add(src_low)
+                        seen_raw_path_offsets.add(po_key)
 
-                # Deduplicate identical raw file hits across duplicate staging copies (Enrichment vs flat Documents)
-                po_key = (kw_id_str, src_low, m_off)
-                if po_key in seen_raw_path_offsets:
-                    continue
-                if rh["source_table"] == "raw_staged_file" and f_sha:
-                    ho_key = (kw_id_str, f_sha, f_name_low, m_off)
-                    prev_paths = seen_raw_hash_paths.get(ho_key)
-                    if prev_paths and not src_low.startswith("[vss#") and not _has_real_win_subdir(src_low):
-                        continue
-                    seen_raw_hash_paths.setdefault(ho_key, set()).add(src_low)
-                seen_raw_path_offsets.add(po_key)
+                        final_emitted_hits.append([
+                            final_hit_row_id,
+                            kw_id_str,
+                            rh["keyword"],
+                            rh["is_regex"],
+                            rh["is_case_sensitive"],
+                            rh["artifact_name"],
+                            rh["source_table"],
+                            rh["source_row_id"],
+                            rh["matched_column"],
+                            m_off,
+                            rh["encoding"],
+                            rh["matched_snippet"],
+                            rh["source_file"],
+                        ])
+                        final_hit_row_id += 1
+                        final_hit_counts[kw_id_str] = final_hit_counts.get(kw_id_str, 0) + 1
 
-                all_emitted_hits.append([
-                    hit_row_id,
-                    kw_id_str,
-                    rh["keyword"],
-                    rh["is_regex"],
-                    rh["is_case_sensitive"],
-                    rh["artifact_name"],
-                    rh["source_table"],
-                    rh["source_row_id"],
-                    rh["matched_column"],
-                    m_off,
-                    rh["encoding"],
-                    rh["matched_snippet"],
-                    rh["source_file"],
-                ])
-                hit_row_id += 1
-                hit_counts_by_id[kw_id_str] = hit_counts_by_id.get(kw_id_str, 0) + 1
+                    cursor.execute("DELETE FROM parsed_keyword_hits;")
 
-            cursor.execute("DELETE FROM parsed_keyword_hits;")
+                    if final_emitted_hits:
+                        inserted_fast = False
+                        if len(final_emitted_hits) >= 250:
+                            try:
+                                import pyarrow as pa
 
-            if all_emitted_hits:
-                inserted_fast = False
-                if len(all_emitted_hits) >= 250:
-                    try:
-                        import pyarrow as pa
+                                pa_hits = pa.table(
+                                    {
+                                        "_row_id": [int(r[0]) for r in final_emitted_hits],
+                                        "keyword_id": [str(r[1]) for r in final_emitted_hits],
+                                        "keyword": [str(r[2]) for r in final_emitted_hits],
+                                        "is_regex": [bool(r[3]) for r in final_emitted_hits],
+                                        "is_case_sensitive": [bool(r[4]) for r in final_emitted_hits],
+                                        "artifact_name": [str(r[5]) for r in final_emitted_hits],
+                                        "source_table": [str(r[6]) for r in final_emitted_hits],
+                                        "source_row_id": [int(r[7]) for r in final_emitted_hits],
+                                        "matched_column": [str(r[8]) for r in final_emitted_hits],
+                                        "match_offset": [int(r[9]) for r in final_emitted_hits],
+                                        "encoding": [str(r[10]) for r in final_emitted_hits],
+                                        "matched_snippet": [str(r[11]) for r in final_emitted_hits],
+                                        "source_file": [str(r[12]) for r in final_emitted_hits],
+                                    }
+                                )
+                                cursor.register("_tmp_kw_hits", pa_hits)
+                                try:
+                                    cursor.execute(
+                                        """
+                                        INSERT INTO parsed_keyword_hits (
+                                            _row_id, keyword_id, keyword, is_regex, is_case_sensitive,
+                                            artifact_name, source_table, source_row_id,
+                                            matched_column, match_offset, encoding,
+                                            matched_snippet, source_file
+                                        )
+                                        SELECT
+                                            _row_id, keyword_id, keyword, is_regex, is_case_sensitive,
+                                            artifact_name, source_table, source_row_id,
+                                            matched_column, match_offset, encoding,
+                                            matched_snippet, source_file
+                                        FROM _tmp_kw_hits;
+                                        """
+                                    )
+                                    inserted_fast = True
+                                finally:
+                                    try:
+                                        cursor.unregister("_tmp_kw_hits")
+                                    except Exception:
+                                        pass
+                            except Exception:
+                                inserted_fast = False
 
-                        pa_hits = pa.table(
-                            {
-                                "_row_id": [int(r[0]) for r in all_emitted_hits],
-                                "keyword_id": [str(r[1]) for r in all_emitted_hits],
-                                "keyword": [str(r[2]) for r in all_emitted_hits],
-                                "is_regex": [bool(r[3]) for r in all_emitted_hits],
-                                "is_case_sensitive": [bool(r[4]) for r in all_emitted_hits],
-                                "artifact_name": [str(r[5]) for r in all_emitted_hits],
-                                "source_table": [str(r[6]) for r in all_emitted_hits],
-                                "source_row_id": [int(r[7]) for r in all_emitted_hits],
-                                "matched_column": [str(r[8]) for r in all_emitted_hits],
-                                "match_offset": [int(r[9]) for r in all_emitted_hits],
-                                "encoding": [str(r[10]) for r in all_emitted_hits],
-                                "matched_snippet": [str(r[11]) for r in all_emitted_hits],
-                                "source_file": [str(r[12]) for r in all_emitted_hits],
-                            }
-                        )
-                        cursor.register("_tmp_kw_hits", pa_hits)
-                        try:
-                            cursor.execute(
+                        if not inserted_fast:
+                            cursor.executemany(
                                 """
                                 INSERT INTO parsed_keyword_hits (
                                     _row_id, keyword_id, keyword, is_regex, is_case_sensitive,
                                     artifact_name, source_table, source_row_id,
                                     matched_column, match_offset, encoding,
                                     matched_snippet, source_file
-                                )
-                                SELECT
-                                    _row_id, keyword_id, keyword, is_regex, is_case_sensitive,
-                                    artifact_name, source_table, source_row_id,
-                                    matched_column, match_offset, encoding,
-                                    matched_snippet, source_file
-                                FROM _tmp_kw_hits;
-                                """
+                                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                                """,
+                                final_emitted_hits,
                             )
-                            inserted_fast = True
-                        finally:
-                            try:
-                                cursor.unregister("_tmp_kw_hits")
-                            except Exception:
-                                pass
-                    except Exception:
-                        inserted_fast = False
 
-                if not inserted_fast:
-                    cursor.executemany(
-                        """
-                        INSERT INTO parsed_keyword_hits (
-                            _row_id, keyword_id, keyword, is_regex, is_case_sensitive,
-                            artifact_name, source_table, source_row_id,
-                            matched_column, match_offset, encoding,
-                            matched_snippet, source_file
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
-                        """,
-                        all_emitted_hits,
-                    )
+                    for kw_id_str, exact_cnt in final_hit_counts.items():
+                        cursor.execute(
+                            "UPDATE case_keywords SET hit_count = ? WHERE keyword_id = ?;",
+                            [int(exact_cnt), kw_id_str],
+                        )
 
-            for kw_id_str, exact_cnt in hit_counts_by_id.items():
-                cursor.execute(
-                    "UPDATE case_keywords SET hit_count = ? WHERE keyword_id = ?;",
-                    [int(exact_cnt), kw_id_str],
-                )
+                    total_hit_rows = cursor.execute("SELECT COUNT(*) FROM parsed_keyword_hits;").fetchone()[0]
+                    tables_after = {
+                        r[0] for r in cursor.execute(
+                            "SELECT table_name FROM information_schema.tables WHERE table_schema = 'main';"
+                        ).fetchall()
+                    }
+                    if "artifact_registry" in tables_after:
+                        cursor.execute(
+                            """
+                            INSERT INTO artifact_registry (
+                                artifact_id, category, display_name, table_name, source_tool, row_count, last_updated
+                            ) VALUES ('keyword_hits', 'REFINED RESULTS', 'Keyword Hits', 'view_keyword_hits', 'KeywordScanner', ?, now())
+                            ON CONFLICT (artifact_id) DO UPDATE SET
+                                category = 'REFINED RESULTS',
+                                display_name = 'Keyword Hits',
+                                table_name = 'view_keyword_hits',
+                                row_count = EXCLUDED.row_count,
+                                last_updated = now();
+                            """,
+                            [int(total_hit_rows)],
+                        )
 
-            total_hit_rows = cursor.execute("SELECT COUNT(*) FROM parsed_keyword_hits;").fetchone()[0]
-            tables_after = {
-                r[0] for r in cursor.execute(
-                    "SELECT table_name FROM information_schema.tables WHERE table_schema = 'main';"
-                ).fetchall()
-            }
-            if "artifact_registry" in tables_after:
-                cursor.execute(
-                    """
-                    INSERT INTO artifact_registry (
-                        artifact_id, category, display_name, table_name, source_tool, row_count, last_updated
-                    ) VALUES ('keyword_hits', 'REFINED RESULTS', 'Keyword Hits', 'view_keyword_hits', 'KeywordScanner', ?, now())
-                    ON CONFLICT (artifact_id) DO UPDATE SET
-                        category = 'REFINED RESULTS',
-                        display_name = 'Keyword Hits',
-                        table_name = 'view_keyword_hits',
-                        row_count = EXCLUDED.row_count,
-                        last_updated = now();
-                    """,
-                    [int(total_hit_rows)],
-                )
-
-            return int(total_hit_rows)
+                    return int(total_hit_rows)
+            except Exception as kw_db_exc:
+                err_low = str(kw_db_exc).lower()
+                if _kw_db_attempt < 3 and conn is None and any(
+                    tok in err_low
+                    for tok in ("transactioncontext", "failed to commit", "device is not ready", "could not flush")
+                ):
+                    time.sleep(0.5 * (_kw_db_attempt + 1))
+                    continue
+                raise

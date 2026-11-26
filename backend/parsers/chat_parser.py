@@ -1529,30 +1529,41 @@ class ChatParser(BaseParser):
         candidate_chat_sqlite: List[Path] = []
         candidate_wpn_dbs: List[Path] = []
 
+        self._get_vfs_staged_cache()
+        _SKIP_CHAT_ROOTS = {
+            "registry", "logs", "prefetch", "filesystem", "mft", "srum",
+            "jumplists", "tasks", "powershell", "rmm", "carved_thumbnails",
+            "zoneidentifier", "recyclebin", "wbem", "wer", "wlan", "usb",
+        }
         if self.staging_dir.exists():
-            for p in self.staging_dir.rglob("*"):
-                name_lower = p.name.lower()
-                if any(name_lower.endswith(sfx) for sfx in ("-wal", "-shm", "-journal")):
-                    continue
-                suffix_lower = p.suffix.lower()
-                is_wpn_cand = "wpndatabase" in name_lower and (suffix_lower in (".db", "") or "wpndatabase.db" in name_lower)
-                is_ldb_cand = suffix_lower in (".ldb", ".log", ".sst") and name_lower not in ("log", "log.old")
-                is_sql_cand = suffix_lower in (".sqlite", ".sqlite3", ".db")
-                if not (is_wpn_cand or is_ldb_cand or is_sql_cand):
-                    continue
-                if not p.is_file():
-                    continue
-                try:
-                    path_lower = p.relative_to(self.staging_dir).as_posix().lower()
-                except ValueError:
-                    path_lower = str(p).replace("\\", "/").lower()
+            staging_res = self.staging_dir.resolve()
+            for walk_root, dirs, files in os.walk(staging_res):
+                root_p = Path(walk_root)
+                if root_p == staging_res:
+                    dirs[:] = [d for d in dirs if d.lower() not in _SKIP_CHAT_ROOTS]
+                for fname in files:
+                    name_lower = fname.lower()
+                    if any(name_lower.endswith(sfx) for sfx in ("-wal", "-shm", "-journal")):
+                        continue
+                    dot_idx = name_lower.rfind(".")
+                    suffix_lower = name_lower[dot_idx:] if dot_idx != -1 else ""
+                    is_wpn_cand = "wpndatabase" in name_lower and (suffix_lower in (".db", "") or "wpndatabase.db" in name_lower)
+                    is_ldb_cand = suffix_lower in (".ldb", ".log", ".sst") and name_lower not in ("log", "log.old")
+                    is_sql_cand = suffix_lower in (".sqlite", ".sqlite3", ".db")
+                    if not (is_wpn_cand or is_ldb_cand or is_sql_cand):
+                        continue
+                    p = root_p / fname
+                    try:
+                        path_lower = p.relative_to(staging_res).as_posix().lower()
+                    except ValueError:
+                        path_lower = str(p).replace("\\", "/").lower()
 
-                if is_wpn_cand:
-                    candidate_wpn_dbs.append(p)
-                elif is_ldb_cand and any(k in path_lower for k in _CHAT_PATH_KEYWORDS):
-                    candidate_leveldb.append(p)
-                elif is_sql_cand and any(k in path_lower for k in _CHAT_PATH_KEYWORDS):
-                    candidate_chat_sqlite.append(p)
+                    if is_wpn_cand:
+                        candidate_wpn_dbs.append(p)
+                    elif is_ldb_cand and any(k in path_lower for k in _CHAT_PATH_KEYWORDS):
+                        candidate_leveldb.append(p)
+                    elif is_sql_cand and any(k in path_lower for k in _CHAT_PATH_KEYWORDS):
+                        candidate_chat_sqlite.append(p)
 
         # Sort WPN copies so Notifications/<User>/wpndatabase.db is preferred over flat SQLite/wpndatabase.db
         candidate_wpn_dbs.sort(key=lambda p: (1 if "/sqlite/" in str(p).lower().replace("\\", "/") else 0, str(p)))
